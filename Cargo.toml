@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "torrentfs",
+    "torrentfs-fuse",
+    "torrentfs-libtorrent",
+]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Multica Team"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = ""
+description = "TorrentFS - A FUSE filesystem for BitTorrent"
+
+[workspace.dependencies]
+anyhow = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tokio = { version = "1.0", features = ["full"] }
+fuser = "0.15"
+libtorrent = "0.1.1"
+clap = { version = "4.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }

@@ -1,0 +1,22 @@
+[package]
+name = "torrentfs-fuse"
+version = "0.1.0"
+authors = ["Multica Team"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "FUSE filesystem implementation for TorrentFS"
+repository = ""
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+fuser.workspace = true
+libc = "0.2"
+clap.workspace = true
+torrentfs = { path = "../torrentfs", version = "0.1.0" }
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile = "3.10"
