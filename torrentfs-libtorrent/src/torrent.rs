@@ -10,6 +10,12 @@ pub struct FileEntry {
     pub path: String,
     /// File size in bytes
     pub size: u64,
+    /// Byte offset of this file within the torrent
+    pub offset: u64,
+    /// Index of the first piece that contains data from this file
+    pub first_piece: u32,
+    /// Index of the last piece that contains data from this file
+    pub last_piece: u32,
 }
 
 /// Torrent information extracted from a .torrent file.
@@ -21,6 +27,8 @@ pub struct TorrentInfo {
     pub info_hash: String,
     /// Total size in bytes
     pub total_size: u64,
+    /// Number of bytes per piece
+    pub piece_size: u32,
     /// Number of files in the torrent
     pub file_count: u32,
     /// List of files in the torrent
@@ -65,6 +73,8 @@ impl TorrentInfo {
             bail!("Invalid info hash length: expected 40 hex characters, got {}", info_hash.len());
         }
 
+        let piece_size = ffi_info.piece_size;
+
         // Extract file list
         let mut files = Vec::new();
         if !ffi_info.files.is_null() && ffi_info.file_count > 0 {
@@ -84,6 +94,9 @@ impl TorrentInfo {
                 files.push(FileEntry {
                     path,
                     size: file_entry.size,
+                    offset: file_entry.offset,
+                    first_piece: file_entry.first_piece,
+                    last_piece: file_entry.last_piece,
                 });
             }
         }
@@ -92,6 +105,7 @@ impl TorrentInfo {
             name,
             info_hash,
             total_size: ffi_info.total_size,
+            piece_size,
             file_count: ffi_info.file_count,
             files,
         })
@@ -158,7 +172,7 @@ mod tests {
 
     fn test_torrent_dir() -> std::path::PathBuf {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        manifest_dir.join("../") // torrentfs-libtorrent/../ = repo root
+        manifest_dir.join("../test_data") // torrentfs-libtorrent/../test_data
     }
 
     fn first_torrent_file() -> Option<std::path::PathBuf> {
@@ -249,13 +263,35 @@ mod tests {
         assert_eq!(info.file_count as usize, info.files.len());
         assert_eq!(info.file_count as usize, files_from_method.len());
         
+        // Verify piece_size is positive
+        assert!(info.piece_size > 0, "Piece size should be positive");
+
         // Check that files have valid data
         for (i, file) in info.files.iter().enumerate() {
             assert!(!file.path.is_empty(), "File {} should have a non-empty path", i);
             assert!(file.size > 0, "File {} should have a positive size", i);
+
+            // first_piece should be <= last_piece
+            assert!(file.first_piece <= file.last_piece,
+                "File {}: first_piece ({}) should be <= last_piece ({})", i, file.first_piece, file.last_piece);
+
+            // Verify piece range is consistent with offset and size
+            let piece_len = info.piece_size as u64;
+            let expected_first = file.offset / piece_len;
+            assert_eq!(file.first_piece as u64, expected_first,
+                "File {}: first_piece mismatch", i);
+
+            let expected_last = if file.size > 0 {
+                (file.offset + file.size - 1) / piece_len
+            } else {
+                expected_first
+            };
+            assert_eq!(file.last_piece as u64, expected_last,
+                "File {}: last_piece mismatch", i);
             
             // Check that file path is properly formatted (may contain subdirectories)
-            println!("File {}: {} ({} bytes)", i, file.path, file.size);
+            println!("File {}: {} ({} bytes, offset={}, pieces={}-{})",
+                i, file.path, file.size, file.offset, file.first_piece, file.last_piece);
         }
         
         println!("File list test passed!");

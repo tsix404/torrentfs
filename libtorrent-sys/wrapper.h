@@ -19,8 +19,11 @@ typedef enum {
 
 // File entry structure
 typedef struct {
-    char* path;     // Full file path (including subdirectories)
-    uint64_t size;  // File size in bytes
+    char* path;        // Full file path (including subdirectories)
+    uint64_t size;     // File size in bytes
+    uint64_t offset;   // Byte offset of this file within the torrent
+    uint32_t first_piece;  // First piece index containing this file
+    uint32_t last_piece;   // Last piece index containing this file
 } libtorrent_file_entry_t;
 
 // Torrent info structure
@@ -28,6 +31,7 @@ typedef struct {
     char* name;
     char* info_hash_hex;  // 40 characters for SHA1 hex + null terminator
     uint64_t total_size;
+    uint32_t piece_size;  // Number of bytes per piece
     uint32_t file_count;
     libtorrent_file_entry_t* files;  // Array of file entries
     libtorrent_error_t error_code;

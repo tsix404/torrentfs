@@ -5,7 +5,7 @@ use crate::database::Database;
 use crate::repo::TorrentRepo;
 
 pub struct MetadataManager {
-    repo: TorrentRepo,
+    pub(crate) repo: TorrentRepo,
 }
 
 #[derive(Debug, Clone)]
@@ -21,6 +21,8 @@ pub struct ParsedTorrent {
 pub struct FileEntry {
     pub path: String,
     pub size: i64,
+    pub first_piece: i64,
+    pub last_piece: i64,
 }
 
 impl MetadataManager {
@@ -39,6 +41,8 @@ impl MetadataManager {
         let files: Vec<FileEntry> = info.files.iter().map(|f| FileEntry {
             path: f.path.clone(),
             size: f.size as i64,
+            first_piece: f.first_piece as i64,
+            last_piece: f.last_piece as i64,
         }).collect();
 
         Ok(ParsedTorrent {
@@ -57,6 +61,8 @@ impl MetadataManager {
                 torrent_id: 0,
                 path: f.path.clone(),
                 size: f.size,
+                first_piece: f.first_piece,
+                last_piece: f.last_piece,
             }
         }).collect();
 
@@ -85,7 +91,7 @@ mod tests {
 
     fn test_torrent_dir() -> std::path::PathBuf {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        manifest_dir.join("../")
+        manifest_dir.join("../test_data")
     }
 
     fn first_torrent_file() -> Option<std::path::PathBuf> {
@@ -127,5 +133,35 @@ mod tests {
 
         let parsed = manager.process_torrent_data(&data).await.unwrap();
         manager.persist_to_db(&parsed).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_persist_includes_piece_range() {
+        let test_file = first_torrent_file().expect("No .torrent file found in repo root");
+        let data = std::fs::read(&test_file).expect("Failed to read test torrent file");
+
+        let db = Database::new().await.unwrap();
+        db.migrate().await.unwrap();
+        let manager = MetadataManager::new(Arc::new(db)).unwrap();
+
+        let parsed = manager.process_torrent_data(&data).await.unwrap();
+        manager.persist_to_db(&parsed).await.unwrap();
+
+        // Re-read from DB and verify piece ranges
+        let torrent = manager.repo.find_by_info_hash(&parsed.info_hash).await.unwrap().unwrap();
+        let db_files = manager.repo.get_files(torrent.id).await.unwrap();
+
+        assert_eq!(db_files.len() as i64, parsed.file_count);
+
+        for (i, db_file) in db_files.iter().enumerate() {
+            let parsed_file = &parsed.files[i];
+            assert_eq!(db_file.path, parsed_file.path);
+            assert_eq!(db_file.size, parsed_file.size);
+            assert_eq!(db_file.first_piece, parsed_file.first_piece);
+            assert_eq!(db_file.last_piece, parsed_file.last_piece);
+            assert!(db_file.first_piece >= 0);
+            assert!(db_file.last_piece >= db_file.first_piece,
+                "File {}: last_piece {} < first_piece {}", i, db_file.last_piece, db_file.first_piece);
+        }
     }
 }

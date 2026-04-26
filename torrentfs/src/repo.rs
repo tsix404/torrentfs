@@ -25,6 +25,8 @@ pub struct FileEntry {
     pub torrent_id: i64,
     pub path: String,
     pub size: i64,
+    pub first_piece: i64,
+    pub last_piece: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -112,11 +114,13 @@ impl TorrentRepo {
     pub async fn insert_files(&self, torrent_id: i64, files: Vec<FileEntry>) -> Result<()> {
         for file in files {
             sqlx::query(
-                "INSERT INTO torrent_files (torrent_id, path, size) VALUES (?, ?, ?)",
+                "INSERT INTO torrent_files (torrent_id, path, size, first_piece, last_piece) VALUES (?, ?, ?, ?, ?)",
             )
             .bind(torrent_id)
             .bind(&file.path)
             .bind(file.size)
+            .bind(file.first_piece)
+            .bind(file.last_piece)
             .execute(&self.pool)
             .await?;
         }
@@ -140,8 +144,8 @@ impl TorrentRepo {
     }
 
     pub async fn get_files(&self, torrent_id: i64) -> Result<Vec<FileEntry>> {
-        let rows = sqlx::query_as::<_, (i64, i64, String, i64)>(
-            "SELECT id, torrent_id, path, size FROM torrent_files WHERE torrent_id = ? ORDER BY id",
+        let rows = sqlx::query_as::<_, (i64, i64, String, i64, i64, i64)>(
+            "SELECT id, torrent_id, path, size, first_piece, last_piece FROM torrent_files WHERE torrent_id = ? ORDER BY id",
         )
         .bind(torrent_id)
         .fetch_all(&self.pool)
@@ -154,6 +158,8 @@ impl TorrentRepo {
                 torrent_id: r.1,
                 path: r.2,
                 size: r.3,
+                first_piece: r.4,
+                last_piece: r.5,
             })
             .collect())
     }
@@ -195,6 +201,8 @@ mod tests {
                 torrent_id INTEGER NOT NULL,
                 path TEXT NOT NULL,
                 size INTEGER NOT NULL,
+                first_piece INTEGER NOT NULL DEFAULT 0,
+                last_piece INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (torrent_id) REFERENCES torrents(id) ON DELETE CASCADE,
                 UNIQUE(torrent_id, path)
             )",
@@ -282,12 +290,16 @@ mod tests {
                 torrent_id: torrent.id,
                 path: "dir/file1.txt".to_string(),
                 size: 1024,
+                first_piece: 0,
+                last_piece: 0,
             },
             FileEntry {
                 id: 0,
                 torrent_id: torrent.id,
                 path: "dir/file2.txt".to_string(),
                 size: 1024,
+                first_piece: 0,
+                last_piece: 0,
             },
         ];
 
@@ -297,8 +309,12 @@ mod tests {
         assert_eq!(retrieved.len(), 2);
         assert_eq!(retrieved[0].path, "dir/file1.txt");
         assert_eq!(retrieved[0].size, 1024);
+        assert_eq!(retrieved[0].first_piece, 0);
+        assert_eq!(retrieved[0].last_piece, 0);
         assert_eq!(retrieved[1].path, "dir/file2.txt");
         assert_eq!(retrieved[1].torrent_id, torrent.id);
+        assert_eq!(retrieved[1].first_piece, 0);
+        assert_eq!(retrieved[1].last_piece, 0);
     }
 
     #[tokio::test]
@@ -343,16 +359,69 @@ mod tests {
                 torrent_id: torrent.id,
                 path: "same.txt".to_string(),
                 size: 50,
+                first_piece: 0,
+                last_piece: 0,
             },
             FileEntry {
                 id: 0,
                 torrent_id: torrent.id,
                 path: "same.txt".to_string(),
                 size: 50,
+                first_piece: 0,
+                last_piece: 0,
             },
         ];
 
         let result = repo.insert_files(torrent.id, files).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_insert_and_get_files_with_piece_range() {
+        let (_temp_dir, pool) = setup_test_db().await;
+        let repo = TorrentRepo::new(pool);
+
+        let torrent = repo
+            .insert(&vec![1u8; 20], "test.torrent", 4096, 3)
+            .await
+            .unwrap();
+
+        let files = vec![
+            FileEntry {
+                id: 0,
+                torrent_id: torrent.id,
+                path: "a.txt".to_string(),
+                size: 1024,
+                first_piece: 0,
+                last_piece: 1,
+            },
+            FileEntry {
+                id: 0,
+                torrent_id: torrent.id,
+                path: "b.txt".to_string(),
+                size: 2048,
+                first_piece: 1,
+                last_piece: 3,
+            },
+            FileEntry {
+                id: 0,
+                torrent_id: torrent.id,
+                path: "c.txt".to_string(),
+                size: 0,
+                first_piece: 4,
+                last_piece: 4,
+            },
+        ];
+
+        repo.insert_files(torrent.id, files).await.unwrap();
+
+        let retrieved = repo.get_files(torrent.id).await.unwrap();
+        assert_eq!(retrieved.len(), 3);
+        assert_eq!(retrieved[0].first_piece, 0);
+        assert_eq!(retrieved[0].last_piece, 1);
+        assert_eq!(retrieved[1].first_piece, 1);
+        assert_eq!(retrieved[1].last_piece, 3);
+        assert_eq!(retrieved[2].first_piece, 4);
+        assert_eq!(retrieved[2].last_piece, 4);
     }
 }

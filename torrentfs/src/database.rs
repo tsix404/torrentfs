@@ -59,15 +59,15 @@ impl Database {
         .await
         .context("Failed to create migrations table")?;
         
-        // Check if migration has already been applied
-        let migration_applied: Option<i64> = sqlx::query_scalar(
+        // Check if migration v1 has already been applied
+        let v1_applied: Option<i64> = sqlx::query_scalar(
             "SELECT version FROM _sqlx_migrations WHERE version = 1 AND success = true"
         )
         .fetch_optional(self.pool())
         .await
-        .context("Failed to check migration status")?;
+        .context("Failed to check migration v1 status")?;
         
-        if migration_applied.is_none() {
+        if v1_applied.is_none() {
             // Apply initial migration
             println!("Applying initial migration...");
             
@@ -94,6 +94,8 @@ impl Database {
                     torrent_id INTEGER NOT NULL,
                     path TEXT NOT NULL,
                     size INTEGER NOT NULL,
+                    first_piece INTEGER NOT NULL DEFAULT 0,
+                    last_piece INTEGER NOT NULL DEFAULT 0,
                     FOREIGN KEY (torrent_id) REFERENCES torrents(id) ON DELETE CASCADE,
                     UNIQUE(torrent_id, path)
                 )"
@@ -135,7 +137,7 @@ impl Database {
             
             println!("Initial migration applied successfully.");
         } else {
-            println!("Migration already applied.");
+            println!("Migration v1 already applied.");
         }
         
         Ok(())

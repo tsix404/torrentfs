@@ -39,6 +39,8 @@ async fn main() -> Result<()> {
             torrent_id: 0,
             path: f.path.clone(),
             size: f.size as i64,
+            first_piece: f.first_piece as i64,
+            last_piece: f.last_piece as i64,
         })
         .collect();
 
@@ -63,11 +65,13 @@ fn print_metadata(info: &torrent::TorrentInfo) {
     println!("Name: {}", info.name);
     println!("Info hash: {}", info.info_hash);
     println!("Total size: {} bytes", info.total_size);
+    println!("Piece size: {} bytes", info.piece_size);
     println!("File count: {}", info.file_count);
     println!("\nFile list:");
 
     for (i, file) in info.files.iter().enumerate() {
-        println!("  {}. {} ({} bytes)", i + 1, file.path, file.size);
+        println!("  {}. {} ({} bytes, offset={}, pieces={}-{})",
+            i + 1, file.path, file.size, file.offset, file.first_piece, file.last_piece);
     }
 }
 
@@ -126,6 +130,8 @@ mod tests {
             torrent_id: 0,
             path: "dir/file1.txt".to_string(),
             size: 1024,
+            first_piece: 0,
+            last_piece: 0,
         }];
 
         let result = repo

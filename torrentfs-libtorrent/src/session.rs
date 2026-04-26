@@ -76,7 +76,7 @@ mod tests {
 
     fn session_test_torrent_dir() -> std::path::PathBuf {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        manifest_dir.join("../") // torrentfs-libtorrent/../ = repo root
+        manifest_dir.join("../test_data") // torrentfs-libtorrent/../test_data
     }
 
     fn first_torrent_file_session() -> Option<std::path::PathBuf> {

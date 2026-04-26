@@ -54,25 +54,46 @@ libtorrent_torrent_info_t* libtorrent_parse_torrent(const uint8_t* data, size_t 
         // Get total size
         info->total_size = ti.total_size();
         
+        // Get piece size
+        info->piece_size = ti.files().piece_length();
+        
         // Get file count
         info->file_count = ti.files().num_files();
         
         // Get file list
         if (info->file_count > 0) {
+            const auto& fs = ti.files();
+            uint32_t piece_len = fs.piece_length();
+
             info->files = static_cast<libtorrent_file_entry_t*>(malloc(info->file_count * sizeof(libtorrent_file_entry_t)));
             if (!info->files) {
                 throw std::bad_alloc();
             }
             memset(info->files, 0, info->file_count * sizeof(libtorrent_file_entry_t));
             
-            const auto& files = ti.files();
             for (uint32_t i = 0; i < info->file_count; i++) {
                 // Get file path
-                std::string file_path = files.file_path(i);
+                std::string file_path = fs.file_path(i);
                 info->files[i].path = strdup(file_path.c_str());
                 
                 // Get file size
-                info->files[i].size = files.file_size(i);
+                info->files[i].size = fs.file_size(i);
+                
+                // Get file offset within the torrent
+                info->files[i].offset = fs.file_offset(i);
+                
+                // Compute piece range from offset and size
+                uint64_t off = fs.file_offset(i);
+                uint64_t sz = fs.file_size(i);
+                if (piece_len > 0) {
+                    info->files[i].first_piece = static_cast<uint32_t>(off / piece_len);
+                    info->files[i].last_piece = (sz > 0)
+                        ? static_cast<uint32_t>((off + sz - 1) / piece_len)
+                        : info->files[i].first_piece;
+                } else {
+                    info->files[i].first_piece = 0;
+                    info->files[i].last_piece = 0;
+                }
             }
         } else {
             info->files = nullptr;
