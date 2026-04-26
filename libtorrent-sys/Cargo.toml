@@ -1,0 +1,25 @@
+[package]
+name = "libtorrent-sys"
+version = "0.1.0"
+authors = ["Multica Team"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "FFI bindings to libtorrent-rasterbar"
+repository = ""
+publish = false
+links = "torrent"
+build = "build.rs"
+
+[lib]
+name = "libtorrent_sys"
+
+[dependencies]
+libc = "0.2"
+
+[build-dependencies]
+bindgen = "0.69"
+cc = "1.0"
+
+[features]
+default = []
+generate-bindings = []
