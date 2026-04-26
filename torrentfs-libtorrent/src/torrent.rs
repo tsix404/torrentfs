@@ -156,10 +156,26 @@ mod tests {
     use super::*;
     use std::fs;
 
+    fn test_torrent_dir() -> std::path::PathBuf {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir.join("../") // torrentfs-libtorrent/../ = repo root
+    }
+
+    fn first_torrent_file() -> Option<std::path::PathBuf> {
+        let dir = test_torrent_dir();
+        std::fs::read_dir(&dir).ok()?.filter_map(|e| {
+            let e = e.ok()?;
+            if e.file_name().to_string_lossy().ends_with(".torrent") {
+                Some(e.path())
+            } else {
+                None
+            }
+        }).next()
+    }
+
     #[test]
     fn test_parse_valid_torrent() {
-        // Test with the provided torrent file
-        let test_file = "/workspace/torrentfs/77c8dd8e37d712522b49a3f2e62757d90e233c84.torrent";
+        let test_file = first_torrent_file().expect("No .torrent file found in repo root");
         
         // Read the torrent file
         let data = fs::read(test_file).expect("Failed to read test torrent file");
@@ -208,8 +224,7 @@ mod tests {
 
     #[test]
     fn test_file_list_functionality() {
-        // Test with the provided torrent file
-        let test_file = "/workspace/torrentfs/77c8dd8e37d712522b49a3f2e62757d90e233c84.torrent";
+        let test_file = first_torrent_file().expect("No .torrent file found in repo root");
         
         // Read the torrent file
         let data = fs::read(test_file).expect("Failed to read test torrent file");

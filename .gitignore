@@ -20,4 +20,4 @@ Thumbs.db
 *.log
 
 # Cargo lock - we commit it for binaries
-# Cargo.lock
+# Cargo.lock*.torrent

@@ -30,6 +30,6 @@ fn main() -> Result<()> {
         .with_env_filter(args.log_level)
         .init();
     tracing::info!("Mounting torrentfs at {}", args.mount_point);
-    mount::mount(&args.mount_point, &state_dir)?;
+    mount::init_and_mount(&args.mount_point, &state_dir)?;
     Ok(())
 }

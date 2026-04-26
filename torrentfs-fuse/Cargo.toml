@@ -13,11 +13,13 @@ anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tokio.workspace = true
 fuser.workspace = true
 libc = "0.2"
 clap.workspace = true
 dirs.workspace = true
 torrentfs = { path = "../torrentfs", version = "0.1.0" }
+torrentfs-libtorrent = { path = "../torrentfs-libtorrent", version = "0.1.0" }
 
 [dev-dependencies]
 tokio.workspace = true

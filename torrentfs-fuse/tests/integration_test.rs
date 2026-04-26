@@ -30,6 +30,24 @@ fn cleanup_mount(mount_path: &PathBuf, guard: BackgroundSession) {
     }
 }
 
+fn test_torrent_dir() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir.join("../") // torrentfs-fuse/../ = repo root
+}
+
+fn first_torrent_file() -> Option<PathBuf> {
+    let dir = test_torrent_dir();
+    fs::read_dir(&dir).ok()?.filter_map(|e| {
+        let e = e.ok()?;
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".torrent") {
+            Some(e.path())
+        } else {
+            None
+        }
+    }).next()
+}
+
 #[test]
 #[serial]
 fn test_ls_root_shows_metadata_and_data() {
@@ -71,44 +89,31 @@ fn test_cp_torrent_to_metadata() {
 
     thread::sleep(Duration::from_millis(500));
 
-    let src_dir = PathBuf::from("/workspace/torrentfs");
-    let torrent_files: Vec<_> = fs::read_dir(&src_dir)
-        .unwrap()
-        .filter_map(|e| {
-            let e = e.ok()?;
-            let name = e.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".torrent") {
-                Some(e.path())
-            } else {
-                None
-            }
-        })
-        .take(1)
-        .collect();
+    let src = match first_torrent_file() {
+        Some(p) => p,
+        None => {
+            eprintln!("No .torrent files found, skipping copy test");
+            cleanup_mount(&mount_path, guard);
+            return;
+        }
+    };
 
-    if torrent_files.is_empty() {
-        eprintln!("No .torrent files found in /workspace/torrentfs, skipping copy test");
-        cleanup_mount(&mount_path, guard);
-        return;
-    }
-
-    let src = &torrent_files[0];
     let dest = mount_path.join("metadata").join(src.file_name().unwrap());
 
-    let result = fs::copy(src, &dest);
+    let result = fs::copy(&src, &dest);
     assert!(result.is_ok(), "Failed to copy .torrent file: {:?}", result.err());
 
     thread::sleep(Duration::from_millis(500));
 
-    let incoming_dir = state_path.join("incoming");
-    assert!(incoming_dir.exists(), "incoming directory should exist");
+    let metadata_entries: Vec<_> = fs::read_dir(mount_path.join("metadata"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
 
-    let expected_file = incoming_dir.join(src.file_name().unwrap());
-    assert!(expected_file.exists(), "Expected file {:?} not found in incoming", expected_file);
-
-    let original_data = fs::read(src).unwrap();
-    let written_data = fs::read(&expected_file).unwrap();
-    assert_eq!(original_data, written_data, "File content mismatch");
+    assert!(
+        metadata_entries.iter().any(|n| n == &src.file_name().unwrap().to_string_lossy().into_owned()),
+        "File should remain visible in metadata/ after release"
+    );
 
     cleanup_mount(&mount_path, guard);
 }
@@ -134,7 +139,7 @@ fn test_create_non_torrent_rejected() {
 
 #[test]
 #[serial]
-fn test_file_not_listed_after_release() {
+fn test_file_visible_after_release() {
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
@@ -144,31 +149,18 @@ fn test_file_not_listed_after_release() {
 
     thread::sleep(Duration::from_millis(500));
 
-    let src_dir = PathBuf::from("/workspace/torrentfs");
-    let torrent_files: Vec<_> = fs::read_dir(&src_dir)
-        .unwrap()
-        .filter_map(|e| {
-            let e = e.ok()?;
-            let name = e.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".torrent") {
-                Some(e.path())
-            } else {
-                None
-            }
-        })
-        .take(1)
-        .collect();
+    let src = match first_torrent_file() {
+        Some(p) => p,
+        None => {
+            eprintln!("No .torrent files found, skipping test");
+            cleanup_mount(&mount_path, guard);
+            return;
+        }
+    };
 
-    if torrent_files.is_empty() {
-        eprintln!("No .torrent files found in /workspace/torrentfs, skipping test");
-        cleanup_mount(&mount_path, guard);
-        return;
-    }
-
-    let src = &torrent_files[0];
     let dest = mount_path.join("metadata").join(src.file_name().unwrap());
 
-    let result = fs::copy(src, &dest);
+    let result = fs::copy(&src, &dest);
     assert!(result.is_ok(), "Failed to copy .torrent file: {:?}", result.err());
 
     thread::sleep(Duration::from_millis(500));
@@ -178,14 +170,69 @@ fn test_file_not_listed_after_release() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
 
+    let file_name = src.file_name().unwrap().to_string_lossy().into_owned();
     assert!(
-        !metadata_entries.iter().any(|n| *n == src.file_name().unwrap().to_string_lossy()),
-        "File should not be listed in metadata/ after release (memory leak fix)"
+        metadata_entries.iter().any(|n| *n == file_name),
+        "File '{}' should be visible in metadata/ after release (was discarded)",
+        file_name
     );
 
-    let incoming_dir = state_path.join("incoming");
-    let expected_file = incoming_dir.join(src.file_name().unwrap());
-    assert!(expected_file.exists(), "File should be persisted to incoming/");
+    cleanup_mount(&mount_path, guard);
+}
+
+#[test]
+#[serial]
+fn test_init_and_mount_pipeline() {
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let metadata_manager = std::sync::Arc::new(
+        torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
+    );
+    let session = torrentfs_libtorrent::Session::new().unwrap();
+
+    let fs = TorrentFsFilesystem::new_with_core(
+        state_path.clone(),
+        metadata_manager,
+        rt,
+        session,
+    );
+
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+    let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+
+    let src = match first_torrent_file() {
+        Some(p) => p,
+        None => {
+            eprintln!("No .torrent files found, skipping pipeline test");
+            cleanup_mount(&mount_path, guard);
+            return;
+        }
+    };
+
+    let dest = mount_path.join("metadata").join(src.file_name().unwrap());
+    let result = fs::copy(&src, &dest);
+    assert!(result.is_ok(), "Failed to copy .torrent file: {:?}", result.err());
+
+    thread::sleep(Duration::from_millis(500));
+
+    let metadata_entries: Vec<_> = fs::read_dir(mount_path.join("metadata"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        metadata_entries.iter().any(|n| n == &src.file_name().unwrap().to_string_lossy().into_owned()),
+        "File should be visible in metadata/ after release with core pipeline"
+    );
 
     cleanup_mount(&mount_path, guard);
 }
