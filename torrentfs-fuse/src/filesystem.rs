@@ -8,6 +8,7 @@ use libc::ENOSYS;
 use std::ffi::OsStr;
 use std::time::{Duration, UNIX_EPOCH};
 
+#[allow(dead_code)]
 const TTL: Duration = Duration::from_secs(1);
 
 pub struct TorrentFsFilesystem;
@@ -66,6 +67,7 @@ impl Filesystem for TorrentFsFilesystem {
     }
 }
 
+#[allow(dead_code)]
 fn dummy_attr(ino: u64) -> FileAttr {
     FileAttr {
         ino,

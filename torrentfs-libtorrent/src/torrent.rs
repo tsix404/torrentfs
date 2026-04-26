@@ -1,9 +1,14 @@
 //! Torrent handle wrapper.
 
+use anyhow::Result;
+
+/// Wrapper for a libtorrent torrent handle.
+#[derive(Debug)]
 pub struct TorrentHandle;
 
 impl TorrentHandle {
-    pub fn new() -> Self {
-        Self
+    /// Creates a new torrent handle.
+    pub fn new() -> Result<Self> {
+        Ok(Self)
     }
 }

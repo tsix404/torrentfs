@@ -1,9 +1,14 @@
 //! Metadata management.
 
+use anyhow::Result;
+
+/// Manages torrent metadata.
+#[derive(Debug)]
 pub struct MetadataManager;
 
 impl MetadataManager {
-    pub fn new() -> Self {
-        Self
+    /// Creates a new metadata manager.
+    pub fn new() -> Result<Self> {
+        Ok(Self)
     }
 }
