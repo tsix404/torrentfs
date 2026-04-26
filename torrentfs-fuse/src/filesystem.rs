@@ -165,6 +165,10 @@ impl Filesystem for TorrentFsFilesystem {
     ) {
         if let Some(entry) = self.metadata_entries.get_mut(&ino) {
             if let Some(new_size) = size {
+                if new_size > usize::MAX as u64 {
+                    reply.error(EFBIG);
+                    return;
+                }
                 let new_size_usize = new_size as usize;
                 if new_size_usize > MAX_FILE_SIZE {
                     reply.error(EFBIG);
@@ -263,6 +267,13 @@ impl Filesystem for TorrentFsFilesystem {
 
         let name_owned = name_str.into_owned();
 
+        for entry in self.metadata_entries.values() {
+            if entry.name == name_owned {
+                reply.error(libc::EEXIST);
+                return;
+            }
+        }
+
         let ino = self.allocate_ino();
         let fh = self.allocate_fh();
 
@@ -299,8 +310,19 @@ impl Filesystem for TorrentFsFilesystem {
             }
         };
 
+        if offset < 0 {
+            reply.error(EINVAL);
+            return;
+        }
         let offset = offset as usize;
-        if offset + data.len() > MAX_FILE_SIZE {
+        let write_end = match offset.checked_add(data.len()) {
+            Some(end) => end,
+            None => {
+                reply.error(EFBIG);
+                return;
+            }
+        };
+        if write_end > MAX_FILE_SIZE {
             reply.error(EFBIG);
             return;
         }
@@ -499,5 +521,29 @@ mod tests {
         assert!(!fs.metadata_entries.contains_key(&ino), "metadata_entries should be cleaned up after release");
         assert!(!fs.open_files.contains_key(&fh), "open_files should be cleaned up after release");
         assert!(state_dir.path().join("incoming/cleanup.torrent").exists(), "file should be persisted to incoming");
+    }
+
+    #[test]
+    fn test_create_duplicate_torrent_rejected() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let mut fs = TorrentFsFilesystem::new(state_dir.path().to_path_buf());
+
+        let ino = fs.allocate_ino();
+        let fh = fs.allocate_fh();
+        fs.metadata_entries.insert(ino, MetadataEntry {
+            name: "dup.torrent".to_string(),
+            size: 0,
+        });
+        fs.open_files.insert(fh, OpenFile {
+            name: "dup.torrent".to_string(),
+            data: Vec::new(),
+        });
+
+        for entry in fs.metadata_entries.values() {
+            if entry.name == "dup.torrent" {
+                return;
+            }
+        }
+        panic!("Duplicate name should have been detected");
     }
 }
