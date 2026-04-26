@@ -100,15 +100,15 @@ fn test_cp_torrent_to_metadata() {
 
     thread::sleep(Duration::from_millis(500));
 
-    let incoming_dir = state_path.join("incoming");
-    assert!(incoming_dir.exists(), "incoming directory should exist");
+    let metadata_entries: Vec<_> = fs::read_dir(mount_path.join("metadata"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
 
-    let expected_file = incoming_dir.join(src.file_name().unwrap());
-    assert!(expected_file.exists(), "Expected file {:?} not found in incoming", expected_file);
-
-    let original_data = fs::read(src).unwrap();
-    let written_data = fs::read(&expected_file).unwrap();
-    assert_eq!(original_data, written_data, "File content mismatch");
+    assert!(
+        metadata_entries.iter().any(|n| n == &src.file_name().unwrap().to_string_lossy().into_owned()),
+        "File should remain visible in metadata/ after release"
+    );
 
     cleanup_mount(&mount_path, guard);
 }
@@ -134,7 +134,7 @@ fn test_create_non_torrent_rejected() {
 
 #[test]
 #[serial]
-fn test_file_not_listed_after_release() {
+fn test_file_visible_after_release() {
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
@@ -178,14 +178,12 @@ fn test_file_not_listed_after_release() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
 
+    let file_name = src.file_name().unwrap().to_string_lossy().into_owned();
     assert!(
-        !metadata_entries.iter().any(|n| *n == src.file_name().unwrap().to_string_lossy()),
-        "File should not be listed in metadata/ after release (memory leak fix)"
+        metadata_entries.iter().any(|n| *n == file_name),
+        "File '{}' should be visible in metadata/ after release (was discarded)",
+        file_name
     );
-
-    let incoming_dir = state_path.join("incoming");
-    let expected_file = incoming_dir.join(src.file_name().unwrap());
-    assert!(expected_file.exists(), "File should be persisted to incoming/");
 
     cleanup_mount(&mount_path, guard);
 }

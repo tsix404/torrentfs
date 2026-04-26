@@ -40,6 +40,24 @@ libtorrent_torrent_info_t* libtorrent_parse_torrent(const uint8_t* data, size_t 
 // Free torrent info
 void libtorrent_free_torrent_info(libtorrent_torrent_info_t* info);
 
+// Opaque session handle
+typedef struct libtorrent_session_t libtorrent_session_t;
+
+// Add torrent params
+typedef struct {
+    const uint8_t* torrent_data;
+    size_t torrent_size;
+} libtorrent_add_torrent_params_t;
+
+// Create a new libtorrent session
+libtorrent_session_t* libtorrent_create_session();
+
+// Add a torrent to the session (paused)
+libtorrent_error_t libtorrent_add_torrent(libtorrent_session_t* session, const libtorrent_add_torrent_params_t* params, char** error_message);
+
+// Destroy a libtorrent session
+void libtorrent_destroy_session(libtorrent_session_t* session);
+
 #ifdef __cplusplus
 }
 #endif

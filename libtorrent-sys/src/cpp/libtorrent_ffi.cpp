@@ -4,11 +4,18 @@
 #include <libtorrent/torrent_info.hpp>
 #include <libtorrent/hex.hpp>
 #include <libtorrent/file_storage.hpp>
+#include <libtorrent/session.hpp>
+#include <libtorrent/add_torrent_params.hpp>
 #include <cstring>
 #include <string>
 #include <vector>
+#include <memory>
 
 extern "C" {
+
+struct libtorrent_session_t {
+    libtorrent::session session;
+};
 
 libtorrent_torrent_info_t* libtorrent_parse_torrent(const uint8_t* data, size_t size) {
     auto* info = new libtorrent_torrent_info_t();
@@ -103,6 +110,79 @@ void libtorrent_free_torrent_info(libtorrent_torrent_info_t* info) {
     if (info->error_message) free(info->error_message);
     
     delete info;
+}
+
+libtorrent_session_t* libtorrent_create_session() {
+    auto* s = new libtorrent_session_t();
+    try {
+        libtorrent::settings_pack pack;
+        pack.set_int(libtorrent::settings_pack::alert_mask, 0);
+        s->session.apply_settings(pack);
+    } catch (...) {
+        delete s;
+        return nullptr;
+    }
+    return s;
+}
+
+libtorrent_error_t libtorrent_add_torrent(
+    libtorrent_session_t* session,
+    const libtorrent_add_torrent_params_t* params,
+    char** error_message)
+{
+    if (!session || !params) {
+        if (error_message) *error_message = strdup("Null pointer");
+        return LIBTORRENT_ERROR_INVALID_DATA;
+    }
+
+    try {
+        libtorrent::error_code ec;
+        libtorrent::span<const char> buf(
+            reinterpret_cast<const char*>(params->torrent_data),
+            params->torrent_size);
+        libtorrent::bdecode_node node = libtorrent::bdecode(buf, ec);
+        if (ec) {
+            if (error_message) *error_message = strdup(ec.message().c_str());
+            return LIBTORRENT_ERROR_PARSE_FAILED;
+        }
+
+        libtorrent::torrent_info ti(node, ec);
+        if (ec) {
+            if (error_message) *error_message = strdup(ec.message().c_str());
+            return LIBTORRENT_ERROR_PARSE_FAILED;
+        }
+
+        libtorrent::add_torrent_params atp;
+        atp.ti = std::make_shared<libtorrent::torrent_info>(ti);
+        atp.save_path = "/tmp/torrentfs";
+        atp.flags &= ~libtorrent::torrent_flags::auto_managed;
+        atp.flags |= libtorrent::torrent_flags::paused;
+        atp.flags |= libtorrent::torrent_flags::upload_mode;
+
+        libtorrent::torrent_handle handle = session->session.add_torrent(atp, ec);
+        if (ec) {
+            if (error_message) *error_message = strdup(ec.message().c_str());
+            return LIBTORRENT_ERROR_PARSE_FAILED;
+        }
+
+        return LIBTORRENT_OK;
+    } catch (const std::exception& e) {
+        if (error_message) *error_message = strdup(e.what());
+        return LIBTORRENT_ERROR_UNKNOWN;
+    } catch (...) {
+        if (error_message) *error_message = strdup("Unknown exception");
+        return LIBTORRENT_ERROR_UNKNOWN;
+    }
+}
+
+void libtorrent_destroy_session(libtorrent_session_t* session) {
+    if (!session) return;
+    try {
+        session->session.abort();
+    } catch (...) {
+        // Ignore abort errors
+    }
+    delete session;
 }
 
 } // extern "C"

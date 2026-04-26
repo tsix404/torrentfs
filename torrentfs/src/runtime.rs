@@ -1,14 +1,16 @@
-//! Torrent runtime management.
-
 use anyhow::Result;
+use std::sync::Arc;
 
-/// Runtime for managing torrent operations.
-#[derive(Debug)]
-pub struct TorrentRuntime;
+use crate::database::Database;
+
+pub struct TorrentRuntime {
+    pub db: Arc<Database>,
+}
 
 impl TorrentRuntime {
-    /// Creates a new torrent runtime.
-    pub fn new() -> Result<Self> {
-        Ok(Self)
+    pub async fn new() -> Result<Self> {
+        let db = Database::new().await?;
+        db.migrate().await?;
+        Ok(Self { db: Arc::new(db) })
     }
 }

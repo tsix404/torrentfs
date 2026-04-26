@@ -7,7 +7,10 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::runtime::Runtime;
+use torrentfs::metadata::MetadataManager;
 
 const TTL: Duration = Duration::from_secs(1);
 const MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
@@ -74,6 +77,8 @@ pub struct TorrentFsFilesystem {
     next_fh: u64,
     open_files: HashMap<u64, OpenFile>,
     metadata_entries: HashMap<u64, MetadataEntry>,
+    metadata_manager: Option<Arc<MetadataManager>>,
+    tokio_runtime: Option<Runtime>,
 }
 
 impl TorrentFsFilesystem {
@@ -84,6 +89,24 @@ impl TorrentFsFilesystem {
             next_fh: 1,
             open_files: HashMap::new(),
             metadata_entries: HashMap::new(),
+            metadata_manager: None,
+            tokio_runtime: None,
+        }
+    }
+
+    pub fn new_with_core(
+        state_dir: PathBuf,
+        metadata_manager: Arc<MetadataManager>,
+        tokio_runtime: Runtime,
+    ) -> Self {
+        Self {
+            state_dir,
+            next_ino: INO_DYNAMIC_START,
+            next_fh: 1,
+            open_files: HashMap::new(),
+            metadata_entries: HashMap::new(),
+            metadata_manager: Some(metadata_manager),
+            tokio_runtime: Some(tokio_runtime),
         }
     }
 
@@ -348,7 +371,7 @@ impl Filesystem for TorrentFsFilesystem {
     fn release(
         &mut self,
         _req: &Request<'_>,
-        ino: u64,
+        _ino: u64,
         fh: u64,
         _flags: i32,
         _lock_owner: Option<u64>,
@@ -363,23 +386,59 @@ impl Filesystem for TorrentFsFilesystem {
             }
         };
 
-        let incoming_dir = self.state_dir.join("incoming");
-        if let Err(e) = fs::create_dir_all(&incoming_dir) {
-            tracing::error!("Failed to create incoming directory: {}", e);
-            reply.error(libc::EIO);
-            return;
+        let name = open_file.name.clone();
+        let data = open_file.data.clone();
+
+        if let Some(manager) = &self.metadata_manager {
+            let manager = manager.clone();
+            let rt = self.tokio_runtime.as_ref().unwrap();
+
+            match rt.block_on(manager.process_torrent_data(&data)) {
+                Ok(parsed) => {
+                    if let Err(e) = rt.block_on(manager.persist_to_db(&parsed)) {
+                        tracing::error!("Failed to persist torrent to DB: {}", e);
+                    }
+
+                    match torrentfs_libtorrent::Session::new() {
+                        Ok(session) => {
+                            if let Err(e) = session.add_torrent_paused(&data) {
+                                tracing::error!("Failed to add torrent to session: {}", e);
+                            } else {
+                                tracing::info!("Added torrent '{}' to libtorrent session (paused)", name);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to create libtorrent session: {}", e);
+                        }
+                    }
+
+                    tracing::info!(
+                        "Processed torrent '{}' ({} files, {} bytes) - kept in metadata/",
+                        name, parsed.file_count, parsed.total_size
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("Failed to process torrent data: {}", e);
+                }
+            }
+        } else {
+            let incoming_dir = self.state_dir.join("incoming");
+            if let Err(e) = fs::create_dir_all(&incoming_dir) {
+                tracing::error!("Failed to create incoming directory: {}", e);
+                reply.error(libc::EIO);
+                return;
+            }
+
+            let dest_path = incoming_dir.join(&name);
+            if let Err(e) = fs::write(&dest_path, &data) {
+                tracing::error!("Failed to write torrent file: {}", e);
+                reply.error(libc::EIO);
+                return;
+            }
+
+            tracing::info!("Persisted {} ({} bytes) to {}", name, data.len(), dest_path.display());
         }
 
-        let dest_path = incoming_dir.join(&open_file.name);
-        if let Err(e) = fs::write(&dest_path, &open_file.data) {
-            tracing::error!("Failed to write torrent file: {}", e);
-            reply.error(libc::EIO);
-            return;
-        }
-
-        self.metadata_entries.remove(&ino);
-
-        tracing::info!("Persisted {} ({} bytes) to {}", open_file.name, open_file.data.len(), dest_path.display());
         reply.ok();
     }
 
@@ -493,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn test_release_cleans_up_metadata_entries() {
+    fn test_release_keeps_metadata_entries() {
         let state_dir = tempfile::tempdir().unwrap();
         let mut fs = TorrentFsFilesystem::new(state_dir.path().to_path_buf());
 
@@ -501,26 +560,24 @@ mod tests {
         let fh = fs.allocate_fh();
 
         fs.metadata_entries.insert(ino, MetadataEntry {
-            name: "cleanup.torrent".to_string(),
+            name: "keep.torrent".to_string(),
             size: 5,
         });
         fs.open_files.insert(fh, OpenFile {
-            name: "cleanup.torrent".to_string(),
+            name: "keep.torrent".to_string(),
             data: vec![1u8, 2, 3, 4, 5],
         });
 
         assert!(fs.metadata_entries.contains_key(&ino));
-        assert!(fs.open_files.contains_key(&fh));
 
         let open_file = fs.open_files.remove(&fh).unwrap();
+
         let incoming_dir = state_dir.path().join("incoming");
         std::fs::create_dir_all(&incoming_dir).unwrap();
-        std::fs::write(incoming_dir.join("cleanup.torrent"), &open_file.data).unwrap();
-        fs.metadata_entries.remove(&ino);
+        std::fs::write(incoming_dir.join("keep.torrent"), &open_file.data).unwrap();
 
-        assert!(!fs.metadata_entries.contains_key(&ino), "metadata_entries should be cleaned up after release");
+        assert!(fs.metadata_entries.contains_key(&ino), "metadata_entries should be kept after release");
         assert!(!fs.open_files.contains_key(&fh), "open_files should be cleaned up after release");
-        assert!(state_dir.path().join("incoming/cleanup.torrent").exists(), "file should be persisted to incoming");
     }
 
     #[test]
