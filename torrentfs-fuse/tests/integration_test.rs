@@ -4,18 +4,25 @@ use std::time::Duration;
 use tempfile::TempDir;
 use torrentfs_fuse::TorrentFsFilesystem;
 use fuser::MountOption;
+use std::path::PathBuf;
+
+fn make_fs(state_dir: &PathBuf) -> TorrentFsFilesystem {
+    TorrentFsFilesystem::new(state_dir.clone())
+}
 
 #[test]
 fn test_ls_root_shows_metadata_and_data() {
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
 
     let options = vec![
         MountOption::FSName("torrentfs".to_string()),
         MountOption::AutoUnmount,
     ];
 
-    let fs = TorrentFsFilesystem;
+    let fs = make_fs(&state_path);
     let _guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
 
     thread::sleep(Duration::from_millis(500));
@@ -33,4 +40,82 @@ fn test_ls_root_shows_metadata_and_data() {
     let data_path = mount_path.join("data");
     assert!(metadata_path.is_dir(), "metadata should be a directory");
     assert!(data_path.is_dir(), "data should be a directory");
+}
+
+#[test]
+fn test_cp_torrent_to_metadata() {
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+
+    let fs = make_fs(&state_path);
+    let _guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+
+    let src_dir = PathBuf::from("/workspace/torrentfs");
+    let torrent_files: Vec<_> = fs::read_dir(&src_dir)
+        .unwrap()
+        .filter_map(|e| {
+            let e = e.ok()?;
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".torrent") {
+                Some(e.path())
+            } else {
+                None
+            }
+        })
+        .take(1)
+        .collect();
+
+    if torrent_files.is_empty() {
+        eprintln!("No .torrent files found in /workspace/torrentfs, skipping copy test");
+        return;
+    }
+
+    let src = &torrent_files[0];
+    let dest = mount_path.join("metadata").join(src.file_name().unwrap());
+
+    let result = fs::copy(src, &dest);
+    assert!(result.is_ok(), "Failed to copy .torrent file: {:?}", result.err());
+
+    thread::sleep(Duration::from_millis(500));
+
+    let incoming_dir = state_path.join("incoming");
+    assert!(incoming_dir.exists(), "incoming directory should exist");
+
+    let expected_file = incoming_dir.join(src.file_name().unwrap());
+    assert!(expected_file.exists(), "Expected file {:?} not found in incoming", expected_file);
+
+    let original_data = fs::read(src).unwrap();
+    let written_data = fs::read(&expected_file).unwrap();
+    assert_eq!(original_data, written_data, "File content mismatch");
+}
+
+#[test]
+fn test_create_non_torrent_rejected() {
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+
+    let fs = make_fs(&state_path);
+    let _guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+
+    let dest = mount_path.join("metadata").join("test.txt");
+    let result = fs::write(&dest, b"hello");
+    assert!(result.is_err(), "Writing non-.torrent file should fail");
 }

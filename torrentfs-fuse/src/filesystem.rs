@@ -1,16 +1,21 @@
 use fuser::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, ReplyOpen,
-    ReplyWrite, Request,
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
+    ReplyOpen, ReplyWrite, Request, ReplyCreate,
 };
-use libc::{ENOENT, ENOSYS, ENOTDIR};
+use libc::{EINVAL, ENOENT, ENOSYS, ENOTDIR, EFBIG};
+use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::time::{Duration, UNIX_EPOCH};
+use std::fs;
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TTL: Duration = Duration::from_secs(1);
+const MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
 
 pub const INO_ROOT: u64 = 1;
 pub const INO_METADATA: u64 = 2;
 pub const INO_DATA: u64 = 3;
+const INO_DYNAMIC_START: u64 = 100;
 
 pub fn dir_attr(ino: u64) -> FileAttr {
     FileAttr {
@@ -32,14 +37,74 @@ pub fn dir_attr(ino: u64) -> FileAttr {
     }
 }
 
+fn file_attr(ino: u64, size: u64) -> FileAttr {
+    let now = SystemTime::now();
+    FileAttr {
+        ino,
+        size,
+        blocks: (size + 511) / 512,
+        atime: now,
+        mtime: now,
+        ctime: now,
+        crtime: now,
+        kind: FileType::RegularFile,
+        perm: 0o644,
+        nlink: 1,
+        uid: 0,
+        gid: 0,
+        rdev: 0,
+        flags: 0,
+        blksize: 512,
+    }
+}
+
+struct OpenFile {
+    name: String,
+    data: Vec<u8>,
+}
+
+struct MetadataEntry {
+    name: String,
+}
+
+pub struct TorrentFsFilesystem {
+    state_dir: PathBuf,
+    next_ino: u64,
+    next_fh: u64,
+    open_files: HashMap<u64, OpenFile>,
+    metadata_entries: HashMap<u64, MetadataEntry>,
+}
+
+impl TorrentFsFilesystem {
+    pub fn new(state_dir: PathBuf) -> Self {
+        Self {
+            state_dir,
+            next_ino: INO_DYNAMIC_START,
+            next_fh: 1,
+            open_files: HashMap::new(),
+            metadata_entries: HashMap::new(),
+        }
+    }
+
+    fn allocate_ino(&mut self) -> u64 {
+        let ino = self.next_ino;
+        self.next_ino += 1;
+        ino
+    }
+
+    fn allocate_fh(&mut self) -> u64 {
+        let fh = self.next_fh;
+        self.next_fh += 1;
+        fh
+    }
+}
+
 pub fn attr_for_ino(ino: u64) -> Option<FileAttr> {
     match ino {
         INO_ROOT | INO_METADATA | INO_DATA => Some(dir_attr(ino)),
         _ => None,
     }
 }
-
-pub struct TorrentFsFilesystem;
 
 impl Filesystem for TorrentFsFilesystem {
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
@@ -53,16 +118,78 @@ impl Filesystem for TorrentFsFilesystem {
                 }
                 _ => reply.error(ENOENT),
             }
+        } else if parent == INO_METADATA {
+            let name_str = name.to_string_lossy();
+            for (ino, entry) in &self.metadata_entries {
+                if entry.name == name_str {
+                    let size = self
+                        .open_files
+                        .values()
+                        .find(|f| f.name == entry.name)
+                        .map(|f| f.data.len() as u64)
+                        .unwrap_or(0);
+                    reply.entry(&TTL, &file_attr(*ino, size), 0);
+                    return;
+                }
+            }
+            reply.error(ENOENT);
         } else {
             reply.error(ENOENT);
         }
     }
 
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
-        match attr_for_ino(ino) {
-            Some(attr) => reply.attr(&TTL, &attr),
-            None => reply.error(ENOENT),
+        if let Some(attr) = attr_for_ino(ino) {
+            reply.attr(&TTL, &attr);
+            return;
         }
+        if let Some(entry) = self.metadata_entries.get(&ino) {
+            let size = self
+                .open_files
+                .values()
+                .find(|f| f.name == entry.name)
+                .map(|f| f.data.len() as u64)
+                .unwrap_or(0);
+            reply.attr(&TTL, &file_attr(ino, size));
+            return;
+        }
+        reply.error(ENOENT);
+    }
+
+    fn setattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        size: Option<u64>,
+        _atime: Option<fuser::TimeOrNow>,
+        _mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<std::time::SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<std::time::SystemTime>,
+        _chgtime: Option<std::time::SystemTime>,
+        _bkuptime: Option<std::time::SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        if let Some(entry) = self.metadata_entries.get(&ino) {
+            let current_size = self
+                .open_files
+                .values()
+                .find(|f| f.name == entry.name)
+                .map(|f| f.data.len() as u64)
+                .unwrap_or(0);
+            let new_size = size.unwrap_or(current_size);
+            reply.attr(&TTL, &file_attr(ino, new_size));
+            return;
+        }
+        if let Some(attr) = attr_for_ino(ino) {
+            reply.attr(&TTL, &attr);
+            return;
+        }
+        reply.error(ENOENT);
     }
 
     fn readdir(
@@ -73,27 +200,160 @@ impl Filesystem for TorrentFsFilesystem {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        if ino != INO_ROOT {
+        if ino == INO_ROOT {
+            let entries = [
+                (INO_ROOT, FileType::Directory, "."),
+                (INO_ROOT, FileType::Directory, ".."),
+                (INO_METADATA, FileType::Directory, "metadata"),
+                (INO_DATA, FileType::Directory, "data"),
+            ];
+
+            for (i, (ino, kind, name)) in entries.into_iter().enumerate() {
+                let idx = (i + 1) as i64;
+                if idx <= offset {
+                    continue;
+                }
+                if reply.add(ino, idx, kind, name) {
+                    break;
+                }
+            }
+            reply.ok();
+        } else if ino == INO_METADATA {
+            let mut idx = 1i64;
+            if idx > offset {
+                let _ = reply.add(INO_METADATA, idx, FileType::Directory, ".");
+            }
+            idx += 1;
+            if idx > offset {
+                let _ = reply.add(INO_ROOT, idx, FileType::Directory, "..");
+            }
+            for (file_ino, entry) in &self.metadata_entries {
+                idx += 1;
+                if idx > offset {
+                    if reply.add(*file_ino, idx, FileType::RegularFile, &entry.name) {
+                        break;
+                    }
+                }
+            }
+            reply.ok();
+        } else {
             reply.error(ENOTDIR);
+        }
+    }
+
+    fn opendir(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
+        reply.opened(0, 0);
+    }
+
+    fn create(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        _flags: i32,
+        reply: ReplyCreate,
+    ) {
+        if parent != INO_METADATA {
+            reply.error(ENOENT);
             return;
         }
 
-        let entries = [
-            (INO_ROOT, FileType::Directory, "."),
-            (INO_ROOT, FileType::Directory, ".."),
-            (INO_METADATA, FileType::Directory, "metadata"),
-            (INO_DATA, FileType::Directory, "data"),
-        ];
-
-        for (i, (ino, kind, name)) in entries.into_iter().enumerate() {
-            let idx = (i + 1) as i64;
-            if idx <= offset {
-                continue;
-            }
-            if reply.add(ino, idx, kind, name) {
-                break;
-            }
+        let name_str = name.to_string_lossy();
+        if !name_str.ends_with(".torrent") {
+            reply.error(EINVAL);
+            return;
         }
+
+        let name_owned = name_str.into_owned();
+
+        let ino = self.allocate_ino();
+        let fh = self.allocate_fh();
+
+        self.metadata_entries.insert(ino, MetadataEntry {
+            name: name_owned.clone(),
+        });
+        self.open_files.insert(fh, OpenFile {
+            name: name_owned,
+            data: Vec::new(),
+        });
+
+        let attr = file_attr(ino, 0);
+        reply.created(&TTL, &attr, 0, fh, 0);
+    }
+
+    fn write(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        fh: u64,
+        offset: i64,
+        data: &[u8],
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyWrite,
+    ) {
+        let open_file = match self.open_files.get_mut(&fh) {
+            Some(f) => f,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let offset = offset as usize;
+        if offset + data.len() > MAX_FILE_SIZE {
+            reply.error(EFBIG);
+            return;
+        }
+
+        if offset > open_file.data.len() {
+            open_file.data.resize(offset, 0);
+        }
+
+        if offset + data.len() > open_file.data.len() {
+            open_file.data.resize(offset + data.len(), 0);
+        }
+
+        open_file.data[offset..offset + data.len()].copy_from_slice(data);
+        reply.written(data.len() as u32);
+    }
+
+    fn release(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        fh: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
+        let open_file = match self.open_files.remove(&fh) {
+            Some(f) => f,
+            None => {
+                reply.ok();
+                return;
+            }
+        };
+
+        let incoming_dir = self.state_dir.join("incoming");
+        if let Err(e) = fs::create_dir_all(&incoming_dir) {
+            tracing::error!("Failed to create incoming directory: {}", e);
+            reply.error(libc::EIO);
+            return;
+        }
+
+        let dest_path = incoming_dir.join(&open_file.name);
+        if let Err(e) = fs::write(&dest_path, &open_file.data) {
+            tracing::error!("Failed to write torrent file: {}", e);
+            reply.error(libc::EIO);
+            return;
+        }
+
+        tracing::info!("Persisted {} ({} bytes) to {}", open_file.name, open_file.data.len(), dest_path.display());
         reply.ok();
     }
 
@@ -111,21 +371,6 @@ impl Filesystem for TorrentFsFilesystem {
         _flags: i32,
         _lock_owner: Option<u64>,
         reply: ReplyData,
-    ) {
-        reply.error(ENOSYS);
-    }
-
-    fn write(
-        &mut self,
-        _req: &Request<'_>,
-        _ino: u64,
-        _fh: u64,
-        _offset: i64,
-        _data: &[u8],
-        _size: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
-        reply: ReplyWrite,
     ) {
         reply.error(ENOSYS);
     }
@@ -162,5 +407,41 @@ mod tests {
     #[test]
     fn test_getattr_unknown_returns_none() {
         assert!(attr_for_ino(999).is_none());
+    }
+
+    #[test]
+    fn test_file_attr() {
+        let attr = file_attr(100, 1024);
+        assert_eq!(attr.ino, 100);
+        assert_eq!(attr.kind, FileType::RegularFile);
+        assert_eq!(attr.size, 1024);
+        assert_eq!(attr.perm, 0o644);
+    }
+
+    #[test]
+    fn test_new_filesystem() {
+        let fs = TorrentFsFilesystem::new(PathBuf::from("/tmp/test"));
+        assert_eq!(fs.next_ino, INO_DYNAMIC_START);
+        assert_eq!(fs.next_fh, 1);
+        assert!(fs.open_files.is_empty());
+        assert!(fs.metadata_entries.is_empty());
+    }
+
+    #[test]
+    fn test_allocate_ino() {
+        let mut fs = TorrentFsFilesystem::new(PathBuf::from("/tmp/test"));
+        let ino1 = fs.allocate_ino();
+        let ino2 = fs.allocate_ino();
+        assert_eq!(ino1, INO_DYNAMIC_START);
+        assert_eq!(ino2, INO_DYNAMIC_START + 1);
+    }
+
+    #[test]
+    fn test_allocate_fh() {
+        let mut fs = TorrentFsFilesystem::new(PathBuf::from("/tmp/test"));
+        let fh1 = fs.allocate_fh();
+        let fh2 = fs.allocate_fh();
+        assert_eq!(fh1, 1);
+        assert_eq!(fh2, 2);
     }
 }

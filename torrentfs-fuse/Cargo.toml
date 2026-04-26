@@ -16,6 +16,7 @@ tracing-subscriber.workspace = true
 fuser.workspace = true
 libc = "0.2"
 clap.workspace = true
+dirs.workspace = true
 torrentfs = { path = "../torrentfs", version = "0.1.0" }
 
 [dev-dependencies]
