@@ -12,6 +12,7 @@ publish = false
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 fuser.workspace = true
 libc = "0.2"
 clap.workspace = true

@@ -21,7 +21,10 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    // Stub
+    tracing_subscriber::fmt()
+        .with_env_filter(args.log_level)
+        .init();
+    tracing::info!("Mounting torrentfs at {}", args.mount_point);
     mount::mount(&args.mount_point)?;
     Ok(())
 }

@@ -20,7 +20,7 @@ description = "TorrentFS - A FUSE filesystem for BitTorrent"
 anyhow = "1.0"
 thiserror = "2.0"
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1.0", features = ["full"] }
 fuser = "0.15"
 clap = { version = "4.0", features = ["derive"] }

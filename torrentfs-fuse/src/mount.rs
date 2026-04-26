@@ -1,9 +1,26 @@
-//! Mounting utilities.
-
 use anyhow::Result;
+use crate::TorrentFsFilesystem;
+use fuser::MountOption;
 
-/// Mounts the filesystem at the given mount point.
-pub fn mount(_mount_point: &str) -> Result<()> {
-    // Stub
+pub fn mount(mount_point: &str) -> Result<()> {
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+        MountOption::AllowOther,
+    ];
+
+    let fs = TorrentFsFilesystem;
+    fuser::mount2(fs, mount_point, &options)?;
     Ok(())
+}
+
+pub fn spawn_mount(mount_point: &str) -> Result<fuser::BackgroundSession> {
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+
+    let fs = TorrentFsFilesystem;
+    let session = fuser::spawn_mount2(fs, mount_point, &options)?;
+    Ok(session)
 }
