@@ -2121,6 +2121,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "torrentfs-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "tokio",
+ "torrentfs-libtorrent",
+]
+
+[[package]]
 name = "torrentfs-fuse"
 version = "0.1.0"
 dependencies = [

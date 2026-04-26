@@ -5,6 +5,7 @@ members = [
     "torrentfs-fuse",
     "torrentfs-libtorrent",
     "libtorrent-sys",
+    "torrentfs-cli",
 ]
 
 [workspace.package]
