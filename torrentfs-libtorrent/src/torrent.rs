@@ -3,6 +3,15 @@
 use anyhow::{Result, bail};
 use std::ffi::CStr;
 
+/// File entry in a torrent.
+#[derive(Debug, Clone)]
+pub struct FileEntry {
+    /// Full file path (including subdirectories)
+    pub path: String,
+    /// File size in bytes
+    pub size: u64,
+}
+
 /// Torrent information extracted from a .torrent file.
 #[derive(Debug, Clone)]
 pub struct TorrentInfo {
@@ -14,6 +23,8 @@ pub struct TorrentInfo {
     pub total_size: u64,
     /// Number of files in the torrent
     pub file_count: u32,
+    /// List of files in the torrent
+    pub files: Vec<FileEntry>,
 }
 
 impl TorrentInfo {
@@ -54,13 +65,57 @@ impl TorrentInfo {
             bail!("Invalid info hash length: expected 40 hex characters, got {}", info_hash.len());
         }
 
+        // Extract file list
+        let mut files = Vec::new();
+        if !ffi_info.files.is_null() && ffi_info.file_count > 0 {
+            let files_slice = unsafe {
+                std::slice::from_raw_parts(ffi_info.files, ffi_info.file_count as usize)
+            };
+            
+            for file_entry in files_slice {
+                let path = if !file_entry.path.is_null() {
+                    unsafe { CStr::from_ptr(file_entry.path) }
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    String::new()
+                };
+                
+                files.push(FileEntry {
+                    path,
+                    size: file_entry.size,
+                });
+            }
+        }
+
         Ok(TorrentInfo {
             name,
             info_hash,
             total_size: ffi_info.total_size,
             file_count: ffi_info.file_count,
+            files,
         })
     }
+
+    /// Returns a list of files in the torrent.
+    ///
+    /// This is a convenience method that returns the file list.
+    /// It handles subdirectory paths as they are provided by libtorrent.
+    pub fn list_files(&self) -> Vec<FileEntry> {
+        self.files.clone()
+    }
+}
+
+/// Returns a list of files in the torrent.
+///
+/// # Arguments
+/// * `info` - Torrent information
+///
+/// # Returns
+/// Vector of file entries with paths and sizes.
+/// Handles subdirectory paths as they are provided by libtorrent.
+pub fn list_files(info: &TorrentInfo) -> Vec<FileEntry> {
+    info.files.clone()
 }
 
 /// Parses torrent data from a buffer.
@@ -149,5 +204,51 @@ mod tests {
         assert!(result.is_err(), "Should fail to parse empty data");
         
         println!("Empty data test passed: {}", result.err().unwrap());
+    }
+
+    #[test]
+    fn test_file_list_functionality() {
+        // Test with the provided torrent file
+        let test_file = "/workspace/torrentfs/77c8dd8e37d712522b49a3f2e62757d90e233c84.torrent";
+        
+        // Read the torrent file
+        let data = fs::read(test_file).expect("Failed to read test torrent file");
+        assert!(!data.is_empty(), "Torrent file should not be empty");
+        
+        // Parse the torrent
+        let result = parse_torrent(&data);
+        assert!(result.is_ok(), "Failed to parse valid torrent: {:?}", result.err());
+        
+        let info = result.unwrap();
+        
+        // Test list_files method
+        let files_from_method = info.list_files();
+        
+        // Test standalone list_files function
+        let files_from_function = list_files(&info);
+        
+        // Both should return the same file list
+        assert_eq!(files_from_method.len(), files_from_function.len());
+        
+        // File count should match the number of files in the list
+        assert_eq!(info.file_count as usize, info.files.len());
+        assert_eq!(info.file_count as usize, files_from_method.len());
+        
+        // Check that files have valid data
+        for (i, file) in info.files.iter().enumerate() {
+            assert!(!file.path.is_empty(), "File {} should have a non-empty path", i);
+            assert!(file.size > 0, "File {} should have a positive size", i);
+            
+            // Check that file path is properly formatted (may contain subdirectories)
+            println!("File {}: {} ({} bytes)", i, file.path, file.size);
+        }
+        
+        println!("File list test passed!");
+        println!("Total files: {}", info.file_count);
+        println!("Total size: {} bytes", info.total_size);
+        
+        // Verify total size matches sum of file sizes
+        let total_from_files: u64 = info.files.iter().map(|f| f.size).sum();
+        assert_eq!(info.total_size, total_from_files, "Total size should match sum of file sizes");
     }
 }

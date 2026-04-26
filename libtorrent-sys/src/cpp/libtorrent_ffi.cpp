@@ -3,6 +3,7 @@
 #include <libtorrent/entry.hpp>
 #include <libtorrent/torrent_info.hpp>
 #include <libtorrent/hex.hpp>
+#include <libtorrent/file_storage.hpp>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -49,6 +50,27 @@ libtorrent_torrent_info_t* libtorrent_parse_torrent(const uint8_t* data, size_t 
         // Get file count
         info->file_count = ti.files().num_files();
         
+        // Get file list
+        if (info->file_count > 0) {
+            info->files = static_cast<libtorrent_file_entry_t*>(malloc(info->file_count * sizeof(libtorrent_file_entry_t)));
+            if (!info->files) {
+                throw std::bad_alloc();
+            }
+            memset(info->files, 0, info->file_count * sizeof(libtorrent_file_entry_t));
+            
+            const auto& files = ti.files();
+            for (uint32_t i = 0; i < info->file_count; i++) {
+                // Get file path
+                std::string file_path = files.file_path(i);
+                info->files[i].path = strdup(file_path.c_str());
+                
+                // Get file size
+                info->files[i].size = files.file_size(i);
+            }
+        } else {
+            info->files = nullptr;
+        }
+        
         info->error_code = LIBTORRENT_OK;
         
     } catch (const std::exception& e) {
@@ -67,6 +89,17 @@ void libtorrent_free_torrent_info(libtorrent_torrent_info_t* info) {
     
     if (info->name) free(info->name);
     if (info->info_hash_hex) free(info->info_hash_hex);
+    
+    // Free file list
+    if (info->files) {
+        for (uint32_t i = 0; i < info->file_count; i++) {
+            if (info->files[i].path) {
+                free(info->files[i].path);
+            }
+        }
+        free(info->files);
+    }
+    
     if (info->error_message) free(info->error_message);
     
     delete info;
