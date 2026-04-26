@@ -86,8 +86,12 @@ impl MetadataManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::sqlite::SqliteConnectOptions;
+    use sqlx::SqlitePool;
     use std::path::Path;
+    use std::str::FromStr;
     use std::sync::Arc;
+    use tempfile::TempDir;
 
     fn test_torrent_dir() -> std::path::PathBuf {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -106,13 +110,24 @@ mod tests {
         }).next()
     }
 
+    async fn setup_temp_db() -> (TempDir, Database) {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let options = SqliteConnectOptions::from_str(&db_path.to_string_lossy())
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        let db = Database::with_pool(pool);
+        db.migrate().await.unwrap();
+        (temp_dir, db)
+    }
+
     #[tokio::test]
     async fn test_parse_valid_torrent() {
         let test_file = first_torrent_file().expect("No .torrent file found in repo root");
         let data = std::fs::read(&test_file).expect("Failed to read test torrent file");
 
-        let db = Database::new().await.unwrap();
-        db.migrate().await.unwrap();
+        let (_temp_dir, db) = setup_temp_db().await;
         let manager = MetadataManager::new(Arc::new(db)).unwrap();
 
         let parsed = manager.process_torrent_data(&data).await.unwrap();
@@ -127,8 +142,7 @@ mod tests {
         let test_file = first_torrent_file().expect("No .torrent file found in repo root");
         let data = std::fs::read(&test_file).expect("Failed to read test torrent file");
 
-        let db = Database::new().await.unwrap();
-        db.migrate().await.unwrap();
+        let (_temp_dir, db) = setup_temp_db().await;
         let manager = MetadataManager::new(Arc::new(db)).unwrap();
 
         let parsed = manager.process_torrent_data(&data).await.unwrap();
@@ -140,8 +154,7 @@ mod tests {
         let test_file = first_torrent_file().expect("No .torrent file found in repo root");
         let data = std::fs::read(&test_file).expect("Failed to read test torrent file");
 
-        let db = Database::new().await.unwrap();
-        db.migrate().await.unwrap();
+        let (_temp_dir, db) = setup_temp_db().await;
         let manager = MetadataManager::new(Arc::new(db)).unwrap();
 
         let parsed = manager.process_torrent_data(&data).await.unwrap();
