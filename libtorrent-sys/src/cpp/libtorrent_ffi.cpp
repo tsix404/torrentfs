@@ -130,6 +130,16 @@ libtorrent_error_t libtorrent_add_torrent(
     const libtorrent_add_torrent_params_t* params,
     char** error_message)
 {
+    return libtorrent_add_torrent_ex(session, params, "/tmp/torrentfs", 12, error_message);
+}
+
+libtorrent_error_t libtorrent_add_torrent_ex(
+    libtorrent_session_t* session,
+    const libtorrent_add_torrent_params_t* params,
+    const char* save_path,
+    size_t save_path_len,
+    char** error_message)
+{
     if (!session || !params) {
         if (error_message) *error_message = strdup("Null pointer");
         return LIBTORRENT_ERROR_INVALID_DATA;
@@ -154,7 +164,7 @@ libtorrent_error_t libtorrent_add_torrent(
 
         libtorrent::add_torrent_params atp;
         atp.ti = std::make_shared<libtorrent::torrent_info>(ti);
-        atp.save_path = "/tmp/torrentfs";
+        atp.save_path = std::string(save_path, save_path_len);
         atp.flags &= ~libtorrent::torrent_flags::auto_managed;
         atp.flags |= libtorrent::torrent_flags::paused;
         atp.flags |= libtorrent::torrent_flags::upload_mode;

@@ -5,12 +5,14 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 use torrentfs::MetadataManager;
+use torrentfs_libtorrent::Session;
 
 pub fn init_and_mount(mount_point: &str, state_dir: &Path) -> Result<()> {
     let rt = Runtime::new()?;
 
     let runtime = rt.block_on(torrentfs::init())?;
     let metadata_manager = Arc::new(MetadataManager::new(runtime.db.clone())?);
+    let session = Session::new()?;
 
     let options = vec![
         MountOption::FSName("torrentfs".to_string()),
@@ -22,6 +24,7 @@ pub fn init_and_mount(mount_point: &str, state_dir: &Path) -> Result<()> {
         state_dir.to_path_buf(),
         metadata_manager,
         rt,
+        session,
     );
     fuser::mount2(fs, mount_point, &options)?;
     Ok(())

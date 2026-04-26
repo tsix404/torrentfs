@@ -14,3 +14,20 @@ pub async fn init() -> anyhow::Result<TorrentRuntime> {
     tracing::info!("TorrentFS core initialized");
     Ok(runtime)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_init_returns_ok() {
+        let result = init().await;
+        assert!(result.is_ok(), "init() should return Ok: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_init_creates_torrent_runtime() {
+        let runtime = init().await.unwrap();
+        assert_eq!(runtime.db.pool().acquire().await.is_ok(), true);
+    }
+}

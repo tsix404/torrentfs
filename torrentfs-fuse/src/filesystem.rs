@@ -7,10 +7,11 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::runtime::Runtime;
 use torrentfs::metadata::MetadataManager;
+use torrentfs_libtorrent::Session;
 
 const TTL: Duration = Duration::from_secs(1);
 const MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
@@ -71,14 +72,19 @@ struct MetadataEntry {
     size: u64,
 }
 
+pub struct CoreResources {
+    pub metadata_manager: Arc<MetadataManager>,
+    pub tokio_runtime: Runtime,
+    pub session: Mutex<Session>,
+}
+
 pub struct TorrentFsFilesystem {
     state_dir: PathBuf,
     next_ino: u64,
     next_fh: u64,
     open_files: HashMap<u64, OpenFile>,
     metadata_entries: HashMap<u64, MetadataEntry>,
-    metadata_manager: Option<Arc<MetadataManager>>,
-    tokio_runtime: Option<Runtime>,
+    core: Option<CoreResources>,
 }
 
 impl TorrentFsFilesystem {
@@ -89,8 +95,7 @@ impl TorrentFsFilesystem {
             next_fh: 1,
             open_files: HashMap::new(),
             metadata_entries: HashMap::new(),
-            metadata_manager: None,
-            tokio_runtime: None,
+            core: None,
         }
     }
 
@@ -98,6 +103,7 @@ impl TorrentFsFilesystem {
         state_dir: PathBuf,
         metadata_manager: Arc<MetadataManager>,
         tokio_runtime: Runtime,
+        session: Session,
     ) -> Self {
         Self {
             state_dir,
@@ -105,8 +111,11 @@ impl TorrentFsFilesystem {
             next_fh: 1,
             open_files: HashMap::new(),
             metadata_entries: HashMap::new(),
-            metadata_manager: Some(metadata_manager),
-            tokio_runtime: Some(tokio_runtime),
+            core: Some(CoreResources {
+                metadata_manager,
+                tokio_runtime,
+                session: Mutex::new(session),
+            }),
         }
     }
 
@@ -389,26 +398,20 @@ impl Filesystem for TorrentFsFilesystem {
         let name = open_file.name.clone();
         let data = open_file.data.clone();
 
-        if let Some(manager) = &self.metadata_manager {
-            let manager = manager.clone();
-            let rt = self.tokio_runtime.as_ref().unwrap();
+        if let Some(core) = &self.core {
+            let manager = core.metadata_manager.clone();
 
-            match rt.block_on(manager.process_torrent_data(&data)) {
+            match core.tokio_runtime.block_on(manager.process_torrent_data(&data)) {
                 Ok(parsed) => {
-                    if let Err(e) = rt.block_on(manager.persist_to_db(&parsed)) {
+                    if let Err(e) = core.tokio_runtime.block_on(manager.persist_to_db(&parsed)) {
                         tracing::error!("Failed to persist torrent to DB: {}", e);
                     }
 
-                    match torrentfs_libtorrent::Session::new() {
-                        Ok(session) => {
-                            if let Err(e) = session.add_torrent_paused(&data) {
-                                tracing::error!("Failed to add torrent to session: {}", e);
-                            } else {
-                                tracing::info!("Added torrent '{}' to libtorrent session (paused)", name);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to create libtorrent session: {}", e);
+                    if let Ok(session) = core.session.lock() {
+                        if let Err(e) = session.add_torrent_paused(&data, "/tmp/torrentfs") {
+                            tracing::error!("Failed to add torrent to session: {}", e);
+                        } else {
+                            tracing::info!("Added torrent '{}' to libtorrent session (paused)", name);
                         }
                     }
 
@@ -602,5 +605,13 @@ mod tests {
             }
         }
         panic!("Duplicate name should have been detected");
+    }
+
+    #[test]
+    fn test_core_resources_field_order() {
+        let state_dir = PathBuf::from("/tmp/test");
+        let fs = TorrentFsFilesystem::new(state_dir);
+        assert!(fs.core.is_none());
+        assert_eq!(fs.next_ino, INO_DYNAMIC_START);
     }
 }

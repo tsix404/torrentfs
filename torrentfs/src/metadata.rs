@@ -80,12 +80,30 @@ impl MetadataManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use std::sync::Arc;
+
+    fn test_torrent_dir() -> std::path::PathBuf {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir.join("../")
+    }
+
+    fn first_torrent_file() -> Option<std::path::PathBuf> {
+        let dir = test_torrent_dir();
+        std::fs::read_dir(&dir).ok()?.filter_map(|e| {
+            let e = e.ok()?;
+            if e.file_name().to_string_lossy().ends_with(".torrent") {
+                Some(e.path())
+            } else {
+                None
+            }
+        }).next()
+    }
 
     #[tokio::test]
     async fn test_parse_valid_torrent() {
-        let test_file = "/workspace/torrentfs/77c8dd8e37d712522b49a3f2e62757d90e233c84.torrent";
-        let data = std::fs::read(test_file).expect("Failed to read test torrent file");
+        let test_file = first_torrent_file().expect("No .torrent file found in repo root");
+        let data = std::fs::read(&test_file).expect("Failed to read test torrent file");
 
         let db = Database::new().await.unwrap();
         db.migrate().await.unwrap();
@@ -100,8 +118,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_and_persist() {
-        let test_file = "/workspace/torrentfs/77c8dd8e37d712522b49a3f2e62757d90e233c84.torrent";
-        let data = std::fs::read(test_file).expect("Failed to read test torrent file");
+        let test_file = first_torrent_file().expect("No .torrent file found in repo root");
+        let data = std::fs::read(&test_file).expect("Failed to read test torrent file");
 
         let db = Database::new().await.unwrap();
         db.migrate().await.unwrap();

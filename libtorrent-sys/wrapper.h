@@ -55,6 +55,9 @@ libtorrent_session_t* libtorrent_create_session();
 // Add a torrent to the session (paused)
 libtorrent_error_t libtorrent_add_torrent(libtorrent_session_t* session, const libtorrent_add_torrent_params_t* params, char** error_message);
 
+// Add a torrent to the session (paused) with custom save path
+libtorrent_error_t libtorrent_add_torrent_ex(libtorrent_session_t* session, const libtorrent_add_torrent_params_t* params, const char* save_path, size_t save_path_len, char** error_message);
+
 // Destroy a libtorrent session
 void libtorrent_destroy_session(libtorrent_session_t* session);
 
