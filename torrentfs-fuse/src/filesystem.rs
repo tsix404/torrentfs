@@ -65,6 +65,7 @@ struct OpenFile {
 
 struct MetadataEntry {
     name: String,
+    size: u64,
 }
 
 pub struct TorrentFsFilesystem {
@@ -122,13 +123,7 @@ impl Filesystem for TorrentFsFilesystem {
             let name_str = name.to_string_lossy();
             for (ino, entry) in &self.metadata_entries {
                 if entry.name == name_str {
-                    let size = self
-                        .open_files
-                        .values()
-                        .find(|f| f.name == entry.name)
-                        .map(|f| f.data.len() as u64)
-                        .unwrap_or(0);
-                    reply.entry(&TTL, &file_attr(*ino, size), 0);
+                    reply.entry(&TTL, &file_attr(*ino, entry.size), 0);
                     return;
                 }
             }
@@ -144,13 +139,7 @@ impl Filesystem for TorrentFsFilesystem {
             return;
         }
         if let Some(entry) = self.metadata_entries.get(&ino) {
-            let size = self
-                .open_files
-                .values()
-                .find(|f| f.name == entry.name)
-                .map(|f| f.data.len() as u64)
-                .unwrap_or(0);
-            reply.attr(&TTL, &file_attr(ino, size));
+            reply.attr(&TTL, &file_attr(ino, entry.size));
             return;
         }
         reply.error(ENOENT);
@@ -174,15 +163,21 @@ impl Filesystem for TorrentFsFilesystem {
         _flags: Option<u32>,
         reply: ReplyAttr,
     ) {
-        if let Some(entry) = self.metadata_entries.get(&ino) {
-            let current_size = self
-                .open_files
-                .values()
-                .find(|f| f.name == entry.name)
-                .map(|f| f.data.len() as u64)
-                .unwrap_or(0);
-            let new_size = size.unwrap_or(current_size);
-            reply.attr(&TTL, &file_attr(ino, new_size));
+        if let Some(entry) = self.metadata_entries.get_mut(&ino) {
+            if let Some(new_size) = size {
+                let new_size_usize = new_size as usize;
+                if new_size_usize > MAX_FILE_SIZE {
+                    reply.error(EFBIG);
+                    return;
+                }
+                if let Some(open_file) = self.open_files.values_mut().find(|f| f.name == entry.name) {
+                    open_file.data.resize(new_size_usize, 0);
+                }
+                entry.size = new_size;
+                reply.attr(&TTL, &file_attr(ino, new_size));
+            } else {
+                reply.attr(&TTL, &file_attr(ino, entry.size));
+            }
             return;
         }
         if let Some(attr) = attr_for_ino(ino) {
@@ -273,6 +268,7 @@ impl Filesystem for TorrentFsFilesystem {
 
         self.metadata_entries.insert(ino, MetadataEntry {
             name: name_owned.clone(),
+            size: 0,
         });
         self.open_files.insert(fh, OpenFile {
             name: name_owned,
@@ -286,7 +282,7 @@ impl Filesystem for TorrentFsFilesystem {
     fn write(
         &mut self,
         _req: &Request<'_>,
-        _ino: u64,
+        ino: u64,
         fh: u64,
         offset: i64,
         data: &[u8],
@@ -318,13 +314,19 @@ impl Filesystem for TorrentFsFilesystem {
         }
 
         open_file.data[offset..offset + data.len()].copy_from_slice(data);
+
+        let new_size = open_file.data.len() as u64;
+        if let Some(entry) = self.metadata_entries.get_mut(&ino) {
+            entry.size = new_size;
+        }
+
         reply.written(data.len() as u32);
     }
 
     fn release(
         &mut self,
         _req: &Request<'_>,
-        _ino: u64,
+        ino: u64,
         fh: u64,
         _flags: i32,
         _lock_owner: Option<u64>,
@@ -352,6 +354,8 @@ impl Filesystem for TorrentFsFilesystem {
             reply.error(libc::EIO);
             return;
         }
+
+        self.metadata_entries.remove(&ino);
 
         tracing::info!("Persisted {} ({} bytes) to {}", open_file.name, open_file.data.len(), dest_path.display());
         reply.ok();
@@ -443,5 +447,57 @@ mod tests {
         let fh2 = fs.allocate_fh();
         assert_eq!(fh1, 1);
         assert_eq!(fh2, 2);
+    }
+
+    #[test]
+    fn test_metadata_entry_size_tracking() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let mut fs = TorrentFsFilesystem::new(state_dir.path().to_path_buf());
+
+        let ino = fs.allocate_ino();
+        let fh = fs.allocate_fh();
+
+        fs.metadata_entries.insert(ino, MetadataEntry {
+            name: "test.torrent".to_string(),
+            size: 0,
+        });
+        fs.open_files.insert(fh, OpenFile {
+            name: "test.torrent".to_string(),
+            data: vec![0u8; 42],
+        });
+        fs.metadata_entries.get_mut(&ino).unwrap().size = 42;
+
+        assert_eq!(fs.metadata_entries.get(&ino).unwrap().size, 42);
+    }
+
+    #[test]
+    fn test_release_cleans_up_metadata_entries() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let mut fs = TorrentFsFilesystem::new(state_dir.path().to_path_buf());
+
+        let ino = fs.allocate_ino();
+        let fh = fs.allocate_fh();
+
+        fs.metadata_entries.insert(ino, MetadataEntry {
+            name: "cleanup.torrent".to_string(),
+            size: 5,
+        });
+        fs.open_files.insert(fh, OpenFile {
+            name: "cleanup.torrent".to_string(),
+            data: vec![1u8, 2, 3, 4, 5],
+        });
+
+        assert!(fs.metadata_entries.contains_key(&ino));
+        assert!(fs.open_files.contains_key(&fh));
+
+        let open_file = fs.open_files.remove(&fh).unwrap();
+        let incoming_dir = state_dir.path().join("incoming");
+        std::fs::create_dir_all(&incoming_dir).unwrap();
+        std::fs::write(incoming_dir.join("cleanup.torrent"), &open_file.data).unwrap();
+        fs.metadata_entries.remove(&ino);
+
+        assert!(!fs.metadata_entries.contains_key(&ino), "metadata_entries should be cleaned up after release");
+        assert!(!fs.open_files.contains_key(&fh), "open_files should be cleaned up after release");
+        assert!(state_dir.path().join("incoming/cleanup.torrent").exists(), "file should be persisted to incoming");
     }
 }
