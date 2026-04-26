@@ -15,7 +15,10 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+tokio.workspace = true
+torrentfs = { path = "../torrentfs", version = "0.1.0" }
 torrentfs-libtorrent = { path = "../torrentfs-libtorrent", version = "0.1.0" }
 
 [dev-dependencies]
-tokio.workspace = true
+sqlx.workspace = true
+tempfile = "3.10"
