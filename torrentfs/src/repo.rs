@@ -2,7 +2,13 @@ use sqlx::SqlitePool;
 
 use crate::error::Result;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum InsertResult {
+    Inserted(Torrent),
+    AlreadyExists(Torrent),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Torrent {
     pub id: i64,
     pub info_hash: Vec<u8>,
@@ -115,6 +121,22 @@ impl TorrentRepo {
             .await?;
         }
         Ok(())
+    }
+
+    pub async fn insert_if_not_exists(
+        &self,
+        info_hash: &[u8],
+        name: &str,
+        total_size: i64,
+        file_count: i64,
+        files: Vec<FileEntry>,
+    ) -> Result<InsertResult> {
+        if let Some(existing) = self.find_by_info_hash(info_hash).await? {
+            return Ok(InsertResult::AlreadyExists(existing));
+        }
+        let torrent = self.insert(info_hash, name, total_size, file_count).await?;
+        self.insert_files(torrent.id, files).await?;
+        Ok(InsertResult::Inserted(torrent))
     }
 
     pub async fn get_files(&self, torrent_id: i64) -> Result<Vec<FileEntry>> {

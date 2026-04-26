@@ -32,6 +32,11 @@ impl Database {
         Ok(Self { pool })
     }
     
+    /// Create a Database from an existing connection pool (for testing).
+    pub fn with_pool(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
     /// Get a reference to the connection pool.
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
