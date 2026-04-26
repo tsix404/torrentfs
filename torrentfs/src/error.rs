@@ -1,18 +1,18 @@
-//! Error types for TorrentFS core.
-
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum Error {
+pub enum TorrentFsError {
+    #[error("Database error: {0}")]
+    Db(#[from] sqlx::Error),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("Invalid torrent: {0}")]
-    InvalidTorrent(String),
+    #[error("Parse error: {0}")]
+    Parse(String),
 
-    #[error("Torrent not found")]
-    TorrentNotFound,
-
-    #[error("Internal error: {0}")]
-    Internal(String),
+    #[error("Not found: {0}")]
+    NotFound(String),
 }
+
+pub type Result<T> = std::result::Result<T, TorrentFsError>;
