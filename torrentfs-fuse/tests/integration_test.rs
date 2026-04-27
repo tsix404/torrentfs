@@ -240,6 +240,7 @@ fn test_init_and_mount_pipeline() {
 #[test]
 #[serial]
 fn test_data_directory_populated_from_db() {
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
@@ -395,6 +396,7 @@ fn test_cp_torrent_to_metadata_subdirectory() {
 #[test]
 #[serial]
 fn test_data_mirrors_metadata_path() {
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();

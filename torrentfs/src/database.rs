@@ -73,7 +73,7 @@ impl Database {
             
             // Create torrents table
             sqlx::query(
-                "CREATE TABLE torrents (
+                "CREATE TABLE IF NOT EXISTS torrents (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     info_hash BLOB NOT NULL UNIQUE,
                     name TEXT NOT NULL,
@@ -90,7 +90,7 @@ impl Database {
             
             // Create torrent_files table
             sqlx::query(
-                "CREATE TABLE torrent_files (
+                "CREATE TABLE IF NOT EXISTS torrent_files (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     torrent_id INTEGER NOT NULL,
                     path TEXT NOT NULL,
@@ -106,29 +106,29 @@ impl Database {
             .context("Failed to create torrent_files table")?;
             
             // Create indexes
-            sqlx::query("CREATE INDEX idx_torrents_info_hash ON torrents(info_hash)")
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_torrents_info_hash ON torrents(info_hash)")
                 .execute(self.pool())
                 .await
                 .context("Failed to create index on torrents.info_hash")?;
             
-            sqlx::query("CREATE INDEX idx_torrents_status ON torrents(status)")
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_torrents_status ON torrents(status)")
                 .execute(self.pool())
                 .await
                 .context("Failed to create index on torrents.status")?;
             
-            sqlx::query("CREATE INDEX idx_torrent_files_torrent_id ON torrent_files(torrent_id)")
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_torrent_files_torrent_id ON torrent_files(torrent_id)")
                 .execute(self.pool())
                 .await
                 .context("Failed to create index on torrent_files.torrent_id")?;
             
-            sqlx::query("CREATE INDEX idx_torrent_files_path ON torrent_files(path)")
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_torrent_files_path ON torrent_files(path)")
                 .execute(self.pool())
                 .await
                 .context("Failed to create index on torrent_files.path")?;
             
             // Record migration as successful
             sqlx::query(
-                "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time)
+                "INSERT OR IGNORE INTO _sqlx_migrations (version, description, success, checksum, execution_time)
                  VALUES (1, 'initial', true, ?, 0)"
             )
             .bind(vec![0u8; 32]) // Dummy checksum
