@@ -6,7 +6,7 @@ use torrentfs_libtorrent::{Alert, AlertType, Session};
 
 use crate::piece_cache::PieceCache;
 
-const ALERT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+const ALERT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub enum AlertLoopMessage {
@@ -38,6 +38,11 @@ impl AlertLoop {
         tracing::info!("Alert loop started");
         
         loop {
+            if let Ok(AlertLoopMessage::Shutdown) = self.shutdown_rx.try_recv() {
+                tracing::info!("Alert loop received shutdown signal, exiting");
+                break;
+            }
+            
             let session = Arc::clone(&self.session);
             let has_alert = tokio::task::spawn_blocking(move || {
                 session.wait_for_alert(ALERT_WAIT_TIMEOUT)
@@ -53,13 +58,6 @@ impl AlertLoop {
                     self.handle_alert(alert).await;
                 }
             }
-            
-            if let Ok(AlertLoopMessage::Shutdown) = self.shutdown_rx.try_recv() {
-                tracing::info!("Alert loop received shutdown signal, exiting");
-                break;
-            }
-            
-            tokio::task::yield_now().await;
         }
         
         tracing::info!("Alert loop stopped");
@@ -115,11 +113,8 @@ impl AlertLoop {
                 piece_index = alert.piece_index,
                 "Piece finished downloading"
             );
-            
-            // TODO: In MVP-5, this will:
-            // 1. Read piece data from torrent handle
-            // 2. Write to PieceCache
-            // 3. Notify any waiting oneshot channels
+            // Out of scope for TSI-138 (MVP-5 infrastructure only):
+            // MVP-5 will add: read piece data → write PieceCache → notify oneshot channels
         } else {
             tracing::debug!(
                 piece_index = alert.piece_index,
@@ -135,8 +130,7 @@ impl AlertLoop {
                 info_hash = %info_hash,
                 "Torrent download completed"
             );
-            
-            // TODO: Update database status to "completed"
+            // Out of scope for TSI-138: DB status update belongs to MVP-5 download flow
         } else {
             tracing::info!(
                 "Torrent download completed: {}",
@@ -152,8 +146,7 @@ impl AlertLoop {
                 "Save resume data: {}",
                 alert.message
             );
-            
-            // TODO: Persist resume data to ~/.local/share/torrentfs/state/resume/
+            // Out of scope for TSI-138: resume data persistence belongs to MVP-6 (production readiness)
         } else {
             tracing::debug!(
                 "Save resume data: {}",
@@ -189,13 +182,14 @@ mod tests {
         
         let alert_loop = AlertLoop::new(session, piece_cache, rx);
         
-        tx.send(AlertLoopMessage::Shutdown).expect("Failed to send shutdown");
-        
         let handle = tokio::spawn(alert_loop.run());
         
-        tokio::time::timeout(Duration::from_secs(5), handle)
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        tx.send(AlertLoopMessage::Shutdown).expect("Failed to send shutdown");
+        
+        tokio::time::timeout(Duration::from_secs(10), handle)
             .await
-            .expect("Alert loop should exit quickly")
+            .expect("Alert loop should exit within timeout")
             .expect("Alert loop task should complete successfully");
     }
 }

@@ -8,6 +8,7 @@
 #include <libtorrent/add_torrent_params.hpp>
 #include <libtorrent/alert_types.hpp>
 #include <cstring>
+#include <cstdio>
 #include <string>
 #include <vector>
 #include <memory>
@@ -144,7 +145,12 @@ libtorrent_session_t* libtorrent_create_session() {
             | libtorrent::alert_category::piece_progress
             | libtorrent::alert_category::storage);
         s->session.apply_settings(pack);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_create_session: %s\n", e.what());
+        delete s;
+        return nullptr;
     } catch (...) {
+        fprintf(stderr, "libtorrent_create_session: unknown exception\n");
         delete s;
         return nullptr;
     }
@@ -215,8 +221,10 @@ void libtorrent_destroy_session(libtorrent_session_t* session) {
     if (!session) return;
     try {
         session->session.abort();
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_destroy_session: %s\n", e.what());
     } catch (...) {
-        // Ignore abort errors
+        fprintf(stderr, "libtorrent_destroy_session: unknown exception\n");
     }
     delete session;
 }
@@ -257,7 +265,11 @@ static char* get_info_hash_hex(const libtorrent::alert* a) {
         std::string hash_str = ta->handle.info_hash().to_string();
         std::string hash_hex = aux::to_hex(libtorrent::span<const char>(hash_str.data(), hash_str.size()));
         return strdup(hash_hex.c_str());
+    } catch (const std::exception& e) {
+        fprintf(stderr, "get_info_hash_hex: %s\n", e.what());
+        return nullptr;
     } catch (...) {
+        fprintf(stderr, "get_info_hash_hex: unknown exception\n");
         return nullptr;
     }
 }
@@ -305,8 +317,10 @@ libtorrent_alert_list_t libtorrent_pop_alerts(libtorrent_session_t* session) {
             result.alerts[i].info_hash_hex = get_info_hash_hex(a);
             result.alerts[i].piece_index = get_piece_index(a);
         }
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_pop_alerts: %s\n", e.what());
     } catch (...) {
-        // Return empty list on error
+        fprintf(stderr, "libtorrent_pop_alerts: unknown exception\n");
     }
     
     return result;
@@ -321,7 +335,11 @@ int libtorrent_wait_for_alert(libtorrent_session_t* session, int timeout_ms) {
         libtorrent::time_duration timeout = libtorrent::milliseconds(timeout_ms);
         libtorrent::alert const* a = session->session.wait_for_alert(timeout);
         return (a != nullptr) ? 1 : 0;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_wait_for_alert: %s\n", e.what());
+        return 0;
     } catch (...) {
+        fprintf(stderr, "libtorrent_wait_for_alert: unknown exception\n");
         return 0;
     }
 }
