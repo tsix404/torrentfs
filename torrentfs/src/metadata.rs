@@ -81,6 +81,19 @@ impl MetadataManager {
 
         Ok(())
     }
+
+    pub async fn list_torrents(&self) -> anyhow::Result<Vec<crate::repo::Torrent>> {
+        self.repo.list_all().await.map_err(|e| e.into())
+    }
+
+    pub async fn get_torrent_files(&self, torrent_name: &str) -> anyhow::Result<Vec<crate::repo::FileEntry>> {
+        let torrent = self.repo
+            .find_by_name(torrent_name)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Torrent '{}' not found", torrent_name))?;
+        
+        self.repo.get_files(torrent.id).await.map_err(|e| e.into())
+    }
 }
 
 #[cfg(test)]

@@ -236,3 +236,84 @@ fn test_init_and_mount_pipeline() {
 
     cleanup_mount(&mount_path, guard);
 }
+
+#[test]
+#[serial]
+fn test_data_directory_populated_from_db() {
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let metadata_manager = std::sync::Arc::new(
+        torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
+    );
+    let session = torrentfs_libtorrent::Session::new().unwrap();
+
+    let fs = TorrentFsFilesystem::new_with_core(
+        state_path.clone(),
+        metadata_manager,
+        rt,
+        session,
+    );
+
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+    let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+
+    // First copy a torrent to metadata/ to populate database
+    let src = match first_torrent_file() {
+        Some(p) => p,
+        None => {
+            eprintln!("No .torrent files found, skipping data directory test");
+            cleanup_mount(&mount_path, guard);
+            return;
+        }
+    };
+
+    let dest = mount_path.join("metadata").join(src.file_name().unwrap());
+    let result = fs::copy(&src, &dest);
+    assert!(result.is_ok(), "Failed to copy .torrent file: {:?}", result.err());
+
+    thread::sleep(Duration::from_millis(500));
+
+    // Now check that data/ directory shows the torrent
+    let data_entries: Vec<_> = fs::read_dir(mount_path.join("data"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+
+    // The torrent name should appear in data/ directory
+    // Note: The torrent name comes from parsing the .torrent file, not the filename
+    // For test purposes, we'll just check that data/ is not empty
+    assert!(!data_entries.is_empty(), "data/ directory should not be empty after adding torrent");
+
+    // If there's at least one torrent directory, check its contents
+    if let Some(torrent_dir) = data_entries.first() {
+        let torrent_path = mount_path.join("data").join(torrent_dir);
+        assert!(torrent_path.is_dir(), "{} should be a directory", torrent_dir);
+
+        // Check files in torrent directory
+        let file_entries: Vec<_> = fs::read_dir(&torrent_path)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+
+        assert!(!file_entries.is_empty(), "Torrent directory should contain files");
+        
+        // Check file sizes
+        for file_name in &file_entries {
+            let file_path = torrent_path.join(file_name);
+            let metadata = fs::metadata(&file_path).unwrap();
+            assert!(metadata.len() > 0, "File {} should have non-zero size", file_name);
+        }
+    }
+
+    cleanup_mount(&mount_path, guard);
+}

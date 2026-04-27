@@ -111,6 +111,26 @@ impl TorrentRepo {
             .collect())
     }
 
+    pub async fn find_by_name(&self, name: &str) -> Result<Option<Torrent>> {
+        let row = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, String, String)>(
+            "SELECT id, info_hash, name, total_size, file_count, status, added_at
+             FROM torrents WHERE name = ?",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| Torrent {
+            id: r.0,
+            info_hash: r.1,
+            name: r.2,
+            total_size: r.3,
+            file_count: r.4,
+            status: r.5,
+            added_at: r.6,
+        }))
+    }
+
     pub async fn insert_files(&self, torrent_id: i64, files: Vec<FileEntry>) -> Result<()> {
         for file in files {
             sqlx::query(
@@ -423,5 +443,38 @@ mod tests {
         assert_eq!(retrieved[1].last_piece, 3);
         assert_eq!(retrieved[2].first_piece, 4);
         assert_eq!(retrieved[2].last_piece, 4);
+    }
+
+    #[tokio::test]
+    async fn test_find_by_name() {
+        let (_temp_dir, pool) = setup_test_db().await;
+        let repo = TorrentRepo::new(pool);
+
+        let info_hash1 = vec![1u8; 20];
+        let info_hash2 = vec![2u8; 20];
+        
+        repo.insert(&info_hash1, "torrent1", 100, 1)
+            .await
+            .unwrap();
+        repo.insert(&info_hash2, "torrent2", 200, 2)
+            .await
+            .unwrap();
+
+        let found = repo.find_by_name("torrent1").await.unwrap();
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(found.name, "torrent1");
+        assert_eq!(found.total_size, 100);
+        assert_eq!(found.file_count, 1);
+
+        let found = repo.find_by_name("torrent2").await.unwrap();
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(found.name, "torrent2");
+        assert_eq!(found.total_size, 200);
+        assert_eq!(found.file_count, 2);
+
+        let not_found = repo.find_by_name("nonexistent").await.unwrap();
+        assert!(not_found.is_none());
     }
 }
