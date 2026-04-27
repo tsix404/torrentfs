@@ -99,6 +99,9 @@ int libtorrent_wait_for_alert(libtorrent_session_t* session, int timeout_ms);
 // Free alert list
 void libtorrent_free_alert_list(libtorrent_alert_list_t* list);
 
+// Dynamically configure which alert categories are received
+void libtorrent_set_alert_mask(libtorrent_session_t* session, uint64_t mask);
+
 // Destroy a libtorrent session
 void libtorrent_destroy_session(libtorrent_session_t* session);
 

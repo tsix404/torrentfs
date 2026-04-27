@@ -44,15 +44,28 @@ impl AlertLoop {
             }
             
             let session = Arc::clone(&self.session);
-            let has_alert = tokio::task::spawn_blocking(move || {
+            let has_alert = match tokio::task::spawn_blocking(move || {
                 session.wait_for_alert(ALERT_WAIT_TIMEOUT)
-            }).await.unwrap_or(false);
+            }).await {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!("Alert wait task failed: {}, retrying", e);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
             
             if has_alert {
                 let session = Arc::clone(&self.session);
-                let alerts: Vec<Alert> = tokio::task::spawn_blocking(move || {
+                let alerts: Vec<Alert> = match tokio::task::spawn_blocking(move || {
                     session.pop_alerts().iter().collect()
-                }).await.unwrap_or_default();
+                }).await {
+                    Ok(alerts) => alerts,
+                    Err(e) => {
+                        tracing::error!("Alert pop task failed: {}, retrying", e);
+                        continue;
+                    }
+                };
                 
                 for alert in &alerts {
                     self.handle_alert(alert).await;

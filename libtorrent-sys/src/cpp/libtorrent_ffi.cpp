@@ -312,15 +312,40 @@ libtorrent_alert_list_t libtorrent_pop_alerts(libtorrent_session_t* session) {
         for (size_t i = 0; i < alerts.size(); i++) {
             const libtorrent::alert* a = alerts[i];
             result.alerts[i].type = get_alert_type(a);
-            result.alerts[i].alert_type_name = strdup(a->what());
-            result.alerts[i].message = strdup(a->message().c_str());
+            
+            char* type_name = strdup(a->what());
+            if (!type_name) {
+                fprintf(stderr, "libtorrent_pop_alerts: strdup failed for alert_type_name at index %zu\n", i);
+                libtorrent_free_alert_list(&result);
+                return {nullptr, 0};
+            }
+            result.alerts[i].alert_type_name = type_name;
+            
+            char* msg = strdup(a->message().c_str());
+            if (!msg) {
+                fprintf(stderr, "libtorrent_pop_alerts: strdup failed for message at index %zu\n", i);
+                result.alerts[i].alert_type_name = nullptr;
+                free(type_name);
+                libtorrent_free_alert_list(&result);
+                return {nullptr, 0};
+            }
+            result.alerts[i].message = msg;
+            
             result.alerts[i].info_hash_hex = get_info_hash_hex(a);
             result.alerts[i].piece_index = get_piece_index(a);
         }
     } catch (const std::exception& e) {
         fprintf(stderr, "libtorrent_pop_alerts: %s\n", e.what());
+        if (result.alerts) {
+            libtorrent_free_alert_list(&result);
+        }
+        return {nullptr, 0};
     } catch (...) {
         fprintf(stderr, "libtorrent_pop_alerts: unknown exception\n");
+        if (result.alerts) {
+            libtorrent_free_alert_list(&result);
+        }
+        return {nullptr, 0};
     }
     
     return result;
@@ -361,6 +386,20 @@ void libtorrent_free_alert_list(libtorrent_alert_list_t* list) {
     free(list->alerts);
     list->alerts = nullptr;
     list->count = 0;
+}
+
+void libtorrent_set_alert_mask(libtorrent_session_t* session, uint64_t mask) {
+    if (!session) return;
+    
+    try {
+        libtorrent::settings_pack pack;
+        pack.set_int(libtorrent::settings_pack::alert_mask, static_cast<int>(mask));
+        session->session.apply_settings(pack);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_set_alert_mask: %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "libtorrent_set_alert_mask: unknown exception\n");
+    }
 }
 
 } // extern "C"
