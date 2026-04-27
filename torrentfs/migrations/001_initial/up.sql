@@ -4,6 +4,7 @@ CREATE TABLE torrents (
     info_hash BLOB NOT NULL UNIQUE,
     name TEXT NOT NULL,
     total_size INTEGER NOT NULL,
+    piece_size INTEGER NOT NULL DEFAULT 16384,
     file_count INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP

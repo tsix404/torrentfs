@@ -16,6 +16,7 @@ pub struct ParsedTorrent {
     pub piece_size: i64,
     pub file_count: i64,
     pub files: Vec<FileEntry>,
+    pub source_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +54,7 @@ impl MetadataManager {
             piece_size: info.piece_size as i64,
             file_count: info.file_count as i64,
             files,
+            source_path: String::new(),
         })
     }
 
@@ -75,6 +77,7 @@ impl MetadataManager {
             parsed.piece_size,
             parsed.file_count,
             repo_files,
+            &parsed.source_path,
         ).await?;
 
         tracing::info!(

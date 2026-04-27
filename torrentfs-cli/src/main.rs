@@ -52,6 +52,7 @@ async fn main() -> Result<()> {
             info.piece_size as i64,
             info.file_count as i64,
             files,
+            "",
         )
         .await?
     {
@@ -136,7 +137,7 @@ mod tests {
         }];
 
         let result = repo
-            .insert_if_not_exists(&info_hash, "test.torrent", 1024, 16384, 1, files.clone())
+            .insert_if_not_exists(&info_hash, "test.torrent", 1024, 16384, 1, files.clone(), "")
             .await
             .unwrap();
         assert!(
@@ -152,7 +153,7 @@ mod tests {
         assert_eq!(saved_files[0].path, "dir/file1.txt");
 
         let result2 = repo
-            .insert_if_not_exists(&info_hash, "test.torrent", 1024, 16384, 1, files)
+            .insert_if_not_exists(&info_hash, "test.torrent", 1024, 16384, 1, files, "")
             .await
             .unwrap();
         assert!(

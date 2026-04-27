@@ -18,6 +18,7 @@ pub struct Torrent {
     pub file_count: i64,
     pub status: String,
     pub added_at: String,
+    pub source_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -47,17 +48,19 @@ impl TorrentRepo {
         total_size: i64,
         piece_size: i64,
         file_count: i64,
+        source_path: &str,
     ) -> Result<Torrent> {
-        let result = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, i64, String, String)>(
-            "INSERT INTO torrents (info_hash, name, total_size, piece_size, file_count)
-             VALUES (?, ?, ?, ?, ?)
-             RETURNING id, info_hash, name, total_size, piece_size, file_count, status, added_at",
+        let result = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, i64, String, String, String)>(
+            "INSERT INTO torrents (info_hash, name, total_size, piece_size, file_count, source_path)
+             VALUES (?, ?, ?, ?, ?, ?)
+             RETURNING id, info_hash, name, total_size, piece_size, file_count, status, added_at, source_path",
         )
         .bind(info_hash)
         .bind(name)
         .bind(total_size)
         .bind(piece_size)
         .bind(file_count)
+        .bind(source_path)
         .fetch_one(&self.pool)
         .await?;
 
@@ -70,12 +73,13 @@ impl TorrentRepo {
             file_count: result.5,
             status: result.6,
             added_at: result.7,
+            source_path: result.8,
         })
     }
 
     pub async fn find_by_info_hash(&self, hash: &[u8]) -> Result<Option<Torrent>> {
-        let row = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, i64, String, String)>(
-            "SELECT id, info_hash, name, total_size, piece_size, file_count, status, added_at
+        let row = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, i64, String, String, String)>(
+            "SELECT id, info_hash, name, total_size, piece_size, file_count, status, added_at, source_path
              FROM torrents WHERE info_hash = ?",
         )
         .bind(hash)
@@ -91,12 +95,13 @@ impl TorrentRepo {
             file_count: r.5,
             status: r.6,
             added_at: r.7,
+            source_path: r.8,
         }))
     }
 
     pub async fn list_all(&self) -> Result<Vec<Torrent>> {
-        let rows = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, i64, String, String)>(
-            "SELECT id, info_hash, name, total_size, piece_size, file_count, status, added_at
+        let rows = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, i64, String, String, String)>(
+            "SELECT id, info_hash, name, total_size, piece_size, file_count, status, added_at, source_path
              FROM torrents ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -113,13 +118,14 @@ impl TorrentRepo {
                 file_count: r.5,
                 status: r.6,
                 added_at: r.7,
+                source_path: r.8,
             })
             .collect())
     }
 
     pub async fn find_by_name(&self, name: &str) -> Result<Option<Torrent>> {
-        let row = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, i64, String, String)>(
-            "SELECT id, info_hash, name, total_size, piece_size, file_count, status, added_at
+        let row = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, i64, String, String, String)>(
+            "SELECT id, info_hash, name, total_size, piece_size, file_count, status, added_at, source_path
              FROM torrents WHERE name = ?",
         )
         .bind(name)
@@ -135,6 +141,7 @@ impl TorrentRepo {
             file_count: r.5,
             status: r.6,
             added_at: r.7,
+            source_path: r.8,
         }))
     }
 
@@ -162,11 +169,12 @@ impl TorrentRepo {
         piece_size: i64,
         file_count: i64,
         files: Vec<FileEntry>,
+        source_path: &str,
     ) -> Result<InsertResult> {
         if let Some(existing) = self.find_by_info_hash(info_hash).await? {
             return Ok(InsertResult::AlreadyExists(existing));
         }
-        let torrent = self.insert(info_hash, name, total_size, piece_size, file_count).await?;
+        let torrent = self.insert(info_hash, name, total_size, piece_size, file_count, source_path).await?;
         self.insert_files(torrent.id, files).await?;
         Ok(InsertResult::Inserted(torrent))
     }
@@ -217,7 +225,8 @@ mod tests {
                 piece_size INTEGER NOT NULL DEFAULT 16384,
                 file_count INTEGER NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
-                added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                source_path TEXT NOT NULL DEFAULT ''
             )",
         )
         .execute(&pool)
@@ -250,7 +259,7 @@ mod tests {
 
         let info_hash = vec![0u8; 20];
         let torrent = repo
-            .insert(&info_hash, "test.torrent", 1024, 16384, 3)
+            .insert(&info_hash, "test.torrent", 1024, 16384, 3, "")
             .await
             .unwrap();
 
@@ -282,10 +291,10 @@ mod tests {
         let (_temp_dir, pool) = setup_test_db().await;
         let repo = TorrentRepo::new(pool);
 
-        repo.insert(&vec![1u8; 20], "torrent1", 100, 16384, 1)
+        repo.insert(&vec![1u8; 20], "torrent1", 100, 16384, 1, "")
             .await
             .unwrap();
-        repo.insert(&vec![2u8; 20], "torrent2", 200, 32768, 2)
+        repo.insert(&vec![2u8; 20], "torrent2", 200, 32768, 2, "")
             .await
             .unwrap();
 
@@ -310,7 +319,7 @@ mod tests {
         let repo = TorrentRepo::new(pool);
 
         let torrent = repo
-            .insert(&vec![1u8; 20], "test.torrent", 2048, 16384, 2)
+            .insert(&vec![1u8; 20], "test.torrent", 2048, 16384, 2, "")
             .await
             .unwrap();
 
@@ -353,7 +362,7 @@ mod tests {
         let repo = TorrentRepo::new(pool);
 
         let torrent = repo
-            .insert(&vec![1u8; 20], "empty.torrent", 0, 16384, 0)
+            .insert(&vec![1u8; 20], "empty.torrent", 0, 16384, 0, "")
             .await
             .unwrap();
 
@@ -367,9 +376,9 @@ mod tests {
         let repo = TorrentRepo::new(pool);
 
         let hash = vec![0xAA; 20];
-        repo.insert(&hash, "first", 100, 16384, 1).await.unwrap();
+        repo.insert(&hash, "first", 100, 16384, 1, "").await.unwrap();
 
-        let result = repo.insert(&hash, "duplicate", 200, 16384, 2).await;
+        let result = repo.insert(&hash, "duplicate", 200, 16384, 2, "").await;
         assert!(result.is_err());
     }
 
@@ -379,7 +388,7 @@ mod tests {
         let repo = TorrentRepo::new(pool);
 
         let torrent = repo
-            .insert(&vec![1u8; 20], "test.torrent", 100, 16384, 1)
+            .insert(&vec![1u8; 20], "test.torrent", 100, 16384, 1, "")
             .await
             .unwrap();
 
@@ -412,7 +421,7 @@ mod tests {
         let repo = TorrentRepo::new(pool);
 
         let torrent = repo
-            .insert(&vec![1u8; 20], "test.torrent", 4096, 16384, 3)
+            .insert(&vec![1u8; 20], "test.torrent", 4096, 16384, 3, "")
             .await
             .unwrap();
 
@@ -463,10 +472,10 @@ mod tests {
         let info_hash1 = vec![1u8; 20];
         let info_hash2 = vec![2u8; 20];
         
-        repo.insert(&info_hash1, "torrent1", 100, 16384, 1)
+        repo.insert(&info_hash1, "torrent1", 100, 16384, 1, "")
             .await
             .unwrap();
-        repo.insert(&info_hash2, "torrent2", 200, 32768, 2)
+        repo.insert(&info_hash2, "torrent2", 200, 32768, 2, "")
             .await
             .unwrap();
 
@@ -488,5 +497,38 @@ mod tests {
 
         let not_found = repo.find_by_name("nonexistent").await.unwrap();
         assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_source_path() {
+        let (_temp_dir, pool) = setup_test_db().await;
+        let repo = TorrentRepo::new(pool);
+
+        let torrent = repo
+            .insert(&vec![1u8; 20], "test.torrent", 1024, 16384, 1, "a/b/")
+            .await
+            .unwrap();
+
+        assert_eq!(torrent.source_path, "a/b/");
+
+        let found = repo.find_by_info_hash(&vec![1u8; 20]).await.unwrap().unwrap();
+        assert_eq!(found.source_path, "a/b/");
+
+        let all = repo.list_all().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].source_path, "a/b/");
+    }
+
+    #[tokio::test]
+    async fn test_source_path_default_empty() {
+        let (_temp_dir, pool) = setup_test_db().await;
+        let repo = TorrentRepo::new(pool);
+
+        let torrent = repo
+            .insert(&vec![1u8; 20], "test.torrent", 1024, 16384, 1, "")
+            .await
+            .unwrap();
+
+        assert_eq!(torrent.source_path, "");
     }
 }

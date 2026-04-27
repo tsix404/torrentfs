@@ -81,7 +81,8 @@ impl Database {
                     piece_size INTEGER NOT NULL DEFAULT 16384,
                     file_count INTEGER NOT NULL,
                     status TEXT NOT NULL DEFAULT 'pending',
-                    added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    source_path TEXT NOT NULL DEFAULT ''
                 )"
             )
             .execute(self.pool())
@@ -126,6 +127,11 @@ impl Database {
                 .await
                 .context("Failed to create index on torrent_files.path")?;
             
+            sqlx::query("CREATE INDEX idx_torrents_source_path ON torrents(source_path)")
+                .execute(self.pool())
+                .await
+                .context("Failed to create index on torrents.source_path")?;
+            
             // Record migration as successful
             sqlx::query(
                 "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time)
@@ -156,6 +162,29 @@ impl Database {
                     .await
                     .context("Failed to add piece_size column")?;
                 println!("piece_size column added successfully.");
+            }
+
+            // Check if source_path column exists, add if missing (migration v3)
+            let source_path_exists: Option<i64> = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pragma_table_info('torrents') WHERE name='source_path'"
+            )
+            .fetch_optional(self.pool())
+            .await
+            .ok()
+            .flatten();
+
+            if source_path_exists == Some(0) {
+                println!("Adding source_path column to torrents table...");
+                sqlx::query("ALTER TABLE torrents ADD COLUMN source_path TEXT NOT NULL DEFAULT ''")
+                    .execute(self.pool())
+                    .await
+                    .context("Failed to add source_path column")?;
+                
+                sqlx::query("CREATE INDEX IF NOT EXISTS idx_torrents_source_path ON torrents(source_path)")
+                    .execute(self.pool())
+                    .await
+                    .context("Failed to create index on torrents.source_path")?;
+                println!("source_path column and index added successfully.");
             }
         }
         
