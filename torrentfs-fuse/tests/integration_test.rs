@@ -32,7 +32,7 @@ fn cleanup_mount(mount_path: &PathBuf, guard: BackgroundSession) {
 
 fn test_torrent_dir() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir.join("../") // torrentfs-fuse/../ = repo root
+    manifest_dir.join("../test_data")
 }
 
 fn first_torrent_file() -> Option<PathBuf> {

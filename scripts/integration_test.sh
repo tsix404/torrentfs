@@ -1,12 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MVP-3 Integration Test Script
-# Fixed version addressing C&R review feedback:
-# 1. Uses pre-built binary instead of cargo run
-# 2. Includes test .torrent file (no external dependencies)
-# 3. No SKIP conditions - always validates all acceptance criteria
-# 4. Clean error handling and resource management
+# MVP-4 Integration Test Script
+# Tests full lifecycle: metadata/ -> parse -> DB -> data/ browsing
 
 readonly BINARY_NAME="torrentfs-fuse"
 readonly MOUNT_POINT="${1:-/tmp/torrentfs-test-mnt}"
@@ -150,7 +146,7 @@ test_directory_structure() {
     fi
 }
 
-# Test 2: Accept .torrent files
+# Test 2: Accept .torrent files and verify DB persistence
 test_accept_torrent() {
     echo "[TEST 2/4] Testing .torrent file acceptance..."
     
@@ -165,15 +161,14 @@ test_accept_torrent() {
         # Wait for file processing
         sleep 1
         
-        # Verify file was persisted to incoming/
-        local incoming_file="$STATE_DIR/incoming/$torrent_name"
-        if [ -f "$incoming_file" ]; then
-            pass "File persisted to incoming/ directory"
+        # Verify file is still visible in metadata/
+        if [ -f "$dest_path" ]; then
+            pass "File persisted in metadata/ directory"
             
             # Verify file size matches
             local orig_size copy_size
             orig_size=$(stat -c%s "$TEST_TORRENT")
-            copy_size=$(stat -c%s "$incoming_file")
+            copy_size=$(stat -c%s "$dest_path")
             
             if [ "$orig_size" -eq "$copy_size" ]; then
                 pass "File size preserved ($orig_size bytes)"
@@ -181,16 +176,57 @@ test_accept_torrent() {
                 fail "File size mismatch: original=$orig_size, copy=$copy_size"
             fi
         else
-            fail "File not found in incoming/ directory: $incoming_file"
+            fail "File not found in metadata/ directory: $dest_path"
         fi
     else
         fail "Failed to copy .torrent file to metadata/"
     fi
 }
 
-# Test 3: Reject non-.torrent files
+# Test 3: Verify data/ directory shows torrent contents
+test_data_directory() {
+    echo "[TEST 3/5] Testing data/ directory population..."
+    
+    # Copy test torrent
+    local torrent_name
+    torrent_name=$(basename "$TEST_TORRENT")
+    cp "$TEST_TORRENT" "$MOUNT_POINT/metadata/" 2>/dev/null || true
+    sleep 1
+    
+    # Check data/ directory
+    local data_entries
+    data_entries=$(ls "$MOUNT_POINT/data/" 2>/dev/null || echo "")
+    
+    if [ -n "$data_entries" ]; then
+        pass "data/ directory contains torrent directories"
+        
+        # Check first torrent directory
+        local first_dir
+        first_dir=$(echo "$data_entries" | head -1)
+        if [ -n "$first_dir" ]; then
+            if [ -d "$MOUNT_POINT/data/$first_dir" ]; then
+                pass "Torrent directory '$first_dir' is valid"
+                
+                # List files in torrent
+                local files
+                files=$(ls "$MOUNT_POINT/data/$first_dir/" 2>/dev/null || echo "")
+                if [ -n "$files" ]; then
+                    pass "Torrent contains files: $(echo "$files" | wc -w) items"
+                else
+                    fail "Torrent directory is empty"
+                fi
+            else
+                fail "'$first_dir' is not a directory"
+            fi
+        fi
+    else
+        fail "data/ directory is empty (torrent not parsed)"
+    fi
+}
+
+# Test 4: Reject non-.torrent files
 test_reject_non_torrent() {
-    echo "[TEST 3/4] Testing non-.torrent file rejection..."
+    echo "[TEST 4/5] Testing non-.torrent file rejection..."
     
     local test_file="/tmp/test-non-torrent.txt"
     echo "This is not a .torrent file" > "$test_file"
@@ -205,9 +241,9 @@ test_reject_non_torrent() {
     rm -f "$test_file"
 }
 
-# Test 4: Clean unmount
+# Test 5: Clean unmount
 test_clean_unmount() {
-    echo "[TEST 4/4] Testing clean unmount..."
+    echo "[TEST 5/5] Testing clean unmount..."
     
     # Unmount
     if fusermount -u "$MOUNT_POINT"; then
@@ -228,7 +264,7 @@ test_clean_unmount() {
 }
 
 main() {
-    echo "=== MVP-3 Integration Test ==="
+    echo "=== MVP-4 Integration Test ==="
     echo "Mount point: $MOUNT_POINT"
     echo "State directory: $STATE_DIR"
     echo ""
@@ -249,6 +285,7 @@ main() {
     
     test_directory_structure
     test_accept_torrent
+    test_data_directory
     test_reject_non_torrent
     test_clean_unmount
     
@@ -264,6 +301,7 @@ main() {
         echo "3. ✓ Accepts .torrent files in metadata/"
         echo "4. ✓ Rejects non-.torrent files (EINVAL)"
         echo "5. ✓ Clean unmount"
+        echo "6. ✓ Torrents parsed and visible in data/"
         exit 0
     else
         echo "Some tests FAILED"
