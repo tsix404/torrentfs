@@ -13,6 +13,7 @@ pub struct ParsedTorrent {
     pub torrent_name: String,
     pub info_hash: Vec<u8>,
     pub total_size: i64,
+    pub piece_size: i64,
     pub file_count: i64,
     pub files: Vec<FileEntry>,
 }
@@ -49,6 +50,7 @@ impl MetadataManager {
             torrent_name: info.name,
             info_hash,
             total_size: info.total_size as i64,
+            piece_size: info.piece_size as i64,
             file_count: info.file_count as i64,
             files,
         })
@@ -70,6 +72,7 @@ impl MetadataManager {
             &parsed.info_hash,
             &parsed.torrent_name,
             parsed.total_size,
+            parsed.piece_size,
             parsed.file_count,
             repo_files,
         ).await?;

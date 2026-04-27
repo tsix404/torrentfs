@@ -59,7 +59,7 @@ impl Database {
         .await
         .context("Failed to create migrations table")?;
         
-        // Check if migration v1 has already been applied
+            // Check if migration v1 has already been applied
         let v1_applied: Option<i64> = sqlx::query_scalar(
             "SELECT version FROM _sqlx_migrations WHERE version = 1 AND success = true"
         )
@@ -78,6 +78,7 @@ impl Database {
                     info_hash BLOB NOT NULL UNIQUE,
                     name TEXT NOT NULL,
                     total_size INTEGER NOT NULL,
+                    piece_size INTEGER NOT NULL DEFAULT 16384,
                     file_count INTEGER NOT NULL,
                     status TEXT NOT NULL DEFAULT 'pending',
                     added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -138,6 +139,24 @@ impl Database {
             println!("Initial migration applied successfully.");
         } else {
             println!("Migration v1 already applied.");
+            
+            // Check if piece_size column exists, add if missing (migration v2)
+            let piece_size_exists: Option<i64> = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pragma_table_info('torrents') WHERE name='piece_size'"
+            )
+            .fetch_optional(self.pool())
+            .await
+            .ok()
+            .flatten();
+            
+            if piece_size_exists == Some(0) {
+                println!("Adding piece_size column to torrents table...");
+                sqlx::query("ALTER TABLE torrents ADD COLUMN piece_size INTEGER NOT NULL DEFAULT 16384")
+                    .execute(self.pool())
+                    .await
+                    .context("Failed to add piece_size column")?;
+                println!("piece_size column added successfully.");
+            }
         }
         
         Ok(())

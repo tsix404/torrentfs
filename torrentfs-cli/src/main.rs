@@ -49,6 +49,7 @@ async fn main() -> Result<()> {
             &info_hash_bytes,
             &info.name,
             info.total_size as i64,
+            info.piece_size as i64,
             info.file_count as i64,
             files,
         )

@@ -694,7 +694,7 @@ impl Filesystem for TorrentFsFilesystem {
                                 
                                 self.open_data_files.insert(fh, OpenDataFile {
                                     info_hash: info_hash.clone(),
-                                    piece_size: 16384,
+                                    piece_size: torrent.piece_size as u32,
                                 });
                                 
                                 reply.opened(fh, 0);

@@ -402,6 +402,10 @@ void libtorrent_set_alert_mask(libtorrent_session_t* session, uint64_t mask) {
     }
 }
 
+static bool is_valid_hex_char(char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
 static libtorrent::torrent_handle find_torrent_by_hash(libtorrent_session_t* session, const char* info_hash_hex) {
     if (!session || !info_hash_hex) {
         return libtorrent::torrent_handle();
@@ -411,6 +415,13 @@ static libtorrent::torrent_handle find_torrent_by_hash(libtorrent_session_t* ses
         std::string hex_str(info_hash_hex);
         if (hex_str.length() != 40) {
             return libtorrent::torrent_handle();
+        }
+        
+        for (size_t i = 0; i < 40; i++) {
+            if (!is_valid_hex_char(hex_str[i])) {
+                fprintf(stderr, "find_torrent_by_hash: invalid hex character at position %zu\n", i);
+                return libtorrent::torrent_handle();
+            }
         }
         
         std::vector<char> hash_bytes;
@@ -500,7 +511,11 @@ libtorrent_read_piece_result_t libtorrent_read_piece(libtorrent_session_t* sessi
             if (auto* pra = libtorrent::alert_cast<libtorrent::read_piece_alert>(a)) {
                 if (pra->piece == static_cast<int>(piece_index)) {
                     if (pra->error) {
-                        result.error_code = LIBTORRENT_ERROR_UNKNOWN;
+                        if (pra->error == libtorrent::errors::timed_out) {
+                            result.error_code = LIBTORRENT_ERROR_TIMEOUT;
+                        } else {
+                            result.error_code = LIBTORRENT_ERROR_UNKNOWN;
+                        }
                         result.error_message = strdup(pra->error.message().c_str());
                         return result;
                     }
@@ -518,7 +533,7 @@ libtorrent_read_piece_result_t libtorrent_read_piece(libtorrent_session_t* sessi
             }
         }
         
-        result.error_code = LIBTORRENT_ERROR_UNKNOWN;
+        result.error_code = LIBTORRENT_ERROR_TIMEOUT;
         result.error_message = strdup("Timeout waiting for piece data");
         return result;
         
