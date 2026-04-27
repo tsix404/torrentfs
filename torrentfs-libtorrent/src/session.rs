@@ -1,7 +1,9 @@
+use crate::alert::AlertList;
+
 use anyhow::{Result, bail};
 use std::ffi::CStr;
-
 use std::sync::Mutex;
+use std::time::Duration;
 
 #[derive(Debug)]
 pub struct Session {
@@ -9,6 +11,7 @@ pub struct Session {
 }
 
 unsafe impl Send for Session {}
+unsafe impl Sync for Session {}
 
 impl Session {
     pub fn new() -> Result<Self> {
@@ -20,7 +23,8 @@ impl Session {
     }
 
     pub fn add_torrent_paused(&self, data: &[u8], save_path: &str) -> Result<()> {
-        let inner = *self.inner.lock().unwrap();
+        let guard = self.inner.lock().unwrap();
+        let inner = *guard;
         let params = libtorrent_sys::libtorrent_add_torrent_params_t {
             torrent_data: data.as_ptr(),
             torrent_size: data.len(),
@@ -49,6 +53,24 @@ impl Session {
         }
 
         Ok(())
+    }
+
+    pub fn pop_alerts(&self) -> AlertList {
+        let guard = self.inner.lock().unwrap();
+        let alerts = unsafe { libtorrent_sys::libtorrent_pop_alerts(*guard) };
+        AlertList::from_ffi(alerts)
+    }
+
+    pub fn wait_for_alert(&self, timeout: Duration) -> bool {
+        let guard = self.inner.lock().unwrap();
+        let timeout_ms = timeout.as_millis() as i32;
+        let result = unsafe { libtorrent_sys::libtorrent_wait_for_alert(*guard, timeout_ms) };
+        result != 0
+    }
+
+    pub fn set_alert_mask(&self, mask: u64) {
+        let guard = self.inner.lock().unwrap();
+        unsafe { libtorrent_sys::libtorrent_set_alert_mask(*guard, mask) };
     }
 }
 

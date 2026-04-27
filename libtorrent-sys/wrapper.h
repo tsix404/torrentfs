@@ -62,6 +62,46 @@ libtorrent_error_t libtorrent_add_torrent(libtorrent_session_t* session, const l
 // Add a torrent to the session (paused) with custom save path
 libtorrent_error_t libtorrent_add_torrent_ex(libtorrent_session_t* session, const libtorrent_add_torrent_params_t* params, const char* save_path, size_t save_path_len, char** error_message);
 
+// Alert types
+typedef enum {
+    LIBTORRENT_ALERT_UNKNOWN = 0,
+    LIBTORRENT_ALERT_PIECE_FINISHED,
+    LIBTORRENT_ALERT_TORRENT_FINISHED,
+    LIBTORRENT_ALERT_SAVE_RESUME_DATA,
+    LIBTORRENT_ALERT_ADD_TORRENT,
+    LIBTORRENT_ALERT_METADATA_RECEIVED,
+    LIBTORRENT_ALERT_PIECE_READ,
+} libtorrent_alert_type_t;
+
+// Alert structure
+typedef struct {
+    libtorrent_alert_type_t type;
+    char* alert_type_name;     // C++ type name for debugging
+    char* message;             // Alert message
+    char* info_hash_hex;       // Info hash of the torrent (40 chars + null)
+    uint32_t piece_index;      // For piece-related alerts
+    int error_code;            // For error alerts
+} libtorrent_alert_t;
+
+// Alert list structure
+typedef struct {
+    libtorrent_alert_t* alerts;
+    size_t count;
+} libtorrent_alert_list_t;
+
+// Pop all pending alerts from session
+libtorrent_alert_list_t libtorrent_pop_alerts(libtorrent_session_t* session);
+
+// Wait for an alert (returns after timeout_ms or when alert is available)
+// Returns 1 if alert is available, 0 on timeout
+int libtorrent_wait_for_alert(libtorrent_session_t* session, int timeout_ms);
+
+// Free alert list
+void libtorrent_free_alert_list(libtorrent_alert_list_t* list);
+
+// Dynamically configure which alert categories are received
+void libtorrent_set_alert_mask(libtorrent_session_t* session, uint64_t mask);
+
 // Destroy a libtorrent session
 void libtorrent_destroy_session(libtorrent_session_t* session);
 

@@ -1,8 +1,10 @@
 //! libtorrent integration for TorrentFS.
 
+pub mod alert;
 pub mod session;
 pub mod torrent;
 
+pub use alert::{Alert, AlertList, AlertType};
 pub use session::Session;
 pub use torrent::{parse_torrent, TorrentInfo};
 
