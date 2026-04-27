@@ -504,35 +504,52 @@ libtorrent_read_piece_result_t libtorrent_read_piece(libtorrent_session_t* sessi
     try {
         handle.read_piece(piece_index);
         
-        for (int i = 0; i < 300; i++) {
-            libtorrent::alert const* a = session->session.wait_for_alert(libtorrent::milliseconds(100));
-            if (!a) continue;
+        // Use deadline-based waiting instead of busy-wait
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()
+            );
+            if (remaining.count() <= 0) break;
             
-            if (auto* pra = libtorrent::alert_cast<libtorrent::read_piece_alert>(a)) {
-                if (pra->piece == static_cast<int>(piece_index)) {
-                    if (pra->error) {
-                        if (pra->error == libtorrent::errors::timed_out) {
-                            result.error_code = LIBTORRENT_ERROR_TIMEOUT;
-                        } else {
-                            result.error_code = LIBTORRENT_ERROR_UNKNOWN;
+            // Pop all alerts at once instead of waiting repeatedly
+            std::vector<libtorrent::alert*> alerts;
+            session->session.pop_alerts(&alerts);
+            
+            for (const auto* a : alerts) {
+                if (auto* pra = libtorrent::alert_cast<libtorrent::read_piece_alert>(a)) {
+                    if (pra->piece == static_cast<int>(piece_index)) {
+                        if (pra->error) {
+                            if (pra->error == libtorrent::errors::timed_out) {
+                                result.error_code = LIBTORRENT_ERROR_TIMEOUT;
+                            } else {
+                                result.error_code = LIBTORRENT_ERROR_UNKNOWN;
+                            }
+                            result.error_message = strdup(pra->error.message().c_str());
+                            return result;
                         }
-                        result.error_message = strdup(pra->error.message().c_str());
+                        
+                        result.size = pra->size;
+                        result.data = static_cast<uint8_t*>(malloc(result.size));
+                        if (!result.data) {
+                            result.error_code = LIBTORRENT_ERROR_ALLOCATION_FAILED;
+                            result.error_message = strdup("Failed to allocate memory");
+                            return result;
+                        }
+                        std::memcpy(result.data, pra->buffer.get(), result.size);
                         return result;
                     }
-                    
-                    result.size = pra->size;
-                    result.data = static_cast<uint8_t*>(malloc(result.size));
-                    if (!result.data) {
-                        result.error_code = LIBTORRENT_ERROR_ALLOCATION_FAILED;
-                        result.error_message = strdup("Failed to allocate memory");
-                        return result;
-                    }
-                    std::memcpy(result.data, pra->buffer.get(), result.size);
-                    return result;
                 }
             }
+            
+            // Wait for new alerts with remaining time
+            auto timeout_ms = static_cast<int>(std::min(remaining.count(), (std::chrono::milliseconds::rep)1000));
+            session->session.wait_for_alert(libtorrent::milliseconds(timeout_ms));
         }
         
+        // Timeout - note: libtorrent will clean up the pending read_piece when the torrent is closed
+        // There's no explicit cancel API for individual read_piece requests
         result.error_code = LIBTORRENT_ERROR_TIMEOUT;
         result.error_message = strdup("Timeout waiting for piece data");
         return result;

@@ -1,9 +1,13 @@
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use crate::piece_cache::PieceCache;
 use torrentfs_libtorrent::Session;
 
 const PIECE_DEADLINE_MS: i32 = 30_000;
+const MAX_RETRIES: u32 = 3;
+const INITIAL_RETRY_DELAY_MS: u64 = 1000;
 
 #[derive(Debug, Clone)]
 pub struct DownloadError {
@@ -34,7 +38,46 @@ impl DownloadCoordinator {
                 .map_err(|e| DownloadError { message: e.to_string() });
         }
 
-        self.download_piece(info_hash, piece_index)
+        self.download_piece_with_retry(info_hash, piece_index)
+    }
+
+    fn download_piece_with_retry(&self, info_hash: &str, piece_index: u32) -> std::result::Result<Vec<u8>, DownloadError> {
+        let mut last_error = DownloadError { message: String::new() };
+        
+        for attempt in 0..MAX_RETRIES {
+            match self.download_piece(info_hash, piece_index) {
+                Ok(data) => return Ok(data),
+                Err(e) => {
+                    if Self::is_permanent_error(&e) {
+                        return Err(e);
+                    }
+                    
+                    last_error = e;
+                    
+                    if attempt + 1 < MAX_RETRIES {
+                        let delay = INITIAL_RETRY_DELAY_MS * (1 << attempt);
+                        tracing::warn!(
+                            info_hash = %info_hash,
+                            piece_index = piece_index,
+                            attempt = attempt + 1,
+                            delay_ms = delay,
+                            error = %last_error,
+                            "Transient error, retrying"
+                        );
+                        thread::sleep(Duration::from_millis(delay));
+                    }
+                }
+            }
+        }
+        
+        Err(last_error)
+    }
+
+    fn is_permanent_error(error: &DownloadError) -> bool {
+        let msg = error.message.to_lowercase();
+        msg.contains("not found") || 
+        msg.contains("invalid") ||
+        msg.contains("allocation failed")
     }
 
     fn download_piece(&self, info_hash: &str, piece_index: u32) -> std::result::Result<Vec<u8>, DownloadError> {
