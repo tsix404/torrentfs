@@ -6,6 +6,7 @@
 #include <libtorrent/file_storage.hpp>
 #include <libtorrent/session.hpp>
 #include <libtorrent/add_torrent_params.hpp>
+#include <libtorrent/alert_types.hpp>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -137,7 +138,11 @@ libtorrent_session_t* libtorrent_create_session() {
     auto* s = new libtorrent_session_t();
     try {
         libtorrent::settings_pack pack;
-        pack.set_int(libtorrent::settings_pack::alert_mask, 0);
+        pack.set_int(libtorrent::settings_pack::alert_mask,
+            libtorrent::alert_category::error
+            | libtorrent::alert_category::status
+            | libtorrent::alert_category::piece_progress
+            | libtorrent::alert_category::storage);
         s->session.apply_settings(pack);
     } catch (...) {
         delete s;
@@ -214,6 +219,130 @@ void libtorrent_destroy_session(libtorrent_session_t* session) {
         // Ignore abort errors
     }
     delete session;
+}
+
+static libtorrent_alert_type_t get_alert_type(const libtorrent::alert* a) {
+    using namespace libtorrent;
+    
+    if (alert_cast<piece_finished_alert>(a)) {
+        return LIBTORRENT_ALERT_PIECE_FINISHED;
+    }
+    if (alert_cast<torrent_finished_alert>(a)) {
+        return LIBTORRENT_ALERT_TORRENT_FINISHED;
+    }
+    if (alert_cast<save_resume_data_alert>(a)) {
+        return LIBTORRENT_ALERT_SAVE_RESUME_DATA;
+    }
+    if (alert_cast<add_torrent_alert>(a)) {
+        return LIBTORRENT_ALERT_ADD_TORRENT;
+    }
+    if (alert_cast<metadata_received_alert>(a)) {
+        return LIBTORRENT_ALERT_METADATA_RECEIVED;
+    }
+    if (alert_cast<read_piece_alert>(a)) {
+        return LIBTORRENT_ALERT_PIECE_READ;
+    }
+    return LIBTORRENT_ALERT_UNKNOWN;
+}
+
+static char* get_info_hash_hex(const libtorrent::alert* a) {
+    using namespace libtorrent;
+    
+    const torrent_alert* ta = alert_cast<torrent_alert>(a);
+    if (!ta) {
+        return nullptr;
+    }
+    
+    try {
+        std::string hash_str = ta->handle.info_hash().to_string();
+        std::string hash_hex = aux::to_hex(libtorrent::span<const char>(hash_str.data(), hash_str.size()));
+        return strdup(hash_hex.c_str());
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+static uint32_t get_piece_index(const libtorrent::alert* a) {
+    using namespace libtorrent;
+    
+    if (auto* pfa = alert_cast<piece_finished_alert>(a)) {
+        return pfa->piece_index;
+    }
+    if (auto* pra = alert_cast<read_piece_alert>(a)) {
+        return pra->piece;
+    }
+    return 0;
+}
+
+libtorrent_alert_list_t libtorrent_pop_alerts(libtorrent_session_t* session) {
+    libtorrent_alert_list_t result = {nullptr, 0};
+    
+    if (!session) {
+        return result;
+    }
+    
+    try {
+        std::vector<libtorrent::alert*> alerts;
+        session->session.pop_alerts(&alerts);
+        
+        if (alerts.empty()) {
+            return result;
+        }
+        
+        result.alerts = static_cast<libtorrent_alert_t*>(
+            malloc(alerts.size() * sizeof(libtorrent_alert_t)));
+        if (!result.alerts) {
+            return result;
+        }
+        memset(result.alerts, 0, alerts.size() * sizeof(libtorrent_alert_t));
+        result.count = alerts.size();
+        
+        for (size_t i = 0; i < alerts.size(); i++) {
+            const libtorrent::alert* a = alerts[i];
+            result.alerts[i].type = get_alert_type(a);
+            result.alerts[i].alert_type_name = strdup(a->what());
+            result.alerts[i].message = strdup(a->message().c_str());
+            result.alerts[i].info_hash_hex = get_info_hash_hex(a);
+            result.alerts[i].piece_index = get_piece_index(a);
+        }
+    } catch (...) {
+        // Return empty list on error
+    }
+    
+    return result;
+}
+
+int libtorrent_wait_for_alert(libtorrent_session_t* session, int timeout_ms) {
+    if (!session) {
+        return 0;
+    }
+    
+    try {
+        libtorrent::time_duration timeout = libtorrent::milliseconds(timeout_ms);
+        libtorrent::alert const* a = session->session.wait_for_alert(timeout);
+        return (a != nullptr) ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+void libtorrent_free_alert_list(libtorrent_alert_list_t* list) {
+    if (!list || !list->alerts) return;
+    
+    for (size_t i = 0; i < list->count; i++) {
+        if (list->alerts[i].alert_type_name) {
+            free(list->alerts[i].alert_type_name);
+        }
+        if (list->alerts[i].message) {
+            free(list->alerts[i].message);
+        }
+        if (list->alerts[i].info_hash_hex) {
+            free(list->alerts[i].info_hash_hex);
+        }
+    }
+    free(list->alerts);
+    list->alerts = nullptr;
+    list->count = 0;
 }
 
 } // extern "C"
