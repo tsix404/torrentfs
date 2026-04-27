@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use std::path::Path;
 use std::sync::Arc;
 
 use crate::database::Database;
@@ -14,7 +13,6 @@ pub struct ParsedTorrent {
     pub torrent_name: String,
     pub info_hash: Vec<u8>,
     pub total_size: i64,
-    pub piece_size: i64,
     pub file_count: i64,
     pub files: Vec<FileEntry>,
     pub source_path: String,
@@ -34,11 +32,7 @@ impl MetadataManager {
         Ok(Self { repo })
     }
 
-    pub async fn process_torrent_data(&self, data: &[u8]) -> Result<ParsedTorrent> {
-        self.process_torrent_data_with_path(data, None).await
-    }
-
-    pub async fn process_torrent_data_with_path(&self, data: &[u8], torrent_path: Option<&Path>) -> Result<ParsedTorrent> {
+    pub async fn process_torrent_data(&self, data: &[u8], source_path: &str) -> Result<ParsedTorrent> {
         let info = torrentfs_libtorrent::parse_torrent(data)
             .context("Failed to parse torrent data")?;
 
@@ -52,18 +46,13 @@ impl MetadataManager {
             last_piece: f.last_piece as i64,
         }).collect();
 
-        let source_path = torrent_path
-            .map(|p| extract_source_path(p))
-            .unwrap_or_default();
-
         Ok(ParsedTorrent {
             torrent_name: info.name,
             info_hash,
             total_size: info.total_size as i64,
-            piece_size: info.piece_size as i64,
             file_count: info.file_count as i64,
             files,
-            source_path,
+            source_path: source_path.to_string(),
         })
     }
 
@@ -83,10 +72,9 @@ impl MetadataManager {
             &parsed.info_hash,
             &parsed.torrent_name,
             parsed.total_size,
-            parsed.piece_size,
             parsed.file_count,
-            repo_files,
             &parsed.source_path,
+            repo_files,
         ).await?;
 
         tracing::info!(
@@ -109,20 +97,6 @@ impl MetadataManager {
         
         self.repo.get_files(torrent.id).await.map_err(|e| e.into())
     }
-}
-
-fn extract_source_path(torrent_path: &Path) -> String {
-    let path_str = torrent_path.to_string_lossy();
-    
-    if let Some(stripped) = path_str.strip_prefix("metadata/") {
-        if let Some(parent) = Path::new(stripped).parent() {
-            if parent != Path::new("") {
-                return format!("{}/", parent.to_string_lossy());
-            }
-        }
-    }
-    
-    String::new()
 }
 
 #[cfg(test)]
@@ -172,7 +146,7 @@ mod tests {
         let (_temp_dir, db) = setup_temp_db().await;
         let manager = MetadataManager::new(Arc::new(db)).unwrap();
 
-        let parsed = manager.process_torrent_data(&data).await.unwrap();
+        let parsed = manager.process_torrent_data(&data, "").await.unwrap();
         assert!(!parsed.torrent_name.is_empty());
         assert_eq!(parsed.info_hash.len(), 20);
         assert!(parsed.total_size > 0);
@@ -187,7 +161,7 @@ mod tests {
         let (_temp_dir, db) = setup_temp_db().await;
         let manager = MetadataManager::new(Arc::new(db)).unwrap();
 
-        let parsed = manager.process_torrent_data(&data).await.unwrap();
+        let parsed = manager.process_torrent_data(&data, "").await.unwrap();
         manager.persist_to_db(&parsed).await.unwrap();
     }
 
@@ -199,7 +173,7 @@ mod tests {
         let (_temp_dir, db) = setup_temp_db().await;
         let manager = MetadataManager::new(Arc::new(db)).unwrap();
 
-        let parsed = manager.process_torrent_data(&data).await.unwrap();
+        let parsed = manager.process_torrent_data(&data, "").await.unwrap();
         manager.persist_to_db(&parsed).await.unwrap();
 
         // Re-read from DB and verify piece ranges
@@ -218,26 +192,5 @@ mod tests {
             assert!(db_file.last_piece >= db_file.first_piece,
                 "File {}: last_piece {} < first_piece {}", i, db_file.last_piece, db_file.first_piece);
         }
-    }
-
-    #[test]
-    fn test_extract_source_path() {
-        assert_eq!(extract_source_path(Path::new("metadata/xxx.torrent")), "");
-        assert_eq!(extract_source_path(Path::new("metadata/a/b/xxx.torrent")), "a/b/");
-        assert_eq!(extract_source_path(Path::new("metadata/a/xxx.torrent")), "a/");
-        assert_eq!(extract_source_path(Path::new("other/xxx.torrent")), "");
-        assert_eq!(extract_source_path(Path::new("xxx.torrent")), "");
-    }
-
-    #[tokio::test]
-    async fn test_process_with_source_path() {
-        let test_file = first_torrent_file().expect("No .torrent file found in repo root");
-        let data = std::fs::read(&test_file).expect("Failed to read test torrent file");
-
-        let (_temp_dir, db) = setup_temp_db().await;
-        let manager = MetadataManager::new(Arc::new(db)).unwrap();
-
-        let parsed = manager.process_torrent_data_with_path(&data, Some(Path::new("metadata/sub/dir/test.torrent"))).await.unwrap();
-        assert_eq!(parsed.source_path, "sub/dir/");
     }
 }

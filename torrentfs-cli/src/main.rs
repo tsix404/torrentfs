@@ -1,7 +1,6 @@
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use std::fs;
-use std::path::Path;
 use std::path::PathBuf;
 use torrentfs::database::Database;
 use torrentfs::repo::{FileEntry, InsertResult, TorrentRepo};
@@ -12,20 +11,6 @@ use torrentfs_libtorrent::torrent;
 struct Args {
     /// Path to the .torrent file
     torrent_file: PathBuf,
-}
-
-fn extract_source_path(torrent_path: &Path) -> String {
-    let path_str = torrent_path.to_string_lossy();
-    
-    if let Some(stripped) = path_str.strip_prefix("metadata/") {
-        if let Some(parent) = Path::new(stripped).parent() {
-            if parent != Path::new("") {
-                return format!("{}/", parent.to_string_lossy());
-            }
-        }
-    }
-    
-    String::new()
 }
 
 #[tokio::main]
@@ -45,7 +30,6 @@ async fn main() -> Result<()> {
 
     let repo = TorrentRepo::new(db.pool().clone());
     let info_hash_bytes = hex_to_bytes(&info.info_hash)?;
-    let source_path = extract_source_path(&args.torrent_file);
 
     let files: Vec<FileEntry> = info
         .files
@@ -65,10 +49,9 @@ async fn main() -> Result<()> {
             &info_hash_bytes,
             &info.name,
             info.total_size as i64,
-            info.piece_size as i64,
             info.file_count as i64,
+            "",
             files,
-            &source_path,
         )
         .await?
     {
@@ -153,7 +136,7 @@ mod tests {
         }];
 
         let result = repo
-            .insert_if_not_exists(&info_hash, "test.torrent", 1024, 16384, 1, files.clone(), "")
+            .insert_if_not_exists(&info_hash, "test.torrent", 1024, 1, "", files.clone())
             .await
             .unwrap();
         assert!(
@@ -169,7 +152,7 @@ mod tests {
         assert_eq!(saved_files[0].path, "dir/file1.txt");
 
         let result2 = repo
-            .insert_if_not_exists(&info_hash, "test.torrent", 1024, 16384, 1, files, "")
+            .insert_if_not_exists(&info_hash, "test.torrent", 1024, 1, "", files)
             .await
             .unwrap();
         assert!(
@@ -183,14 +166,5 @@ mod tests {
             1,
             "DB should still have exactly 1 record after duplicate insert"
         );
-    }
-
-    #[test]
-    fn test_extract_source_path() {
-        assert_eq!(extract_source_path(Path::new("metadata/xxx.torrent")), "");
-        assert_eq!(extract_source_path(Path::new("metadata/a/b/xxx.torrent")), "a/b/");
-        assert_eq!(extract_source_path(Path::new("metadata/a/xxx.torrent")), "a/");
-        assert_eq!(extract_source_path(Path::new("other/xxx.torrent")), "");
-        assert_eq!(extract_source_path(Path::new("xxx.torrent")), "");
     }
 }

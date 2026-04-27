@@ -59,7 +59,7 @@ impl Database {
         .await
         .context("Failed to create migrations table")?;
         
-            // Check if migration v1 has already been applied
+        // Check if migration v1 has already been applied
         let v1_applied: Option<i64> = sqlx::query_scalar(
             "SELECT version FROM _sqlx_migrations WHERE version = 1 AND success = true"
         )
@@ -73,16 +73,15 @@ impl Database {
             
             // Create torrents table
             sqlx::query(
-                "CREATE TABLE torrents (
+                "CREATE TABLE IF NOT EXISTS torrents (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     info_hash BLOB NOT NULL UNIQUE,
                     name TEXT NOT NULL,
                     total_size INTEGER NOT NULL,
-                    piece_size INTEGER NOT NULL DEFAULT 16384,
                     file_count INTEGER NOT NULL,
                     status TEXT NOT NULL DEFAULT 'pending',
-                    added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    source_path TEXT NOT NULL DEFAULT ''
+                    source_path TEXT NOT NULL DEFAULT '',
+                    added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )"
             )
             .execute(self.pool())
@@ -91,7 +90,7 @@ impl Database {
             
             // Create torrent_files table
             sqlx::query(
-                "CREATE TABLE torrent_files (
+                "CREATE TABLE IF NOT EXISTS torrent_files (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     torrent_id INTEGER NOT NULL,
                     path TEXT NOT NULL,
@@ -107,34 +106,29 @@ impl Database {
             .context("Failed to create torrent_files table")?;
             
             // Create indexes
-            sqlx::query("CREATE INDEX idx_torrents_info_hash ON torrents(info_hash)")
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_torrents_info_hash ON torrents(info_hash)")
                 .execute(self.pool())
                 .await
                 .context("Failed to create index on torrents.info_hash")?;
             
-            sqlx::query("CREATE INDEX idx_torrents_status ON torrents(status)")
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_torrents_status ON torrents(status)")
                 .execute(self.pool())
                 .await
                 .context("Failed to create index on torrents.status")?;
             
-            sqlx::query("CREATE INDEX idx_torrent_files_torrent_id ON torrent_files(torrent_id)")
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_torrent_files_torrent_id ON torrent_files(torrent_id)")
                 .execute(self.pool())
                 .await
                 .context("Failed to create index on torrent_files.torrent_id")?;
             
-            sqlx::query("CREATE INDEX idx_torrent_files_path ON torrent_files(path)")
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_torrent_files_path ON torrent_files(path)")
                 .execute(self.pool())
                 .await
                 .context("Failed to create index on torrent_files.path")?;
             
-            sqlx::query("CREATE INDEX idx_torrents_source_path ON torrents(source_path)")
-                .execute(self.pool())
-                .await
-                .context("Failed to create index on torrents.source_path")?;
-            
             // Record migration as successful
             sqlx::query(
-                "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time)
+                "INSERT OR IGNORE INTO _sqlx_migrations (version, description, success, checksum, execution_time)
                  VALUES (1, 'initial', true, ?, 0)"
             )
             .bind(vec![0u8; 32]) // Dummy checksum
@@ -145,47 +139,6 @@ impl Database {
             println!("Initial migration applied successfully.");
         } else {
             println!("Migration v1 already applied.");
-            
-            // Check if piece_size column exists, add if missing (migration v2)
-            let piece_size_exists: Option<i64> = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM pragma_table_info('torrents') WHERE name='piece_size'"
-            )
-            .fetch_optional(self.pool())
-            .await
-            .ok()
-            .flatten();
-            
-            if piece_size_exists == Some(0) {
-                println!("Adding piece_size column to torrents table...");
-                sqlx::query("ALTER TABLE torrents ADD COLUMN piece_size INTEGER NOT NULL DEFAULT 16384")
-                    .execute(self.pool())
-                    .await
-                    .context("Failed to add piece_size column")?;
-                println!("piece_size column added successfully.");
-            }
-
-            // Check if source_path column exists, add if missing (migration v3)
-            let source_path_exists: Option<i64> = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM pragma_table_info('torrents') WHERE name='source_path'"
-            )
-            .fetch_optional(self.pool())
-            .await
-            .ok()
-            .flatten();
-
-            if source_path_exists == Some(0) {
-                println!("Adding source_path column to torrents table...");
-                sqlx::query("ALTER TABLE torrents ADD COLUMN source_path TEXT NOT NULL DEFAULT ''")
-                    .execute(self.pool())
-                    .await
-                    .context("Failed to add source_path column")?;
-                
-                sqlx::query("CREATE INDEX IF NOT EXISTS idx_torrents_source_path ON torrents(source_path)")
-                    .execute(self.pool())
-                    .await
-                    .context("Failed to create index on torrents.source_path")?;
-                println!("source_path column and index added successfully.");
-            }
         }
         
         Ok(())
