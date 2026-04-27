@@ -200,6 +200,7 @@ fn test_init_and_mount_pipeline() {
         metadata_manager,
         rt,
         session,
+        runtime.download_coordinator.clone(),
     );
 
     let options = vec![
@@ -257,6 +258,7 @@ fn test_data_directory_populated_from_db() {
         metadata_manager,
         rt,
         session,
+        runtime.download_coordinator.clone(),
     );
 
     let options = vec![

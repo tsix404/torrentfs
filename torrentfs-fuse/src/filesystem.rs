@@ -78,12 +78,6 @@ struct MetadataEntry {
     size: u64,
 }
 
-struct TorrentEntry {
-    name: String,
-    info_hash: String,
-    piece_size: u32,
-}
-
 pub struct CoreResources {
     pub metadata_manager: Arc<MetadataManager>,
     pub tokio_runtime: Runtime,
@@ -98,7 +92,6 @@ pub struct TorrentFsFilesystem {
     open_files: HashMap<u64, OpenFile>,
     open_data_files: HashMap<u64, OpenDataFile>,
     metadata_entries: HashMap<u64, MetadataEntry>,
-    torrent_entries: HashMap<u64, TorrentEntry>,
     core: Option<CoreResources>,
 }
 
@@ -111,7 +104,6 @@ impl TorrentFsFilesystem {
             open_files: HashMap::new(),
             open_data_files: HashMap::new(),
             metadata_entries: HashMap::new(),
-            torrent_entries: HashMap::new(),
             core: None,
         }
     }
@@ -130,7 +122,6 @@ impl TorrentFsFilesystem {
             open_files: HashMap::new(),
             open_data_files: HashMap::new(),
             metadata_entries: HashMap::new(),
-            torrent_entries: HashMap::new(),
             core: Some(CoreResources {
                 metadata_manager,
                 tokio_runtime,
