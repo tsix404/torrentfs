@@ -1,11 +1,13 @@
 pub mod database;
 pub mod error;
 pub mod metadata;
+pub mod piece_cache;
 pub mod repo;
 pub mod runtime;
 
 pub use database::Database;
 pub use metadata::MetadataManager;
+pub use piece_cache::PieceCache;
 pub use repo::TorrentRepo;
 pub use runtime::TorrentRuntime;
 
