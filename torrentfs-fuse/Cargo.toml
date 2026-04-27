@@ -18,6 +18,7 @@ fuser.workspace = true
 libc = "0.2"
 clap.workspace = true
 dirs.workspace = true
+hex.workspace = true
 torrentfs = { path = "../torrentfs", version = "0.1.0" }
 torrentfs-libtorrent = { path = "../torrentfs-libtorrent", version = "0.1.0" }
 

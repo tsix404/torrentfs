@@ -4,6 +4,7 @@ use tokio::sync::broadcast;
 
 use crate::alert_loop::{AlertLoop, AlertLoopMessage};
 use crate::database::Database;
+use crate::download::DownloadCoordinator;
 use crate::piece_cache::PieceCache;
 use torrentfs_libtorrent::Session;
 
@@ -11,6 +12,7 @@ pub struct TorrentRuntime {
     pub db: Arc<Database>,
     pub session: Arc<Session>,
     pub piece_cache: Arc<PieceCache>,
+    pub download_coordinator: Arc<DownloadCoordinator>,
     shutdown_tx: broadcast::Sender<AlertLoopMessage>,
 }
 
@@ -21,6 +23,10 @@ impl TorrentRuntime {
         
         let session = Arc::new(Session::new()?);
         let piece_cache = Arc::new(PieceCache::new()?);
+        let download_coordinator = Arc::new(DownloadCoordinator::new(
+            Arc::clone(&session),
+            Arc::clone(&piece_cache),
+        ));
         
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<AlertLoopMessage>(1);
         
@@ -36,6 +42,7 @@ impl TorrentRuntime {
             db: Arc::new(db),
             session,
             piece_cache,
+            download_coordinator,
             shutdown_tx,
         })
     }

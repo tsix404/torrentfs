@@ -27,3 +27,4 @@ clap = { version = "4.0", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "sqlite"] }
 dirs = "5.0"
+hex = "0.4"

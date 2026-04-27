@@ -1,5 +1,6 @@
 pub mod alert_loop;
 pub mod database;
+pub mod download;
 pub mod error;
 pub mod metadata;
 pub mod piece_cache;
@@ -8,6 +9,7 @@ pub mod runtime;
 
 pub use alert_loop::{AlertLoop, AlertLoopMessage};
 pub use database::Database;
+pub use download::DownloadCoordinator;
 pub use metadata::MetadataManager;
 pub use piece_cache::PieceCache;
 pub use repo::TorrentRepo;

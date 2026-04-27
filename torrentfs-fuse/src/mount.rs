@@ -25,6 +25,7 @@ pub fn init_and_mount(mount_point: &str, state_dir: &Path) -> Result<()> {
         metadata_manager,
         rt,
         session,
+        runtime.download_coordinator.clone(),
     );
     fuser::mount2(fs, mount_point, &options)?;
     Ok(())

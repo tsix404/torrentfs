@@ -2096,6 +2096,7 @@ dependencies = [
  "clap",
  "dirs",
  "fuser",
+ "hex",
  "libc",
  "serial_test",
  "tempfile",

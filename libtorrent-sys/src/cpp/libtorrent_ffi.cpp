@@ -402,4 +402,149 @@ void libtorrent_set_alert_mask(libtorrent_session_t* session, uint64_t mask) {
     }
 }
 
+static libtorrent::torrent_handle find_torrent_by_hash(libtorrent_session_t* session, const char* info_hash_hex) {
+    if (!session || !info_hash_hex) {
+        return libtorrent::torrent_handle();
+    }
+    
+    try {
+        std::string hex_str(info_hash_hex);
+        if (hex_str.length() != 40) {
+            return libtorrent::torrent_handle();
+        }
+        
+        std::vector<char> hash_bytes;
+        for (size_t i = 0; i < 40; i += 2) {
+            int byte;
+            sscanf(hex_str.c_str() + i, "%02x", &byte);
+            hash_bytes.push_back(static_cast<char>(byte));
+        }
+        
+        libtorrent::sha1_hash target_hash;
+        std::memcpy(&target_hash, hash_bytes.data(), 20);
+        
+        std::vector<libtorrent::torrent_handle> handles = session->session.get_torrents();
+        for (const auto& h : handles) {
+            if (h.is_valid() && h.info_hash() == target_hash) {
+                return h;
+            }
+        }
+    } catch (const std::exception& e) {
+        fprintf(stderr, "find_torrent_by_hash: %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "find_torrent_by_hash: unknown exception\n");
+    }
+    
+    return libtorrent::torrent_handle();
+}
+
+int libtorrent_find_torrent(libtorrent_session_t* session, const char* info_hash_hex) {
+    auto handle = find_torrent_by_hash(session, info_hash_hex);
+    return handle.is_valid() ? 1 : 0;
+}
+
+libtorrent_error_t libtorrent_resume_torrent(libtorrent_session_t* session, const char* info_hash_hex) {
+    auto handle = find_torrent_by_hash(session, info_hash_hex);
+    if (!handle.is_valid()) {
+        return LIBTORRENT_ERROR_INVALID_DATA;
+    }
+    
+    try {
+        handle.unset_flags(libtorrent::torrent_flags::paused);
+        handle.unset_flags(libtorrent::torrent_flags::upload_mode);
+        return LIBTORRENT_OK;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_resume_torrent: %s\n", e.what());
+        return LIBTORRENT_ERROR_UNKNOWN;
+    } catch (...) {
+        fprintf(stderr, "libtorrent_resume_torrent: unknown exception\n");
+        return LIBTORRENT_ERROR_UNKNOWN;
+    }
+}
+
+libtorrent_error_t libtorrent_set_piece_deadline(libtorrent_session_t* session, const char* info_hash_hex, uint32_t piece_index, int deadline_ms) {
+    auto handle = find_torrent_by_hash(session, info_hash_hex);
+    if (!handle.is_valid()) {
+        return LIBTORRENT_ERROR_INVALID_DATA;
+    }
+    
+    try {
+        handle.set_piece_deadline(piece_index, deadline_ms, libtorrent::torrent_handle::alert_when_available);
+        return LIBTORRENT_OK;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_set_piece_deadline: %s\n", e.what());
+        return LIBTORRENT_ERROR_UNKNOWN;
+    } catch (...) {
+        fprintf(stderr, "libtorrent_set_piece_deadline: unknown exception\n");
+        return LIBTORRENT_ERROR_UNKNOWN;
+    }
+}
+
+libtorrent_read_piece_result_t libtorrent_read_piece(libtorrent_session_t* session, const char* info_hash_hex, uint32_t piece_index) {
+    libtorrent_read_piece_result_t result = {nullptr, 0, LIBTORRENT_OK, nullptr};
+    
+    auto handle = find_torrent_by_hash(session, info_hash_hex);
+    if (!handle.is_valid()) {
+        result.error_code = LIBTORRENT_ERROR_INVALID_DATA;
+        result.error_message = strdup("Torrent not found");
+        return result;
+    }
+    
+    try {
+        handle.read_piece(piece_index);
+        
+        for (int i = 0; i < 300; i++) {
+            libtorrent::alert const* a = session->session.wait_for_alert(libtorrent::milliseconds(100));
+            if (!a) continue;
+            
+            if (auto* pra = libtorrent::alert_cast<libtorrent::read_piece_alert>(a)) {
+                if (pra->piece == static_cast<int>(piece_index)) {
+                    if (pra->error) {
+                        result.error_code = LIBTORRENT_ERROR_UNKNOWN;
+                        result.error_message = strdup(pra->error.message().c_str());
+                        return result;
+                    }
+                    
+                    result.size = pra->size;
+                    result.data = static_cast<uint8_t*>(malloc(result.size));
+                    if (!result.data) {
+                        result.error_code = LIBTORRENT_ERROR_ALLOCATION_FAILED;
+                        result.error_message = strdup("Failed to allocate memory");
+                        return result;
+                    }
+                    std::memcpy(result.data, pra->buffer.get(), result.size);
+                    return result;
+                }
+            }
+        }
+        
+        result.error_code = LIBTORRENT_ERROR_UNKNOWN;
+        result.error_message = strdup("Timeout waiting for piece data");
+        return result;
+        
+    } catch (const std::exception& e) {
+        result.error_code = LIBTORRENT_ERROR_UNKNOWN;
+        result.error_message = strdup(e.what());
+        return result;
+    } catch (...) {
+        result.error_code = LIBTORRENT_ERROR_UNKNOWN;
+        result.error_message = strdup("Unknown exception");
+        return result;
+    }
+}
+
+void libtorrent_free_read_piece_result(libtorrent_read_piece_result_t* result) {
+    if (!result) return;
+    
+    if (result->data) {
+        free(result->data);
+        result->data = nullptr;
+    }
+    if (result->error_message) {
+        free(result->error_message);
+        result->error_message = nullptr;
+    }
+    result->size = 0;
+}
+
 } // extern "C"

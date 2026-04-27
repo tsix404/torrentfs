@@ -2,7 +2,7 @@ use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
     ReplyOpen, ReplyWrite, Request, ReplyCreate,
 };
-use libc::{EINVAL, ENOENT, ENOSYS, ENOTDIR, EFBIG};
+use libc::{EINVAL, ENOENT, ENOTDIR, EFBIG, EIO};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::runtime::Runtime;
 use torrentfs::metadata::MetadataManager;
+use torrentfs::DownloadCoordinator;
 use torrentfs_libtorrent::Session;
 
 const TTL: Duration = Duration::from_secs(1);
@@ -67,15 +68,27 @@ struct OpenFile {
     data: Vec<u8>,
 }
 
+struct OpenDataFile {
+    info_hash: String,
+    piece_size: u32,
+}
+
 struct MetadataEntry {
     name: String,
     size: u64,
+}
+
+struct TorrentEntry {
+    name: String,
+    info_hash: String,
+    piece_size: u32,
 }
 
 pub struct CoreResources {
     pub metadata_manager: Arc<MetadataManager>,
     pub tokio_runtime: Runtime,
     pub session: Mutex<Session>,
+    pub download_coordinator: Arc<DownloadCoordinator>,
 }
 
 pub struct TorrentFsFilesystem {
@@ -83,7 +96,9 @@ pub struct TorrentFsFilesystem {
     next_ino: u64,
     next_fh: u64,
     open_files: HashMap<u64, OpenFile>,
+    open_data_files: HashMap<u64, OpenDataFile>,
     metadata_entries: HashMap<u64, MetadataEntry>,
+    torrent_entries: HashMap<u64, TorrentEntry>,
     core: Option<CoreResources>,
 }
 
@@ -94,7 +109,9 @@ impl TorrentFsFilesystem {
             next_ino: INO_DYNAMIC_START,
             next_fh: 1,
             open_files: HashMap::new(),
+            open_data_files: HashMap::new(),
             metadata_entries: HashMap::new(),
+            torrent_entries: HashMap::new(),
             core: None,
         }
     }
@@ -104,17 +121,21 @@ impl TorrentFsFilesystem {
         metadata_manager: Arc<MetadataManager>,
         tokio_runtime: Runtime,
         session: Session,
+        download_coordinator: Arc<DownloadCoordinator>,
     ) -> Self {
         Self {
             state_dir,
             next_ino: INO_DYNAMIC_START,
             next_fh: 1,
             open_files: HashMap::new(),
+            open_data_files: HashMap::new(),
             metadata_entries: HashMap::new(),
+            torrent_entries: HashMap::new(),
             core: Some(CoreResources {
                 metadata_manager,
                 tokio_runtime,
                 session: Mutex::new(session),
+                download_coordinator,
             }),
         }
     }
@@ -132,26 +153,22 @@ impl TorrentFsFilesystem {
     }
 
     fn torrent_inode(&self, torrent_name: &str) -> u64 {
-        // Generate deterministic inode for torrent directory
-        // Using a hash function to avoid collisions
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         
         let mut hasher = DefaultHasher::new();
         torrent_name.hash(&mut hasher);
-        (hasher.finish() & 0x7FFFFFFFFFFFFFFF) | 0x8000000000000000 // Ensure high bit set
+        (hasher.finish() & 0x7FFFFFFFFFFFFFFF) | 0x8000000000000000
     }
 
     fn file_inode(&self, torrent_name: &str, file_path: &str) -> u64 {
-        // Generate deterministic inode for file in torrent
-        // Using a hash function to avoid collisions
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         
         let mut hasher = DefaultHasher::new();
         torrent_name.hash(&mut hasher);
         file_path.hash(&mut hasher);
-        (hasher.finish() & 0x7FFFFFFFFFFFFFFF) | 0x8000000000000000 // Ensure high bit set
+        (hasher.finish() & 0x7FFFFFFFFFFFFFFF) | 0x8000000000000000
     }
 }
 
@@ -659,22 +676,152 @@ impl Filesystem for TorrentFsFilesystem {
         reply.ok();
     }
 
-    fn open(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
-        reply.error(ENOSYS);
+    fn open(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
+        if let Some(core) = &self.core {
+            let torrents = core.tokio_runtime.block_on(core.metadata_manager.list_torrents());
+            if let Ok(torrents) = torrents {
+                for torrent in &torrents {
+                    let files = core.tokio_runtime.block_on(
+                        core.metadata_manager.get_torrent_files(&torrent.name)
+                    );
+                    
+                    if let Ok(files) = files {
+                        for file in &files {
+                            let file_ino = self.file_inode(&torrent.name, &file.path);
+                            if file_ino == ino {
+                                let fh = self.allocate_fh();
+                                let info_hash = hex::encode(&torrent.info_hash);
+                                
+                                self.open_data_files.insert(fh, OpenDataFile {
+                                    info_hash: info_hash.clone(),
+                                    piece_size: 16384,
+                                });
+                                
+                                reply.opened(fh, 0);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        reply.error(ENOENT);
     }
 
     fn read(
         &mut self,
         _req: &Request<'_>,
-        _ino: u64,
-        _fh: u64,
-        _offset: i64,
-        _size: u32,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        size: u32,
         _flags: i32,
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        reply.error(ENOSYS);
+        let open_data_file = match self.open_data_files.get(&fh) {
+            Some(f) => f,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        if offset < 0 {
+            reply.error(EINVAL);
+            return;
+        }
+
+        let core = match &self.core {
+            Some(c) => c,
+            None => {
+                reply.error(EIO);
+                return;
+            }
+        };
+
+        let (file_size, _first_piece, _last_piece) = {
+            let torrents = core.tokio_runtime.block_on(core.metadata_manager.list_torrents());
+            let mut found = None;
+            if let Ok(torrents) = torrents {
+                for torrent in &torrents {
+                    let files = core.tokio_runtime.block_on(
+                        core.metadata_manager.get_torrent_files(&torrent.name)
+                    );
+                    if let Ok(files) = files {
+                        for file in &files {
+                            let file_ino = self.file_inode(&torrent.name, &file.path);
+                            if file_ino == ino {
+                                found = Some((file.size, file.first_piece, file.last_piece));
+                                break;
+                            }
+                        }
+                    }
+                    if found.is_some() {
+                        break;
+                    }
+                }
+            }
+            found.unwrap_or((0i64, 0i64, 0i64))
+        };
+
+        if file_size == 0 {
+            reply.data(&[]);
+            return;
+        }
+
+        let offset_u = offset as u64;
+        let end_offset = std::cmp::min(offset_u + size as u64, file_size as u64);
+        
+        if offset_u >= file_size as u64 {
+            reply.data(&[]);
+            return;
+        }
+
+        let read_size = (end_offset - offset_u) as usize;
+        let mut result = vec![0u8; read_size];
+        
+        let piece_size = open_data_file.piece_size as u64;
+        let start_piece = (offset_u / piece_size) as u32;
+        let end_piece = ((end_offset - 1) / piece_size) as u32;
+
+        for piece_idx in start_piece..=end_piece {
+            let piece_data = match core.download_coordinator.get_piece(
+                &open_data_file.info_hash,
+                piece_idx
+            ) {
+                Ok(data) => data,
+                Err(e) => {
+                    tracing::error!(
+                        piece_index = piece_idx,
+                        error = %e,
+                        "Failed to read piece"
+                    );
+                    reply.error(EIO);
+                    return;
+                }
+            };
+
+            let piece_start = (piece_idx as u64) * piece_size;
+            let piece_end = piece_start + piece_data.len() as u64;
+
+            let read_start = std::cmp::max(offset_u, piece_start);
+            let read_end = std::cmp::min(end_offset, piece_end);
+
+            if read_start < read_end {
+                let src_start = (read_start - piece_start) as usize;
+                let src_end = (read_end - piece_start) as usize;
+                let dst_start = (read_start - offset_u) as usize;
+                let dst_end = (read_end - offset_u) as usize;
+
+                if src_end <= piece_data.len() && dst_end <= result.len() {
+                    result[dst_start..dst_end].copy_from_slice(&piece_data[src_start..src_end]);
+                }
+            }
+        }
+
+        reply.data(&result);
     }
 }
 

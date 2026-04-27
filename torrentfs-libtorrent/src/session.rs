@@ -72,6 +72,82 @@ impl Session {
         let guard = self.inner.lock().unwrap();
         unsafe { libtorrent_sys::libtorrent_set_alert_mask(*guard, mask) };
     }
+
+    pub fn find_torrent(&self, info_hash_hex: &str) -> bool {
+        let guard = self.inner.lock().unwrap();
+        let info_hash_c = match std::ffi::CString::new(info_hash_hex) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        let result = unsafe {
+            libtorrent_sys::libtorrent_find_torrent(*guard, info_hash_c.as_ptr())
+        };
+        result != 0
+    }
+
+    pub fn resume_torrent(&self, info_hash_hex: &str) -> Result<()> {
+        let guard = self.inner.lock().unwrap();
+        let info_hash_c = std::ffi::CString::new(info_hash_hex)?;
+        
+        let err = unsafe {
+            libtorrent_sys::libtorrent_resume_torrent(*guard, info_hash_c.as_ptr())
+        };
+
+        if err != libtorrent_sys::libtorrent_error_t_LIBTORRENT_OK {
+            bail!("Failed to resume torrent: error code {}", err);
+        }
+
+        Ok(())
+    }
+
+    pub fn set_piece_deadline(&self, info_hash_hex: &str, piece_index: u32, deadline_ms: i32) -> Result<()> {
+        let guard = self.inner.lock().unwrap();
+        let info_hash_c = std::ffi::CString::new(info_hash_hex)?;
+        
+        let err = unsafe {
+            libtorrent_sys::libtorrent_set_piece_deadline(*guard, info_hash_c.as_ptr(), piece_index, deadline_ms)
+        };
+
+        if err != libtorrent_sys::libtorrent_error_t_LIBTORRENT_OK {
+            bail!("Failed to set piece deadline: error code {}", err);
+        }
+
+        Ok(())
+    }
+
+    pub fn read_piece(&self, info_hash_hex: &str, piece_index: u32) -> Result<Vec<u8>> {
+        let guard = self.inner.lock().unwrap();
+        let info_hash_c = std::ffi::CString::new(info_hash_hex)?;
+        
+        let result = unsafe {
+            libtorrent_sys::libtorrent_read_piece(*guard, info_hash_c.as_ptr(), piece_index)
+        };
+
+        if result.error_code != libtorrent_sys::libtorrent_error_t_LIBTORRENT_OK {
+            let msg = if !result.error_message.is_null() {
+                let msg = unsafe { CStr::from_ptr(result.error_message) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe { libc::free(result.error_message as *mut std::ffi::c_void) };
+                msg
+            } else {
+                format!("error code: {}", result.error_code)
+            };
+            bail!("Failed to read piece: {}", msg);
+        }
+
+        let data = if !result.data.is_null() && result.size > 0 {
+            let vec = unsafe {
+                std::slice::from_raw_parts(result.data, result.size).to_vec()
+            };
+            unsafe { libc::free(result.data as *mut std::ffi::c_void) };
+            vec
+        } else {
+            Vec::new()
+        };
+
+        Ok(data)
+    }
 }
 
 impl Drop for Session {

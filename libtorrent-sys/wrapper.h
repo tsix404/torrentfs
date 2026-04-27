@@ -102,6 +102,29 @@ void libtorrent_free_alert_list(libtorrent_alert_list_t* list);
 // Dynamically configure which alert categories are received
 void libtorrent_set_alert_mask(libtorrent_session_t* session, uint64_t mask);
 
+// Find torrent by info hash (returns 1 if found, 0 if not found)
+int libtorrent_find_torrent(libtorrent_session_t* session, const char* info_hash_hex);
+
+// Resume a paused torrent (returns LIBTORRENT_OK on success)
+libtorrent_error_t libtorrent_resume_torrent(libtorrent_session_t* session, const char* info_hash_hex);
+
+// Set piece deadline (deadline_ms from now, returns LIBTORRENT_OK on success)
+libtorrent_error_t libtorrent_set_piece_deadline(libtorrent_session_t* session, const char* info_hash_hex, uint32_t piece_index, int deadline_ms);
+
+// Read piece result structure
+typedef struct {
+    uint8_t* data;
+    size_t size;
+    libtorrent_error_t error_code;
+    char* error_message;
+} libtorrent_read_piece_result_t;
+
+// Read piece data (blocks until piece is available or error)
+libtorrent_read_piece_result_t libtorrent_read_piece(libtorrent_session_t* session, const char* info_hash_hex, uint32_t piece_index);
+
+// Free read piece result
+void libtorrent_free_read_piece_result(libtorrent_read_piece_result_t* result);
+
 // Destroy a libtorrent session
 void libtorrent_destroy_session(libtorrent_session_t* session);
 
