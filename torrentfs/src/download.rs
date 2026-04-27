@@ -3,7 +3,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::piece_cache::PieceCache;
-use torrentfs_libtorrent::Session;
+use torrentfs_libtorrent::{LibtorrentError, LibtorrentErrorCode, Session};
 
 const PIECE_DEADLINE_MS: i32 = 30_000;
 const MAX_RETRIES: u32 = 3;
@@ -11,12 +11,30 @@ const INITIAL_RETRY_DELAY_MS: u64 = 1000;
 
 #[derive(Debug, Clone)]
 pub struct DownloadError {
+    pub code: LibtorrentErrorCode,
     pub message: String,
+}
+
+impl DownloadError {
+    pub fn from_libtorrent(err: &LibtorrentError) -> Self {
+        Self {
+            code: err.code,
+            message: err.message.clone(),
+        }
+    }
+
+    pub fn is_permanent(&self) -> bool {
+        self.code.is_permanent()
+    }
+
+    pub fn is_transient(&self) -> bool {
+        self.code.is_transient()
+    }
 }
 
 impl std::fmt::Display for DownloadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Download error: {}", self.message)
+        write!(f, "{}: {}", self.code, self.message)
     }
 }
 
@@ -32,23 +50,29 @@ impl DownloadCoordinator {
         Self { session, piece_cache }
     }
 
-    pub fn get_piece(&self, info_hash: &str, piece_index: u32) -> std::result::Result<Vec<u8>, DownloadError> {
+    pub fn get_piece(&self, info_hash: &str, piece_index: u32) -> Result<Vec<u8>, DownloadError> {
         if self.piece_cache.has_piece(info_hash, piece_index) {
             return self.piece_cache.read_piece(info_hash, piece_index)
-                .map_err(|e| DownloadError { message: e.to_string() });
+                .map_err(|e| DownloadError { 
+                    code: LibtorrentErrorCode::Unknown, 
+                    message: e.to_string() 
+                });
         }
 
         self.download_piece_with_retry(info_hash, piece_index)
     }
 
-    fn download_piece_with_retry(&self, info_hash: &str, piece_index: u32) -> std::result::Result<Vec<u8>, DownloadError> {
-        let mut last_error = DownloadError { message: String::new() };
+    fn download_piece_with_retry(&self, info_hash: &str, piece_index: u32) -> Result<Vec<u8>, DownloadError> {
+        let mut last_error = DownloadError { 
+            code: LibtorrentErrorCode::Unknown, 
+            message: String::new() 
+        };
         
         for attempt in 0..MAX_RETRIES {
             match self.download_piece(info_hash, piece_index) {
                 Ok(data) => return Ok(data),
                 Err(e) => {
-                    if Self::is_permanent_error(&e) {
+                    if e.is_permanent() {
                         return Err(e);
                     }
                     
@@ -73,28 +97,49 @@ impl DownloadCoordinator {
         Err(last_error)
     }
 
-    fn is_permanent_error(error: &DownloadError) -> bool {
-        let msg = error.message.to_lowercase();
-        msg.contains("not found") || 
-        msg.contains("invalid") ||
-        msg.contains("allocation failed")
-    }
-
-    fn download_piece(&self, info_hash: &str, piece_index: u32) -> std::result::Result<Vec<u8>, DownloadError> {
+    fn download_piece(&self, info_hash: &str, piece_index: u32) -> Result<Vec<u8>, DownloadError> {
         if !self.session.find_torrent(info_hash) {
             return Err(DownloadError { 
+                code: LibtorrentErrorCode::InvalidData,
                 message: format!("Torrent not found: {}", info_hash) 
             });
         }
 
         self.session.resume_torrent(info_hash)
-            .map_err(|e| DownloadError { message: e.to_string() })?;
+            .map_err(|e| {
+                if let Some(lt_err) = e.downcast_ref::<LibtorrentError>() {
+                    DownloadError::from_libtorrent(lt_err)
+                } else {
+                    DownloadError { 
+                        code: LibtorrentErrorCode::Unknown, 
+                        message: e.to_string() 
+                    }
+                }
+            })?;
 
         self.session.set_piece_deadline(info_hash, piece_index, PIECE_DEADLINE_MS)
-            .map_err(|e| DownloadError { message: e.to_string() })?;
+            .map_err(|e| {
+                if let Some(lt_err) = e.downcast_ref::<LibtorrentError>() {
+                    DownloadError::from_libtorrent(lt_err)
+                } else {
+                    DownloadError { 
+                        code: LibtorrentErrorCode::Unknown, 
+                        message: e.to_string() 
+                    }
+                }
+            })?;
 
         let data = self.session.read_piece(info_hash, piece_index)
-            .map_err(|e| DownloadError { message: e.to_string() })?;
+            .map_err(|e| {
+                if let Some(lt_err) = e.downcast_ref::<LibtorrentError>() {
+                    DownloadError::from_libtorrent(lt_err)
+                } else {
+                    DownloadError { 
+                        code: LibtorrentErrorCode::Unknown, 
+                        message: e.to_string() 
+                    }
+                }
+            })?;
 
         if let Err(e) = self.piece_cache.write_piece(info_hash, piece_index, &data) {
             tracing::warn!(
@@ -160,6 +205,24 @@ mod tests {
         let result = coordinator.get_piece("nonexistent_hash_12345678901234567890", 0);
         
         assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("not found"));
+        let err = result.unwrap_err();
+        assert!(err.is_permanent());
+        assert!(err.message.contains("not found"));
+    }
+
+    #[test]
+    fn test_error_code_is_permanent() {
+        assert!(LibtorrentErrorCode::InvalidData.is_permanent());
+        assert!(LibtorrentErrorCode::ParseFailed.is_permanent());
+        assert!(LibtorrentErrorCode::AllocationFailed.is_permanent());
+        assert!(!LibtorrentErrorCode::Timeout.is_permanent());
+        assert!(!LibtorrentErrorCode::Unknown.is_permanent());
+    }
+
+    #[test]
+    fn test_error_code_is_transient() {
+        assert!(LibtorrentErrorCode::Timeout.is_transient());
+        assert!(LibtorrentErrorCode::Unknown.is_transient());
+        assert!(!LibtorrentErrorCode::InvalidData.is_transient());
     }
 }

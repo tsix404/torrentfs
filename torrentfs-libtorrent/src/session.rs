@@ -1,4 +1,5 @@
 use crate::alert::AlertList;
+use crate::error::{LibtorrentError, LibtorrentErrorCode};
 
 use anyhow::{Result, bail};
 use std::ffi::CStr;
@@ -94,7 +95,8 @@ impl Session {
         };
 
         if err != libtorrent_sys::libtorrent_error_t_LIBTORRENT_OK {
-            bail!("Failed to resume torrent: error code {}", err);
+            let code = LibtorrentErrorCode::from_ffi(err as i32);
+            bail!(LibtorrentError::new(code, "Failed to resume torrent"));
         }
 
         Ok(())
@@ -109,12 +111,19 @@ impl Session {
         };
 
         if err != libtorrent_sys::libtorrent_error_t_LIBTORRENT_OK {
-            bail!("Failed to set piece deadline: error code {}", err);
+            let code = LibtorrentErrorCode::from_ffi(err as i32);
+            bail!(LibtorrentError::new(code, "Failed to set piece deadline"));
         }
 
         Ok(())
     }
 
+    /// Reads a piece from the torrent.
+    /// 
+    /// # Blocking Behavior
+    /// This function uses `wait_for_alert()` internally and may block for up to 30 seconds.
+    /// For concurrent filesystem operations, consider spawning blocking tasks on a separate
+    /// thread pool rather than calling this directly from async code.
     pub fn read_piece(&self, info_hash_hex: &str, piece_index: u32) -> Result<Vec<u8>> {
         let guard = self.inner.lock().unwrap();
         let info_hash_c = std::ffi::CString::new(info_hash_hex)?;
@@ -124,6 +133,7 @@ impl Session {
         };
 
         if result.error_code != libtorrent_sys::libtorrent_error_t_LIBTORRENT_OK {
+            let code = LibtorrentErrorCode::from_ffi(result.error_code as i32);
             let msg = if !result.error_message.is_null() {
                 let msg = unsafe { CStr::from_ptr(result.error_message) }
                     .to_string_lossy()
@@ -131,9 +141,9 @@ impl Session {
                 unsafe { libc::free(result.error_message as *mut std::ffi::c_void) };
                 msg
             } else {
-                format!("error code: {}", result.error_code)
+                String::new()
             };
-            bail!("Failed to read piece: {}", msg);
+            bail!(LibtorrentError::new(code, msg));
         }
 
         let data = if !result.data.is_null() && result.size > 0 {
