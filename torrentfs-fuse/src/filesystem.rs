@@ -2,7 +2,7 @@ use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
     ReplyOpen, ReplyWrite, Request, ReplyCreate,
 };
-use libc::{EINVAL, ENOENT, ENOSYS, ENOTDIR, EFBIG};
+use libc::{EEXIST, EINVAL, ENOENT, ENOSYS, ENOTDIR, EFBIG};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
@@ -63,13 +63,29 @@ fn file_attr(ino: u64, size: u64) -> FileAttr {
 }
 
 struct OpenFile {
-    name: String,
+    path: String,
     data: Vec<u8>,
 }
 
 struct MetadataEntry {
-    name: String,
+    path: String,
     size: u64,
+}
+
+struct MetadataDir {
+    ino: u64,
+    parent_ino: u64,
+    relative_path: String,
+}
+
+impl Clone for MetadataDir {
+    fn clone(&self) -> Self {
+        Self {
+            ino: self.ino,
+            parent_ino: self.parent_ino,
+            relative_path: self.relative_path.clone(),
+        }
+    }
 }
 
 pub struct CoreResources {
@@ -84,6 +100,7 @@ pub struct TorrentFsFilesystem {
     next_fh: u64,
     open_files: HashMap<u64, OpenFile>,
     metadata_entries: HashMap<u64, MetadataEntry>,
+    metadata_dirs: HashMap<u64, MetadataDir>,
     core: Option<CoreResources>,
 }
 
@@ -95,6 +112,7 @@ impl TorrentFsFilesystem {
             next_fh: 1,
             open_files: HashMap::new(),
             metadata_entries: HashMap::new(),
+            metadata_dirs: HashMap::new(),
             core: None,
         }
     }
@@ -111,6 +129,7 @@ impl TorrentFsFilesystem {
             next_fh: 1,
             open_files: HashMap::new(),
             metadata_entries: HashMap::new(),
+            metadata_dirs: HashMap::new(),
             core: Some(CoreResources {
                 metadata_manager,
                 tokio_runtime,
@@ -131,27 +150,49 @@ impl TorrentFsFilesystem {
         fh
     }
 
-    fn torrent_inode(&self, torrent_name: &str) -> u64 {
-        // Generate deterministic inode for torrent directory
-        // Using a hash function to avoid collisions
+    fn torrent_inode(&self, metadata_path: &str, torrent_name: &str) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         
         let mut hasher = DefaultHasher::new();
+        metadata_path.hash(&mut hasher);
         torrent_name.hash(&mut hasher);
-        (hasher.finish() & 0x7FFFFFFFFFFFFFFF) | 0x8000000000000000 // Ensure high bit set
+        (hasher.finish() & 0x7FFFFFFFFFFFFFFF) | 0x8000000000000000
     }
 
     fn file_inode(&self, torrent_name: &str, file_path: &str) -> u64 {
-        // Generate deterministic inode for file in torrent
-        // Using a hash function to avoid collisions
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         
         let mut hasher = DefaultHasher::new();
         torrent_name.hash(&mut hasher);
         file_path.hash(&mut hasher);
-        (hasher.finish() & 0x7FFFFFFFFFFFFFFF) | 0x8000000000000000 // Ensure high bit set
+        (hasher.finish() & 0x7FFFFFFFFFFFFFFF) | 0x8000000000000000
+    }
+
+    fn data_dir_inode(&self, path: &str) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        
+        let mut hasher = DefaultHasher::new();
+        path.hash(&mut hasher);
+        (hasher.finish() & 0x7FFFFFFFFFFFFFFF) | 0xC000000000000000
+    }
+
+    fn find_metadata_dir_by_parent_and_name(&self, parent: u64, name: &str) -> Option<(u64, &MetadataDir)> {
+        for (ino, dir) in &self.metadata_dirs {
+            if dir.parent_ino == parent && dir.relative_path.ends_with(&format!("/{}", name)) {
+                return Some((*ino, dir));
+            }
+        }
+        None
+    }
+
+    fn is_under_metadata(&self, ino: u64) -> bool {
+        if ino == INO_METADATA {
+            return true;
+        }
+        self.metadata_dirs.contains_key(&ino)
     }
 }
 
@@ -176,27 +217,47 @@ impl Filesystem for TorrentFsFilesystem {
             }
         } else if parent == INO_METADATA {
             let name_str = name.to_string_lossy();
+            
             for (ino, entry) in &self.metadata_entries {
-                if entry.name == name_str {
+                let entry_name = entry.path.rsplit('/').next().unwrap_or(&entry.path);
+                if entry_name == name_str {
                     reply.entry(&TTL, &file_attr(*ino, entry.size), 0);
                     return;
                 }
             }
+            
+            if let Some((ino, _dir)) = self.find_metadata_dir_by_parent_and_name(parent, &name_str) {
+                reply.entry(&TTL, &dir_attr(ino), 0);
+                return;
+            }
+            
             reply.error(ENOENT);
         } else if parent == INO_DATA {
-            // Lookup torrent directory in data/
             let name_str = name.to_string_lossy();
             
-            // Check if this is a torrent directory
             if let Some(core) = &self.core {
                 let torrents = core.tokio_runtime.block_on(core.metadata_manager.list_torrents());
                 match torrents {
                     Ok(torrents) => {
-                        for torrent in torrents {
-                            if torrent.name == name_str {
-                                let ino = self.torrent_inode(&torrent.name);
-                                reply.entry(&TTL, &dir_attr(ino), 0);
-                                return;
+                        for torrent in &torrents {
+                            if torrent.metadata_path.is_empty() {
+                                if torrent.name == name_str {
+                                    let ino = self.torrent_inode(&torrent.metadata_path, &torrent.name);
+                                    reply.entry(&TTL, &dir_attr(ino), 0);
+                                    return;
+                                }
+                            } else {
+                                let path_parts: Vec<&str> = torrent.metadata_path.split('/').collect();
+                                if path_parts.len() == 1 && path_parts[0] == name_str {
+                                    let ino = self.torrent_inode(&torrent.metadata_path, &torrent.name);
+                                    reply.entry(&TTL, &dir_attr(ino), 0);
+                                    return;
+                                }
+                                if !path_parts.is_empty() && path_parts[0] == name_str && path_parts.len() > 1 {
+                                    let ino = self.data_dir_inode(&name_str);
+                                    reply.entry(&TTL, &dir_attr(ino), 0);
+                                    return;
+                                }
                             }
                         }
                         reply.error(ENOENT);
@@ -206,37 +267,119 @@ impl Filesystem for TorrentFsFilesystem {
             } else {
                 reply.error(ENOENT);
             }
-        } else {
-            // Check if parent is a torrent directory
-            if let Some(core) = &self.core {
-                let torrents = core.tokio_runtime.block_on(core.metadata_manager.list_torrents());
-                if let Ok(torrents) = torrents {
-                    for torrent in torrents {
-                        let torrent_ino = self.torrent_inode(&torrent.name);
-                        if parent == torrent_ino {
-                            // This is a lookup for a file within a torrent directory
-                            let name_str = name.to_string_lossy();
-                            
-                            // Get files for this torrent
-                            let files = core.tokio_runtime.block_on(
-                                core.metadata_manager.get_torrent_files(&torrent.name)
-                            );
-                            
-                            if let Ok(files) = files {
-                                for file in files {
-                                    if file.path == name_str {
-                                        let ino = self.file_inode(&torrent.name, &file.path);
-                                        reply.entry(&TTL, &file_attr(ino, file.size as u64), 0);
-                                        return;
-                                    }
-                                }
-                            }
-                            reply.error(ENOENT);
+        } else if self.metadata_dirs.contains_key(&parent) {
+            let name_str = name.to_string_lossy();
+            let parent_dir = self.metadata_dirs.get(&parent).unwrap();
+            let prefix = &parent_dir.relative_path;
+            
+            for (ino, entry) in &self.metadata_entries {
+                if entry.path.starts_with(&format!("{}/", prefix)) {
+                    let rest = &entry.path[prefix.len() + 1..];
+                    if rest == name_str {
+                        reply.entry(&TTL, &file_attr(*ino, entry.size), 0);
+                        return;
+                    }
+                    if rest.starts_with(&format!("{}/", name_str)) {
+                        if let Some((ino, _)) = self.find_metadata_dir_by_parent_and_name(parent, &name_str) {
+                            reply.entry(&TTL, &dir_attr(ino), 0);
                             return;
                         }
                     }
                 }
             }
+            
+            for (ino, dir) in &self.metadata_dirs {
+                if dir.parent_ino == parent && dir.relative_path == format!("{}/{}", prefix, name_str) {
+                    reply.entry(&TTL, &dir_attr(*ino), 0);
+                    return;
+                }
+            }
+            
+            for (ino, entry) in &self.metadata_entries {
+                if entry.path.starts_with(&format!("{}/", prefix)) {
+                    let rest = &entry.path[prefix.len() + 1..];
+                    if rest == name_str {
+                        reply.entry(&TTL, &file_attr(*ino, entry.size), 0);
+                        return;
+                    }
+                }
+            }
+            
+            reply.error(ENOENT);
+        } else if let Some(core) = &self.core {
+            let torrents = core.tokio_runtime.block_on(core.metadata_manager.list_torrents());
+            if let Ok(torrents) = &torrents {
+                for torrent in torrents {
+                    let torrent_ino = self.torrent_inode(&torrent.metadata_path, &torrent.name);
+                    if parent == torrent_ino {
+                        let name_str = name.to_string_lossy();
+                        
+                        let files = core.tokio_runtime.block_on(
+                            core.metadata_manager.get_torrent_files(&torrent.name)
+                        );
+                        
+                        if let Ok(files) = files {
+                            for file in files {
+                                if file.path == name_str {
+                                    let ino = self.file_inode(&torrent.name, &file.path);
+                                    reply.entry(&TTL, &file_attr(ino, file.size as u64), 0);
+                                    return;
+                                }
+                            }
+                        }
+                        reply.error(ENOENT);
+                        return;
+                    }
+                }
+            
+                let mut data_dir_path = String::new();
+                for torrent in torrents {
+                    if !torrent.metadata_path.is_empty() {
+                        let parts: Vec<&str> = torrent.metadata_path.split('/').collect();
+                        let mut current_path = String::new();
+                        for (i, part) in parts.iter().enumerate() {
+                            if i > 0 {
+                                current_path.push('/');
+                            }
+                            current_path.push_str(part);
+                            let dir_ino = self.data_dir_inode(&current_path);
+                            if dir_ino == parent && i < parts.len() - 1 {
+                                data_dir_path = current_path.clone();
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                if !data_dir_path.is_empty() {
+                    let name_str = name.to_string_lossy();
+                    for torrent in torrents {
+                        if torrent.metadata_path.starts_with(&data_dir_path) {
+                            let rest = &torrent.metadata_path[data_dir_path.len()..];
+                            if rest.starts_with('/') {
+                                let remaining = &rest[1..];
+                                let parts: Vec<&str> = remaining.split('/').collect();
+                                if parts.len() == 1 {
+                                    let torrent_ino = self.torrent_inode(&torrent.metadata_path, &torrent.name);
+                                    reply.entry(&TTL, &dir_attr(torrent_ino), 0);
+                                    return;
+                                } else if !parts.is_empty() {
+                                    let next_part = parts[0];
+                                    if next_part == name_str {
+                                        let new_path = format!("{}/{}", data_dir_path, name_str);
+                                        let dir_ino = self.data_dir_inode(&new_path);
+                                        reply.entry(&TTL, &dir_attr(dir_ino), 0);
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            reply.error(ENOENT);
+        } else {
             reply.error(ENOENT);
         }
     }
@@ -250,13 +393,16 @@ impl Filesystem for TorrentFsFilesystem {
             reply.attr(&TTL, &file_attr(ino, entry.size));
             return;
         }
+        if self.metadata_dirs.contains_key(&ino) {
+            reply.attr(&TTL, &dir_attr(ino));
+            return;
+        }
         
-        // Check if ino corresponds to a torrent directory
         if let Some(core) = &self.core {
             let torrents = core.tokio_runtime.block_on(core.metadata_manager.list_torrents());
             if let Ok(torrents) = torrents {
-                for torrent in torrents {
-                    let torrent_ino = self.torrent_inode(&torrent.name);
+                for torrent in &torrents {
+                    let torrent_ino = self.torrent_inode(&torrent.metadata_path, &torrent.name);
                     if torrent_ino == ino {
                         reply.attr(&TTL, &dir_attr(ino));
                         return;
@@ -265,11 +411,15 @@ impl Filesystem for TorrentFsFilesystem {
             }
         }
         
-        // Check if ino corresponds to a file in a torrent directory
+        if ino >= 0xC000000000000000 {
+            reply.attr(&TTL, &dir_attr(ino));
+            return;
+        }
+        
         if let Some(core) = &self.core {
             let torrents = core.tokio_runtime.block_on(core.metadata_manager.list_torrents());
             if let Ok(torrents) = torrents {
-                for torrent in torrents {
+                for torrent in &torrents {
                     let files = core.tokio_runtime.block_on(
                         core.metadata_manager.get_torrent_files(&torrent.name)
                     );
@@ -319,7 +469,7 @@ impl Filesystem for TorrentFsFilesystem {
                     reply.error(EFBIG);
                     return;
                 }
-                if let Some(open_file) = self.open_files.values_mut().find(|f| f.name == entry.name) {
+                if let Some(open_file) = self.open_files.values_mut().find(|f| f.path == entry.path) {
                     open_file.data.resize(new_size_usize, 0);
                 }
                 entry.size = new_size;
@@ -333,36 +483,9 @@ impl Filesystem for TorrentFsFilesystem {
             reply.attr(&TTL, &attr);
             return;
         }
-        
-        // Check if ino corresponds to a torrent directory
-        if let Some(core) = &self.core {
-            let torrents = core.tokio_runtime.block_on(core.metadata_manager.list_torrents());
-            if let Ok(torrents) = torrents {
-                for torrent in torrents {
-                    let torrent_ino = self.torrent_inode(&torrent.name);
-                    if torrent_ino == ino {
-                        // Torrent directories are read-only
-                        reply.attr(&TTL, &dir_attr(ino));
-                        return;
-                    }
-                    
-                    // Check if ino corresponds to a file in torrent directory
-                    let files = core.tokio_runtime.block_on(
-                        core.metadata_manager.get_torrent_files(&torrent.name)
-                    );
-                    
-                    if let Ok(files) = files {
-                        for file in files {
-                            let file_ino = self.file_inode(&torrent.name, &file.path);
-                            if file_ino == ino {
-                                // Data files are read-only
-                                reply.attr(&TTL, &file_attr(ino, file.size as u64));
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
+        if self.metadata_dirs.contains_key(&ino) {
+            reply.attr(&TTL, &dir_attr(ino));
+            return;
         }
         
         reply.error(ENOENT);
@@ -403,11 +526,33 @@ impl Filesystem for TorrentFsFilesystem {
             if idx > offset {
                 let _ = reply.add(INO_ROOT, idx, FileType::Directory, "..");
             }
+            
+            let mut added_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+            
             for (file_ino, entry) in &self.metadata_entries {
-                idx += 1;
-                if idx > offset {
-                    if reply.add(*file_ino, idx, FileType::RegularFile, &entry.name) {
-                        break;
+                let name = entry.path.rsplit('/').next().unwrap_or(&entry.path);
+                if !entry.path.contains('/') {
+                    idx += 1;
+                    if idx > offset {
+                        if reply.add(*file_ino, idx, FileType::RegularFile, name) {
+                            break;
+                        }
+                    }
+                    added_names.insert(name.to_string());
+                }
+            }
+            
+            for (dir_ino, dir) in &self.metadata_dirs {
+                if dir.parent_ino == INO_METADATA {
+                    let name = dir.relative_path.rsplit('/').next().unwrap_or(&dir.relative_path);
+                    if !added_names.contains(name) {
+                        idx += 1;
+                        if idx > offset {
+                            if reply.add(*dir_ino, idx, FileType::Directory, name) {
+                                break;
+                            }
+                        }
+                        added_names.insert(name.to_string());
                     }
                 }
             }
@@ -422,72 +567,257 @@ impl Filesystem for TorrentFsFilesystem {
                 let _ = reply.add(INO_ROOT, idx, FileType::Directory, "..");
             }
             
-            // List torrents from database
             if let Some(core) = &self.core {
                 let torrents = core.tokio_runtime.block_on(core.metadata_manager.list_torrents());
                 match torrents {
                     Ok(torrents) => {
-                        for torrent in torrents {
-                            idx += 1;
-                            if idx > offset {
-                                let ino = self.torrent_inode(&torrent.name);
-                                if reply.add(ino, idx, FileType::Directory, &torrent.name) {
+                        let mut added_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+                        
+                        for torrent in &torrents {
+                            if torrent.metadata_path.is_empty() {
+                                idx += 1;
+                                if idx > offset {
+                                    let torrent_ino = self.torrent_inode(&torrent.metadata_path, &torrent.name);
+                                    if reply.add(torrent_ino, idx, FileType::Directory, &torrent.name) {
+                                        break;
+                                    }
+                                }
+                            } else {
+                                let first_part = torrent.metadata_path.split('/').next().unwrap_or(&torrent.metadata_path);
+                                if !added_names.contains(first_part) {
+                                    idx += 1;
+                                    if idx > offset {
+                                        let dir_ino = self.data_dir_inode(first_part);
+                                        if reply.add(dir_ino, idx, FileType::Directory, first_part) {
+                                            break;
+                                        }
+                                    }
+                                    added_names.insert(first_part.to_string());
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+            reply.ok();
+        } else if let Some(dir) = self.metadata_dirs.get(&ino).cloned() {
+            let prefix = dir.relative_path.clone();
+            let parent_ino = dir.parent_ino;
+            
+            let mut idx = 1i64;
+            if idx > offset {
+                let _ = reply.add(ino, idx, FileType::Directory, ".");
+            }
+            idx += 1;
+            if idx > offset {
+                let _ = reply.add(parent_ino, idx, FileType::Directory, "..");
+            }
+            
+            let mut added_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+            
+            for (sub_dir_ino, sub_dir) in &self.metadata_dirs {
+                if sub_dir.parent_ino == ino {
+                    let name = sub_dir.relative_path.rsplit('/').next().unwrap_or(&sub_dir.relative_path);
+                    idx += 1;
+                    if idx > offset {
+                        if reply.add(*sub_dir_ino, idx, FileType::Directory, name) {
+                            break;
+                        }
+                    }
+                    added_names.insert(name.to_string());
+                }
+            }
+            
+            for (file_ino, entry) in &self.metadata_entries {
+                if entry.path.starts_with(&format!("{}/", prefix)) {
+                    let rest = &entry.path[prefix.len() + 1..];
+                    if !rest.contains('/') {
+                        idx += 1;
+                        if idx > offset {
+                            if reply.add(*file_ino, idx, FileType::RegularFile, rest) {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            reply.ok();
+        } else if let Some(core) = &self.core {
+            let torrents = core.tokio_runtime.block_on(core.metadata_manager.list_torrents());
+            if let Ok(torrents) = torrents {
+                let mut torrent_found = false;
+                
+                for torrent in &torrents {
+                    let torrent_ino = self.torrent_inode(&torrent.metadata_path, &torrent.name);
+                    if ino == torrent_ino {
+                        torrent_found = true;
+                        let mut idx = 1i64;
+                        if idx > offset {
+                            let _ = reply.add(torrent_ino, idx, FileType::Directory, ".");
+                        }
+                        idx += 1;
+                        if idx > offset {
+                            let _ = reply.add(INO_DATA, idx, FileType::Directory, "..");
+                        }
+                        
+                        let files = core.tokio_runtime.block_on(
+                            core.metadata_manager.get_torrent_files(&torrent.name)
+                        );
+                        
+                        if let Ok(files) = files {
+                            for file in files {
+                                idx += 1;
+                                if idx > offset {
+                                    let file_ino = self.file_inode(&torrent.name, &file.path);
+                                    if reply.add(file_ino, idx, FileType::RegularFile, &file.path) {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        reply.ok();
+                        return;
+                    }
+                }
+                
+                if !torrent_found {
+                    let mut data_dir_path = String::new();
+                    for torrent in &torrents {
+                        if !torrent.metadata_path.is_empty() {
+                            let parts: Vec<&str> = torrent.metadata_path.split('/').collect();
+                            let mut current_path = String::new();
+                            for (i, part) in parts.iter().enumerate() {
+                                if i > 0 {
+                                    current_path.push('/');
+                                }
+                                current_path.push_str(part);
+                                let dir_ino = self.data_dir_inode(&current_path);
+                                if dir_ino == ino {
+                                    data_dir_path = current_path.clone();
                                     break;
                                 }
                             }
                         }
                     }
-                    Err(_) => {
-                        // If database error, return empty directory
-                    }
-                }
-            }
-            reply.ok();
-        } else {
-            // Check if this is a torrent directory
-            if let Some(core) = &self.core {
-                let torrents = core.tokio_runtime.block_on(core.metadata_manager.list_torrents());
-                if let Ok(torrents) = torrents {
-                    for torrent in torrents {
-                        let torrent_ino = self.torrent_inode(&torrent.name);
-                        if ino == torrent_ino {
-                            // List files in torrent directory
-                            let mut idx = 1i64;
-                            if idx > offset {
-                                let _ = reply.add(torrent_ino, idx, FileType::Directory, ".");
-                            }
-                            idx += 1;
-                            if idx > offset {
-                                let _ = reply.add(INO_DATA, idx, FileType::Directory, "..");
-                            }
-                            
-                            let files = core.tokio_runtime.block_on(
-                                core.metadata_manager.get_torrent_files(&torrent.name)
-                            );
-                            
-                            if let Ok(files) = files {
-                                for file in files {
-                                    idx += 1;
-                                    if idx > offset {
-                                        let file_ino = self.file_inode(&torrent.name, &file.path);
-                                        if reply.add(file_ino, idx, FileType::RegularFile, &file.path) {
-                                            break;
+                    
+                    if !data_dir_path.is_empty() {
+                        let mut idx = 1i64;
+                        if idx > offset {
+                            let _ = reply.add(ino, idx, FileType::Directory, ".");
+                        }
+                        idx += 1;
+                        
+                        let parent_path = data_dir_path.rsplit_once('/')
+                            .map(|(p, _)| p)
+                            .unwrap_or("");
+                        let parent_ino = if parent_path.is_empty() {
+                            INO_DATA
+                        } else {
+                            self.data_dir_inode(parent_path)
+                        };
+                        if idx > offset {
+                            let _ = reply.add(parent_ino, idx, FileType::Directory, "..");
+                        }
+                        
+                        let mut added_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+                        
+                        for torrent in &torrents {
+                            if torrent.metadata_path.starts_with(&format!("{}/", data_dir_path)) {
+                                let rest = &torrent.metadata_path[data_dir_path.len() + 1..];
+                                if !rest.is_empty() {
+                                    let parts: Vec<&str> = rest.split('/').collect();
+                                    if parts.len() == 1 {
+                                        let torrent_ino = self.torrent_inode(&torrent.metadata_path, &torrent.name);
+                                        idx += 1;
+                                        if idx > offset {
+                                            if reply.add(torrent_ino, idx, FileType::Directory, &torrent.name) {
+                                                break;
+                                            }
+                                        }
+                                    } else {
+                                        let first_part = parts[0];
+                                        if !added_names.contains(first_part) {
+                                            let new_path = format!("{}/{}", data_dir_path, first_part);
+                                            let dir_ino = self.data_dir_inode(&new_path);
+                                            idx += 1;
+                                            if idx > offset {
+                                                if reply.add(dir_ino, idx, FileType::Directory, first_part) {
+                                                    break;
+                                                }
+                                            }
+                                            added_names.insert(first_part.to_string());
                                         }
                                     }
                                 }
                             }
-                            reply.ok();
-                            return;
                         }
+                        reply.ok();
+                        return;
                     }
                 }
             }
+            reply.error(ENOTDIR);
+        } else {
             reply.error(ENOTDIR);
         }
     }
 
     fn opendir(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
         reply.opened(0, 0);
+    }
+
+    fn mkdir(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        if parent != INO_METADATA && !self.metadata_dirs.contains_key(&parent) {
+            reply.error(ENOENT);
+            return;
+        }
+
+        let name_str = name.to_string_lossy();
+        
+        let parent_path = if parent == INO_METADATA {
+            String::new()
+        } else {
+            self.metadata_dirs.get(&parent).map(|d| d.relative_path.clone()).unwrap_or_default()
+        };
+        
+        let new_path = if parent_path.is_empty() {
+            name_str.to_string()
+        } else {
+            format!("{}/{}", parent_path, name_str)
+        };
+        
+        for (ino, entry) in &self.metadata_entries {
+            if entry.path == new_path || entry.path.starts_with(&format!("{}/", new_path)) {
+                reply.error(EEXIST);
+                return;
+            }
+        }
+        
+        for (_ino, dir) in &self.metadata_dirs {
+            if dir.relative_path == new_path {
+                reply.error(EEXIST);
+                return;
+            }
+        }
+
+        let ino = self.allocate_ino();
+        
+        self.metadata_dirs.insert(ino, MetadataDir {
+            ino,
+            parent_ino: parent,
+            relative_path: new_path,
+        });
+
+        reply.entry(&TTL, &dir_attr(ino), 0);
     }
 
     fn create(
@@ -500,7 +830,7 @@ impl Filesystem for TorrentFsFilesystem {
         _flags: i32,
         reply: ReplyCreate,
     ) {
-        if parent != INO_METADATA {
+        if parent != INO_METADATA && !self.metadata_dirs.contains_key(&parent) {
             reply.error(ENOENT);
             return;
         }
@@ -511,11 +841,21 @@ impl Filesystem for TorrentFsFilesystem {
             return;
         }
 
-        let name_owned = name_str.into_owned();
+        let parent_path = if parent == INO_METADATA {
+            String::new()
+        } else {
+            self.metadata_dirs.get(&parent).map(|d| d.relative_path.clone()).unwrap_or_default()
+        };
+        
+        let file_path = if parent_path.is_empty() {
+            name_str.to_string()
+        } else {
+            format!("{}/{}", parent_path, name_str)
+        };
 
-        for entry in self.metadata_entries.values() {
-            if entry.name == name_owned {
-                reply.error(libc::EEXIST);
+        for (_ino, entry) in &self.metadata_entries {
+            if entry.path == file_path {
+                reply.error(EEXIST);
                 return;
             }
         }
@@ -524,11 +864,11 @@ impl Filesystem for TorrentFsFilesystem {
         let fh = self.allocate_fh();
 
         self.metadata_entries.insert(ino, MetadataEntry {
-            name: name_owned.clone(),
+            path: file_path.clone(),
             size: 0,
         });
         self.open_files.insert(fh, OpenFile {
-            name: name_owned,
+            path: file_path,
             data: Vec::new(),
         });
 
@@ -609,13 +949,25 @@ impl Filesystem for TorrentFsFilesystem {
             }
         };
 
-        let name = open_file.name.clone();
+        let path = open_file.path.clone();
         let data = open_file.data.clone();
+        
+        let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+        let metadata_path = if path.contains('/') {
+            let parts: Vec<&str> = path.rsplitn(2, '/').collect();
+            if parts.len() > 1 {
+                parts[1].to_string()
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
 
         if let Some(core) = &self.core {
             let manager = core.metadata_manager.clone();
 
-            match core.tokio_runtime.block_on(manager.process_torrent_data(&data)) {
+            match core.tokio_runtime.block_on(manager.process_torrent_data(&data, &metadata_path)) {
                 Ok(parsed) => {
                     if let Err(e) = core.tokio_runtime.block_on(manager.persist_to_db(&parsed)) {
                         tracing::error!("Failed to persist torrent to DB: {}", e);
@@ -630,8 +982,9 @@ impl Filesystem for TorrentFsFilesystem {
                     }
 
                     tracing::info!(
-                        "Processed torrent '{}' ({} files, {} bytes) - kept in metadata/",
-                        name, parsed.file_count, parsed.total_size
+                        "Processed torrent '{}' ({} files, {} bytes) - kept in metadata/{}",
+                        name, parsed.file_count, parsed.total_size, 
+                        if metadata_path.is_empty() { "".to_string() } else { format!("/{}/", metadata_path) }
                     );
                 }
                 Err(e) => {
@@ -727,6 +1080,7 @@ mod tests {
         assert_eq!(fs.next_fh, 1);
         assert!(fs.open_files.is_empty());
         assert!(fs.metadata_entries.is_empty());
+        assert!(fs.metadata_dirs.is_empty());
     }
 
     #[test]
@@ -756,11 +1110,11 @@ mod tests {
         let fh = fs.allocate_fh();
 
         fs.metadata_entries.insert(ino, MetadataEntry {
-            name: "test.torrent".to_string(),
+            path: "test.torrent".to_string(),
             size: 0,
         });
         fs.open_files.insert(fh, OpenFile {
-            name: "test.torrent".to_string(),
+            path: "test.torrent".to_string(),
             data: vec![0u8; 42],
         });
         fs.metadata_entries.get_mut(&ino).unwrap().size = 42;
@@ -777,11 +1131,11 @@ mod tests {
         let fh = fs.allocate_fh();
 
         fs.metadata_entries.insert(ino, MetadataEntry {
-            name: "keep.torrent".to_string(),
+            path: "keep.torrent".to_string(),
             size: 5,
         });
         fs.open_files.insert(fh, OpenFile {
-            name: "keep.torrent".to_string(),
+            path: "keep.torrent".to_string(),
             data: vec![1u8, 2, 3, 4, 5],
         });
 
@@ -805,16 +1159,16 @@ mod tests {
         let ino = fs.allocate_ino();
         let fh = fs.allocate_fh();
         fs.metadata_entries.insert(ino, MetadataEntry {
-            name: "dup.torrent".to_string(),
+            path: "dup.torrent".to_string(),
             size: 0,
         });
         fs.open_files.insert(fh, OpenFile {
-            name: "dup.torrent".to_string(),
+            path: "dup.torrent".to_string(),
             data: Vec::new(),
         });
 
         for entry in fs.metadata_entries.values() {
-            if entry.name == "dup.torrent" {
+            if entry.path == "dup.torrent" {
                 return;
             }
         }
@@ -827,5 +1181,21 @@ mod tests {
         let fs = TorrentFsFilesystem::new(state_dir);
         assert!(fs.core.is_none());
         assert_eq!(fs.next_ino, INO_DYNAMIC_START);
+    }
+
+    #[test]
+    fn test_metadata_dir_tracking() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let mut fs = TorrentFsFilesystem::new(state_dir.path().to_path_buf());
+        
+        let dir_ino = fs.allocate_ino();
+        fs.metadata_dirs.insert(dir_ino, MetadataDir {
+            ino: dir_ino,
+            parent_ino: INO_METADATA,
+            relative_path: "subdir".to_string(),
+        });
+        
+        assert!(fs.metadata_dirs.contains_key(&dir_ino));
+        assert_eq!(fs.metadata_dirs.get(&dir_ino).unwrap().relative_path, "subdir");
     }
 }

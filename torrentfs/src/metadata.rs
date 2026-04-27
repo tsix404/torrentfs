@@ -15,6 +15,7 @@ pub struct ParsedTorrent {
     pub total_size: i64,
     pub file_count: i64,
     pub files: Vec<FileEntry>,
+    pub metadata_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -31,7 +32,7 @@ impl MetadataManager {
         Ok(Self { repo })
     }
 
-    pub async fn process_torrent_data(&self, data: &[u8]) -> Result<ParsedTorrent> {
+    pub async fn process_torrent_data(&self, data: &[u8], metadata_path: &str) -> Result<ParsedTorrent> {
         let info = torrentfs_libtorrent::parse_torrent(data)
             .context("Failed to parse torrent data")?;
 
@@ -51,6 +52,7 @@ impl MetadataManager {
             total_size: info.total_size as i64,
             file_count: info.file_count as i64,
             files,
+            metadata_path: metadata_path.to_string(),
         })
     }
 
@@ -71,6 +73,7 @@ impl MetadataManager {
             &parsed.torrent_name,
             parsed.total_size,
             parsed.file_count,
+            &parsed.metadata_path,
             repo_files,
         ).await?;
 
@@ -143,7 +146,7 @@ mod tests {
         let (_temp_dir, db) = setup_temp_db().await;
         let manager = MetadataManager::new(Arc::new(db)).unwrap();
 
-        let parsed = manager.process_torrent_data(&data).await.unwrap();
+        let parsed = manager.process_torrent_data(&data, "").await.unwrap();
         assert!(!parsed.torrent_name.is_empty());
         assert_eq!(parsed.info_hash.len(), 20);
         assert!(parsed.total_size > 0);
@@ -158,7 +161,7 @@ mod tests {
         let (_temp_dir, db) = setup_temp_db().await;
         let manager = MetadataManager::new(Arc::new(db)).unwrap();
 
-        let parsed = manager.process_torrent_data(&data).await.unwrap();
+        let parsed = manager.process_torrent_data(&data, "").await.unwrap();
         manager.persist_to_db(&parsed).await.unwrap();
     }
 
@@ -170,7 +173,7 @@ mod tests {
         let (_temp_dir, db) = setup_temp_db().await;
         let manager = MetadataManager::new(Arc::new(db)).unwrap();
 
-        let parsed = manager.process_torrent_data(&data).await.unwrap();
+        let parsed = manager.process_torrent_data(&data, "").await.unwrap();
         manager.persist_to_db(&parsed).await.unwrap();
 
         // Re-read from DB and verify piece ranges

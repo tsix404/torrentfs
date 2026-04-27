@@ -80,6 +80,7 @@ impl Database {
                     total_size INTEGER NOT NULL,
                     file_count INTEGER NOT NULL,
                     status TEXT NOT NULL DEFAULT 'pending',
+                    metadata_path TEXT NOT NULL DEFAULT '',
                     added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )"
             )
