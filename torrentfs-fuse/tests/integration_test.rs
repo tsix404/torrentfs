@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -200,7 +201,6 @@ fn test_init_and_mount_pipeline() {
         metadata_manager,
         rt,
         session,
-        runtime.download_coordinator.clone(),
     );
 
     let options = vec![
@@ -259,7 +259,6 @@ fn test_data_directory_populated_from_db() {
         metadata_manager,
         rt,
         session,
-        runtime.download_coordinator.clone(),
     );
 
     let options = vec![
@@ -302,19 +301,19 @@ fn test_data_directory_populated_from_db() {
         let torrent_path = mount_path.join("data").join(torrent_dir);
         assert!(torrent_path.is_dir(), "{} should be a directory", torrent_dir);
 
-        // Check files in torrent directory
         let file_entries: Vec<_> = fs::read_dir(&torrent_path)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
 
-        assert!(!file_entries.is_empty(), "Torrent directory should contain files");
+        assert!(!file_entries.is_empty(), "Torrent directory should contain files or subdirectories");
         
-        // Check file sizes
         for file_name in &file_entries {
             let file_path = torrent_path.join(file_name);
             let metadata = fs::metadata(&file_path).unwrap();
-            assert!(metadata.len() > 0, "File {} should have non-zero size", file_name);
+            if metadata.is_file() {
+                assert!(metadata.len() > 0, "File {} should have non-zero size", file_name);
+            }
         }
     }
 
@@ -498,6 +497,122 @@ fn test_nested_subdirectory_in_metadata() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     assert!(a_b_entries.contains(&"c".to_string()), "a/b should contain c");
+
+    cleanup_mount(&mount_path, guard);
+}
+
+#[test]
+#[serial]
+fn test_torrent_nested_directory_operations() {
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+
+    let guard = spawn_fs(&mount_path, &state_path);
+
+    thread::sleep(Duration::from_millis(500));
+
+    let src = std::path::PathBuf::from("test_data/multi_file.torrent");
+    if !src.exists() {
+        eprintln!("multi_file.torrent not found, skipping nested directory test");
+        cleanup_mount(&mount_path, guard);
+        return;
+    }
+
+    let dest = mount_path.join("metadata").join(src.file_name().unwrap());
+    let result = fs::copy(&src, &dest);
+    assert!(result.is_ok(), "Failed to copy .torrent file: {:?}", result.err());
+
+    thread::sleep(Duration::from_millis(500));
+
+    let data_entries: Vec<_> = fs::read_dir(mount_path.join("data"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+
+    assert!(data_entries.contains(&"multi_file_test".to_string()), 
+        "data/ should contain multi_file_test directory");
+
+    let torrent_dir = mount_path.join("data").join("multi_file_test");
+    assert!(torrent_dir.is_dir(), "multi_file_test should be a directory");
+
+    let torrent_entries: Vec<_> = fs::read_dir(&torrent_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+
+    assert!(torrent_entries.contains(&"dir1".to_string()), 
+        "multi_file_test should contain dir1");
+    assert!(torrent_entries.contains(&"dir2".to_string()), 
+        "multi_file_test should contain dir2");
+
+    let dir1_path = torrent_dir.join("dir1");
+    assert!(dir1_path.is_dir(), "dir1 should be a directory");
+    assert!(dir1_path.metadata().unwrap().is_dir(), "dir1 metadata should show it as directory");
+
+    let dir1_entries: Vec<_> = fs::read_dir(&dir1_path)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+
+    assert!(dir1_entries.contains(&"a.txt".to_string()), 
+        "dir1 should contain a.txt");
+
+    let a_txt_path = dir1_path.join("a.txt");
+    assert!(a_txt_path.is_file(), "a.txt should be a file");
+    assert!(a_txt_path.metadata().unwrap().len() > 0, "a.txt should have non-zero size");
+
+    let dir2_path = torrent_dir.join("dir2");
+    assert!(dir2_path.is_dir(), "dir2 should be a directory");
+
+    let non_existent = torrent_dir.join("nonexistent");
+    assert!(!non_existent.exists(), "non-existent path should not exist");
+
+    cleanup_mount(&mount_path, guard);
+}
+
+#[test]
+#[serial]
+fn test_torrent_getattr_for_directories() {
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+
+    let guard = spawn_fs(&mount_path, &state_path);
+
+    thread::sleep(Duration::from_millis(500));
+
+    let src = std::path::PathBuf::from("test_data/multi_file.torrent");
+    if !src.exists() {
+        eprintln!("multi_file.torrent not found, skipping getattr test");
+        cleanup_mount(&mount_path, guard);
+        return;
+    }
+
+    let dest = mount_path.join("metadata").join(src.file_name().unwrap());
+    let result = fs::copy(&src, &dest);
+    assert!(result.is_ok(), "Failed to copy .torrent file: {:?}", result.err());
+
+    thread::sleep(Duration::from_millis(500));
+
+    let torrent_dir = mount_path.join("data").join("multi_file_test");
+    let torrent_metadata = fs::metadata(&torrent_dir).unwrap();
+    assert!(torrent_metadata.is_dir(), "multi_file_test should be a directory");
+    assert_eq!(torrent_metadata.permissions().mode() & 0o777, 0o755, "directory should have 755 permissions");
+
+    let dir1_path = torrent_dir.join("dir1");
+    let dir1_metadata = fs::metadata(&dir1_path).unwrap();
+    assert!(dir1_metadata.is_dir(), "dir1 should be a directory");
+    assert_eq!(dir1_metadata.permissions().mode() & 0o777, 0o755, "dir1 should have 755 permissions");
+
+    let a_txt_path = dir1_path.join("a.txt");
+    let a_txt_metadata = fs::metadata(&a_txt_path).unwrap();
+    assert!(a_txt_metadata.is_file(), "a.txt should be a file");
+    assert_eq!(a_txt_metadata.permissions().mode() & 0o777, 0o644, "a.txt should have 644 permissions");
 
     cleanup_mount(&mount_path, guard);
 }

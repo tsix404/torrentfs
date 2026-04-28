@@ -179,6 +179,16 @@ impl TorrentFsFilesystem {
         (hasher.finish() & 0x7FFFFFFFFFFFFFFF) | 0xC000000000000000
     }
 
+    fn torrent_file_dir_inode(&self, torrent_name: &str, dir_path: &str) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        
+        let mut hasher = DefaultHasher::new();
+        torrent_name.hash(&mut hasher);
+        dir_path.hash(&mut hasher);
+        (hasher.finish() & 0x0FFFFFFFFFFFFFFF) | 0xD000000000000000
+    }
+
     fn find_metadata_dir_by_parent_and_name(&self, parent: u64, name: &str) -> Option<(u64, &MetadataDir)> {
         for (ino, dir) in &self.metadata_dirs {
             if dir.parent_ino == parent && dir.relative_path.ends_with(&format!("/{}", name)) {
@@ -320,12 +330,106 @@ impl Filesystem for TorrentFsFilesystem {
                         );
                         
                         if let Ok(files) = files {
-                            for file in files {
-                                let file_name = file.path.rsplit('/').next().unwrap_or(&file.path);
-                                if file_name == name_str {
+                            let mut seen_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
+                            
+                            for file in &files {
+                                let relative_path = file.path.strip_prefix(&torrent.name)
+                                    .unwrap_or(&file.path);
+                                let relative_path = relative_path.strip_prefix('/').unwrap_or(relative_path);
+                                
+                                let parts: Vec<&str> = relative_path.split('/').collect();
+                                
+                                if parts.len() == 1 && parts[0] == name_str {
                                     let ino = self.file_inode(&torrent.name, &file.path);
                                     reply.entry(&TTL, &file_attr(ino, file.size as u64), 0);
                                     return;
+                                } else if parts.len() > 1 {
+                                    let dir_name = parts[0];
+                                    if dir_name == name_str && !seen_dirs.contains(dir_name) {
+                                        seen_dirs.insert(dir_name.to_string());
+                                        let dir_path = format!("{}/{}", torrent.name, dir_name);
+                                        let dir_ino = self.torrent_file_dir_inode(&torrent.name, &dir_path);
+                                        reply.entry(&TTL, &dir_attr(dir_ino), 0);
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        reply.error(ENOENT);
+                        return;
+                    }
+                    
+                    if parent >= 0xD000000000000000 && parent < 0xE000000000000000 {
+                        let files = core.tokio_runtime.block_on(
+                            core.metadata_manager.get_torrent_files(&torrent.name)
+                        );
+                        
+                        if let Ok(files) = files {
+                            let mut current_dir_path: Option<String> = None;
+                            
+                            for file in &files {
+                                let relative_path = file.path.strip_prefix(&torrent.name)
+                                    .unwrap_or(&file.path);
+                                let relative_path = relative_path.strip_prefix('/').unwrap_or(relative_path);
+                                
+                                let parts: Vec<&str> = relative_path.split('/').collect();
+                                let mut dir_path = torrent.name.clone();
+                                
+                                for (i, part) in parts.iter().enumerate() {
+                                    if i < parts.len() - 1 {
+                                        dir_path = format!("{}/{}", dir_path, part);
+                                        let dir_ino = self.torrent_file_dir_inode(&torrent.name, &dir_path);
+                                        
+                                        if dir_ino == parent {
+                                            current_dir_path = Some(dir_path.clone());
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                if current_dir_path.is_some() {
+                                    break;
+                                }
+                            }
+                            
+                            if let Some(current_dir) = current_dir_path {
+                                let name_str = name.to_string_lossy();
+                                let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+                                
+                                for file in &files {
+                                    let relative_path = file.path.strip_prefix(&torrent.name)
+                                        .unwrap_or(&file.path);
+                                    let relative_path = relative_path.strip_prefix('/').unwrap_or(relative_path);
+                                    
+                                    let starts_with_dir = relative_path.starts_with(&current_dir);
+                                    let full_relative = format!("{}/{}", torrent.name, relative_path);
+                                    let full_starts = full_relative.starts_with(&current_dir);
+                                    
+                                    if starts_with_dir || full_starts {
+                                        let rest = if starts_with_dir {
+                                            relative_path[current_dir.len()..].to_string()
+                                        } else {
+                                            full_relative[current_dir.len()..].to_string()
+                                        };
+                                        
+                                        let rest = rest.strip_prefix('/').unwrap_or(&rest);
+                                        let parts: Vec<&str> = rest.split('/').collect();
+                                        
+                                        if parts.len() == 1 && parts[0] == name_str {
+                                            let ino = self.file_inode(&torrent.name, &file.path);
+                                            reply.entry(&TTL, &file_attr(ino, file.size as u64), 0);
+                                            return;
+                                        } else if parts.len() > 1 {
+                                            let subdir_name = parts[0];
+                                            if subdir_name == name_str && !seen_names.contains(subdir_name) {
+                                                seen_names.insert(subdir_name.to_string());
+                                                let subdir_path = format!("{}/{}", current_dir, subdir_name);
+                                                let subdir_ino = self.torrent_file_dir_inode(&torrent.name, &subdir_path);
+                                                reply.entry(&TTL, &dir_attr(subdir_ino), 0);
+                                                return;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -408,6 +512,35 @@ impl Filesystem for TorrentFsFilesystem {
                     if torrent_ino == ino {
                         reply.attr(&TTL, &dir_attr(ino));
                         return;
+                    }
+                    
+                    if ino >= 0xD000000000000000 && ino < 0xE000000000000000 {
+                        let files = core.tokio_runtime.block_on(
+                            core.metadata_manager.get_torrent_files(&torrent.name)
+                        );
+                        
+                        if let Ok(files) = files {
+                            for file in &files {
+                                let relative_path = file.path.strip_prefix(&torrent.name)
+                                    .unwrap_or(&file.path);
+                                let relative_path = relative_path.strip_prefix('/').unwrap_or(relative_path);
+                                
+                                let parts: Vec<&str> = relative_path.split('/').collect();
+                                let mut dir_path = torrent.name.clone();
+                                
+                                for (i, part) in parts.iter().enumerate() {
+                                    if i < parts.len() - 1 {
+                                        dir_path = format!("{}/{}", dir_path, part);
+                                        let dir_ino = self.torrent_file_dir_inode(&torrent.name, &dir_path);
+                                        
+                                        if dir_ino == ino {
+                                            reply.attr(&TTL, &dir_attr(ino));
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -665,19 +798,150 @@ impl Filesystem for TorrentFsFilesystem {
                         );
                         
                         if let Ok(files) = files {
-                            for file in files {
-                                let file_name = file.path.rsplit('/').next().unwrap_or(&file.path);
-                                idx += 1;
-                                if idx > offset {
-                                    let file_ino = self.file_inode(&torrent.name, &file.path);
-                                    if reply.add(file_ino, idx, FileType::RegularFile, file_name) {
-                                        break;
+                            let mut added_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+                            
+                            for file in &files {
+                                let relative_path = file.path.strip_prefix(&torrent.name)
+                                    .unwrap_or(&file.path);
+                                let relative_path = relative_path.strip_prefix('/').unwrap_or(relative_path);
+                                
+                                let parts: Vec<&str> = relative_path.split('/').collect();
+                                
+                                if parts.len() == 1 {
+                                    idx += 1;
+                                    if idx > offset {
+                                        let file_ino = self.file_inode(&torrent.name, &file.path);
+                                        if reply.add(file_ino, idx, FileType::RegularFile, parts[0]) {
+                                            break;
+                                        }
+                                    }
+                                } else if parts.len() > 1 {
+                                    let dir_name = parts[0];
+                                    if !added_names.contains(dir_name) {
+                                        added_names.insert(dir_name.to_string());
+                                        let dir_path = format!("{}/{}", torrent.name, dir_name);
+                                        let dir_ino = self.torrent_file_dir_inode(&torrent.name, &dir_path);
+                                        idx += 1;
+                                        if idx > offset {
+                                            if reply.add(dir_ino, idx, FileType::Directory, dir_name) {
+                                                break;
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                         reply.ok();
                         return;
+                    }
+                    
+                    if ino >= 0xD000000000000000 && ino < 0xE000000000000000 {
+                        let files = core.tokio_runtime.block_on(
+                            core.metadata_manager.get_torrent_files(&torrent.name)
+                        );
+                        
+                        if let Ok(files) = files {
+                            let mut current_dir_path: Option<String> = None;
+                            
+                            for file in &files {
+                                let relative_path = file.path.strip_prefix(&torrent.name)
+                                    .unwrap_or(&file.path);
+                                let relative_path = relative_path.strip_prefix('/').unwrap_or(relative_path);
+                                
+                                let parts: Vec<&str> = relative_path.split('/').collect();
+                                let mut dir_path = torrent.name.clone();
+                                
+                                for (i, part) in parts.iter().enumerate() {
+                                    if i < parts.len() - 1 {
+                                        dir_path = format!("{}/{}", dir_path, part);
+                                        let dir_ino = self.torrent_file_dir_inode(&torrent.name, &dir_path);
+                                        
+                                        if dir_ino == ino {
+                                            current_dir_path = Some(dir_path.clone());
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                if current_dir_path.is_some() {
+                                    break;
+                                }
+                            }
+                            
+                            if let Some(current_dir) = current_dir_path {
+                                let mut idx = 1i64;
+                                if idx > offset {
+                                    let _ = reply.add(ino, idx, FileType::Directory, ".");
+                                }
+                                idx += 1;
+                                
+                                let parent_path = current_dir.rsplit_once('/')
+                                    .map(|(p, _)| p)
+                                    .unwrap_or(&torrent.name);
+                                let parent_ino = if parent_path == torrent.name {
+                                    self.torrent_inode(&torrent.source_path, &torrent.name)
+                                } else {
+                                    self.torrent_file_dir_inode(&torrent.name, parent_path)
+                                };
+                                if idx > offset {
+                                    let _ = reply.add(parent_ino, idx, FileType::Directory, "..");
+                                }
+                                
+                                let mut added_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+                                
+                                for file in &files {
+                                    let relative_path = file.path.strip_prefix(&torrent.name)
+                                        .unwrap_or(&file.path);
+                                    let relative_path = relative_path.strip_prefix('/').unwrap_or(relative_path);
+                                    
+                                    let starts_with_dir = relative_path.starts_with(&current_dir);
+                                    let full_relative = format!("{}/{}", torrent.name, relative_path);
+                                    let full_starts = full_relative.starts_with(&current_dir);
+                                    
+                                    if starts_with_dir || full_starts {
+                                        let rest = if starts_with_dir {
+                                            relative_path[current_dir.len()..].to_string()
+                                        } else {
+                                            full_relative[current_dir.len()..].to_string()
+                                        };
+                                        
+                                        let rest = rest.strip_prefix('/').unwrap_or(&rest);
+                                        
+                                        if rest.is_empty() {
+                                            continue;
+                                        }
+                                        
+                                        let parts: Vec<&str> = rest.split('/').collect();
+                                        
+                                        if parts.len() == 1 && !parts[0].is_empty() {
+                                            idx += 1;
+                                            if idx > offset {
+                                                let file_ino = self.file_inode(&torrent.name, &file.path);
+                                                if reply.add(file_ino, idx, FileType::RegularFile, parts[0]) {
+                                                    break;
+                                                }
+                                            }
+                                        } else if parts.len() > 1 {
+                                            let subdir_name = parts[0];
+                                            if !added_names.contains(subdir_name) {
+                                                added_names.insert(subdir_name.to_string());
+                                                let subdir_path = format!("{}/{}", current_dir, subdir_name);
+                                                let subdir_ino = self.torrent_file_dir_inode(&torrent.name, &subdir_path);
+                                                idx += 1;
+                                                if idx > offset {
+                                                    if reply.add(subdir_ino, idx, FileType::Directory, subdir_name) {
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                reply.ok();
+                                return;
+                            }
+                        }
                     }
                 }
                 
@@ -1195,5 +1459,55 @@ mod tests {
         
         assert!(fs.metadata_dirs.contains_key(&dir_ino));
         assert_eq!(fs.metadata_dirs.get(&dir_ino).unwrap().relative_path, "subdir");
+    }
+
+    #[test]
+    fn test_torrent_file_dir_inode_deterministic() {
+        let fs = TorrentFsFilesystem::new(PathBuf::from("/tmp/test"));
+        
+        let ino1 = fs.torrent_file_dir_inode("test_torrent", "test_torrent/docs");
+        let ino2 = fs.torrent_file_dir_inode("test_torrent", "test_torrent/docs");
+        
+        assert_eq!(ino1, ino2, "Same input should produce same inode");
+    }
+
+    #[test]
+    fn test_torrent_file_dir_inode_different_torrents() {
+        let fs = TorrentFsFilesystem::new(PathBuf::from("/tmp/test"));
+        
+        let ino1 = fs.torrent_file_dir_inode("torrent1", "torrent1/docs");
+        let ino2 = fs.torrent_file_dir_inode("torrent2", "torrent2/docs");
+        
+        assert_ne!(ino1, ino2, "Different torrents should produce different inodes");
+    }
+
+    #[test]
+    fn test_torrent_file_dir_inode_different_paths() {
+        let fs = TorrentFsFilesystem::new(PathBuf::from("/tmp/test"));
+        
+        let ino1 = fs.torrent_file_dir_inode("test_torrent", "test_torrent/docs");
+        let ino2 = fs.torrent_file_dir_inode("test_torrent", "test_torrent/images");
+        
+        assert_ne!(ino1, ino2, "Different paths should produce different inodes");
+    }
+
+    #[test]
+    fn test_torrent_file_dir_inode_in_range() {
+        let fs = TorrentFsFilesystem::new(PathBuf::from("/tmp/test"));
+        
+        let ino = fs.torrent_file_dir_inode("test_torrent", "test_torrent/docs");
+        
+        assert!(ino >= 0xD000000000000000, "Inode should be in torrent file dir range");
+        assert!(ino < 0xE000000000000000, "Inode should be in torrent file dir range");
+    }
+
+    #[test]
+    fn test_torrent_file_dir_inode_nested() {
+        let fs = TorrentFsFilesystem::new(PathBuf::from("/tmp/test"));
+        
+        let ino1 = fs.torrent_file_dir_inode("test_torrent", "test_torrent/docs");
+        let ino2 = fs.torrent_file_dir_inode("test_torrent", "test_torrent/docs/images");
+        
+        assert_ne!(ino1, ino2, "Nested directories should have different inodes");
     }
 }
