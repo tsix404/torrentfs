@@ -186,7 +186,7 @@ impl TorrentFsFilesystem {
         let mut hasher = DefaultHasher::new();
         torrent_name.hash(&mut hasher);
         dir_path.hash(&mut hasher);
-        (hasher.finish() % 0x1000000000000000) | 0xD000000000000000
+        (hasher.finish() & 0x0FFFFFFFFFFFFFFF) | 0xD000000000000000
     }
 
     fn find_metadata_dir_by_parent_and_name(&self, parent: u64, name: &str) -> Option<(u64, &MetadataDir)> {
