@@ -3,21 +3,28 @@ use crate::TorrentFsFilesystem;
 use fuser::MountOption;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use torrentfs::TorrentRuntime;
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+static RECEIVED_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
-extern "C" fn signal_handler(_sig: libc::c_int) {
+extern "C" fn signal_handler(sig: libc::c_int) {
+    RECEIVED_SIGNAL.store(sig, Ordering::SeqCst);
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
 }
 
 fn setup_signal_handlers() {
     unsafe {
-        libc::signal(libc::SIGINT, signal_handler as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, signal_handler as *const () as libc::sighandler_t);
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = signal_handler as *const () as usize;
+        sa.sa_flags = libc::SA_RESTART;
+        libc::sigemptyset(&mut sa.sa_mask);
+        
+        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
     }
 }
 
@@ -45,10 +52,14 @@ pub fn init_and_mount(mount_point: &str, state_dir: &Path) -> Result<()> {
     tracing::info!("torrentfs mounted at {}, waiting for shutdown signal", mount_point);
     
     while !SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::park_timeout(Duration::from_millis(100));
     }
     
-    tracing::info!("Shutdown signal received, initiating graceful shutdown...");
+    let sig = RECEIVED_SIGNAL.load(Ordering::SeqCst);
+    tracing::info!("Received signal {} ({}), initiating graceful shutdown...", 
+        sig, 
+        if sig == libc::SIGINT { "SIGINT" } else if sig == libc::SIGTERM { "SIGTERM" } else { "unknown" }
+    );
     
     let shutdown_timeout = Duration::from_secs(30);
     let start = std::time::Instant::now();
@@ -102,8 +113,13 @@ pub fn is_shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
 }
 
+pub fn get_received_signal() -> i32 {
+    RECEIVED_SIGNAL.load(Ordering::SeqCst)
+}
+
 pub fn reset_shutdown_flag() {
     SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+    RECEIVED_SIGNAL.store(0, Ordering::SeqCst);
 }
 
 #[cfg(test)]

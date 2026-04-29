@@ -683,11 +683,12 @@ libtorrent_info_hash_list_t libtorrent_get_torrents(libtorrent_session_t* sessio
             if (h.is_valid()) {
                 std::string hash_str = h.info_hash().to_string();
                 std::string hash_hex = libtorrent::aux::to_hex(libtorrent::span<const char>(hash_str.data(), hash_str.size()));
-                result.info_hashes[i] = strdup(hash_hex.c_str());
-                if (!result.info_hashes[i]) {
+                char* hash_copy = strdup(hash_hex.c_str());
+                if (!hash_copy) {
                     libtorrent_free_info_hash_list(&result);
                     return {nullptr, 0};
                 }
+                result.info_hashes[i] = hash_copy;
             }
         }
     } catch (const std::exception& e) {

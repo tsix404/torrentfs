@@ -212,6 +212,9 @@ impl TorrentRuntime {
         
         self.shutdown();
         
+        tracing::info!("Closing database connection pool...");
+        self.db.pool().close().await;
+        
         tracing::info!("Graceful shutdown complete");
         Ok(())
     }
