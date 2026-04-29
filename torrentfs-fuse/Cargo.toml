@@ -26,3 +26,5 @@ torrentfs-libtorrent = { path = "../torrentfs-libtorrent", version = "0.1.0" }
 tokio.workspace = true
 tempfile = "3.10"
 serial_test = "3"
+sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "sqlite"] }
+rand = "0.8"

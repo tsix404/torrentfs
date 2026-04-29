@@ -5,7 +5,7 @@ use crate::database::Database;
 use crate::repo::TorrentRepo;
 
 pub struct MetadataManager {
-    pub(crate) repo: TorrentRepo,
+    pub repo: TorrentRepo,
 }
 
 #[derive(Debug, Clone)]

@@ -17,10 +17,9 @@ pub fn init_and_mount(mount_point: &str, state_dir: &Path) -> Result<()> {
         MountOption::AllowOther,
     ];
 
-    let fs = TorrentFsFilesystem::new_with_core(
+    let fs = TorrentFsFilesystem::new_with_async(
         state_dir.to_path_buf(),
         runtime.metadata_manager.clone(),
-        rt,
         Arc::clone(&runtime.session),
     );
     fuser::mount2(fs, mount_point, &options)?;
