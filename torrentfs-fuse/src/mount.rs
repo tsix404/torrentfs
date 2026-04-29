@@ -87,6 +87,8 @@ pub fn init_and_mount(mount_point: &str, state_dir: &Path) -> Result<()> {
     tracing::info!("Unmounting FUSE filesystem...");
     drop(bg_session);
     
+    unsafe { restore_signal_handlers(); }
+    
     tracing::info!("torrentfs exited cleanly");
     Ok(())
 }

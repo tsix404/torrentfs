@@ -210,6 +210,9 @@ impl TorrentRuntime {
         tracing::info!("Stopping alert loop...");
         self.shutdown();
         
+        tracing::info!("Destroying libtorrent session...");
+        drop(Arc::clone(&self.session));
+        
         tracing::info!("Closing database connection pool...");
         self.db.pool().close().await;
         
