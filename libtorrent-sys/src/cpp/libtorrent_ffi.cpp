@@ -217,6 +217,66 @@ libtorrent_error_t libtorrent_add_torrent_ex(
     }
 }
 
+libtorrent_error_t libtorrent_add_torrent_with_resume(
+    libtorrent_session_t* session,
+    const libtorrent_add_torrent_params_t* params,
+    const char* save_path,
+    size_t save_path_len,
+    const uint8_t* resume_data,
+    size_t resume_data_size,
+    char** error_message
+) {
+    if (!session || !params || !params->torrent_data || params->torrent_size == 0) {
+        if (error_message) *error_message = strdup("Invalid parameters");
+        return LIBTORRENT_ERROR_INVALID_DATA;
+    }
+    
+    try {
+        libtorrent::error_code ec;
+        libtorrent::span<const char> buf(
+            reinterpret_cast<const char*>(params->torrent_data),
+            params->torrent_size);
+        libtorrent::bdecode_node node = libtorrent::bdecode(buf, ec);
+        if (ec) {
+            if (error_message) *error_message = strdup(ec.message().c_str());
+            return LIBTORRENT_ERROR_PARSE_FAILED;
+        }
+
+        libtorrent::torrent_info ti(node, ec);
+        if (ec) {
+            if (error_message) *error_message = strdup(ec.message().c_str());
+            return LIBTORRENT_ERROR_PARSE_FAILED;
+        }
+
+        libtorrent::add_torrent_params atp;
+        atp.ti = std::make_shared<libtorrent::torrent_info>(ti);
+        atp.save_path = std::string(save_path, save_path_len);
+        atp.flags &= ~libtorrent::torrent_flags::auto_managed;
+        atp.flags |= libtorrent::torrent_flags::paused;
+        atp.flags |= libtorrent::torrent_flags::upload_mode;
+        
+        if (resume_data && resume_data_size > 0) {
+            std::vector<char> resume_buf(resume_data_size);
+            std::memcpy(resume_buf.data(), resume_data, resume_data_size);
+            atp.resume_data = std::move(resume_buf);
+        }
+
+        libtorrent::torrent_handle handle = session->session.add_torrent(atp, ec);
+        if (ec) {
+            if (error_message) *error_message = strdup(ec.message().c_str());
+            return LIBTORRENT_ERROR_PARSE_FAILED;
+        }
+
+        return LIBTORRENT_OK;
+    } catch (const std::exception& e) {
+        if (error_message) *error_message = strdup(e.what());
+        return LIBTORRENT_ERROR_UNKNOWN;
+    } catch (...) {
+        if (error_message) *error_message = strdup("Unknown exception");
+        return LIBTORRENT_ERROR_UNKNOWN;
+    }
+}
+
 void libtorrent_destroy_session(libtorrent_session_t* session) {
     if (!session) return;
     try {

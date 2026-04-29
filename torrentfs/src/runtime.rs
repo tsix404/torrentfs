@@ -92,34 +92,50 @@ impl TorrentRuntime {
         
         let save_path = get_save_path();
         let mut restored = 0;
+        let mut skipped = 0;
         let mut failed = 0;
         
         for torrent_with_data in torrents {
             let info_hash_hex = hex::encode(&torrent_with_data.torrent.info_hash);
+            let torrent_name = &torrent_with_data.torrent.name;
             
-            match self.session.add_torrent_paused(&torrent_with_data.torrent_data, &save_path) {
+            if self.session.find_torrent(&info_hash_hex) {
+                tracing::debug!(
+                    info_hash = %info_hash_hex,
+                    name = %torrent_name,
+                    "Torrent already exists in session, skipping"
+                );
+                skipped += 1;
+                continue;
+            }
+            
+            match self.session.add_torrent_with_resume(
+                &torrent_with_data.torrent_data,
+                &save_path,
+                torrent_with_data.resume_data.as_deref()
+            ) {
                 Ok(()) => {
-                    if let Some(ref resume_data) = torrent_with_data.resume_data {
-                        tracing::debug!(
+                    if torrent_with_data.resume_data.is_some() {
+                        tracing::info!(
                             info_hash = %info_hash_hex,
-                            resume_data_len = resume_data.len(),
-                            "Torrent has resume_data available"
+                            name = %torrent_name,
+                            "Restored torrent with resume_data"
+                        );
+                    } else {
+                        tracing::info!(
+                            info_hash = %info_hash_hex,
+                            name = %torrent_name,
+                            save_path = %save_path,
+                            "Restored torrent from database"
                         );
                     }
-                    
-                    tracing::info!(
-                        info_hash = %info_hash_hex,
-                        name = %torrent_with_data.torrent.name,
-                        save_path = %save_path,
-                        has_resume_data = torrent_with_data.resume_data.is_some(),
-                        "Restored torrent from database"
-                    );
                     restored += 1;
                 }
                 Err(e) => {
-                    tracing::warn!(
+                    tracing::error!(
                         info_hash = %info_hash_hex,
-                        name = %torrent_with_data.torrent.name,
+                        name = %torrent_name,
+                        save_path = %save_path,
                         error = %e,
                         "Failed to restore torrent from database"
                     );
@@ -130,7 +146,9 @@ impl TorrentRuntime {
         
         tracing::info!(
             restored = restored,
+            skipped = skipped,
             failed = failed,
+            total = restored + skipped + failed,
             "Torrent restoration complete"
         );
         

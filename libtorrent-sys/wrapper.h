@@ -64,6 +64,17 @@ libtorrent_error_t libtorrent_add_torrent(libtorrent_session_t* session, const l
 // Add a torrent to the session (paused) with custom save path
 libtorrent_error_t libtorrent_add_torrent_ex(libtorrent_session_t* session, const libtorrent_add_torrent_params_t* params, const char* save_path, size_t save_path_len, char** error_message);
 
+// Add a torrent to the session (paused) with custom save path and resume data
+libtorrent_error_t libtorrent_add_torrent_with_resume(
+    libtorrent_session_t* session,
+    const libtorrent_add_torrent_params_t* params,
+    const char* save_path,
+    size_t save_path_len,
+    const uint8_t* resume_data,
+    size_t resume_data_size,
+    char** error_message
+);
+
 // Alert types
 typedef enum {
     LIBTORRENT_ALERT_UNKNOWN = 0,

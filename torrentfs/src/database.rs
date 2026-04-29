@@ -153,19 +153,43 @@ impl Database {
         if v2_applied.is_none() {
             println!("Applying migration v2: adding torrent_data and resume_data columns...");
             
-            sqlx::query(
+            let add_torrent_data = sqlx::query(
                 "ALTER TABLE torrents ADD COLUMN torrent_data BLOB"
             )
             .execute(self.pool())
-            .await
-            .ok();
+            .await;
             
-            sqlx::query(
+            match &add_torrent_data {
+                Ok(_) => println!("Added torrent_data column"),
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if err_str.contains("duplicate column name") {
+                        println!("torrent_data column already exists, skipping");
+                    } else {
+                        return Err(add_torrent_data.unwrap_err())
+                            .context("Failed to add torrent_data column");
+                    }
+                }
+            }
+            
+            let add_resume_data = sqlx::query(
                 "ALTER TABLE torrents ADD COLUMN resume_data BLOB"
             )
             .execute(self.pool())
-            .await
-            .ok();
+            .await;
+            
+            match &add_resume_data {
+                Ok(_) => println!("Added resume_data column"),
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if err_str.contains("duplicate column name") {
+                        println!("resume_data column already exists, skipping");
+                    } else {
+                        return Err(add_resume_data.unwrap_err())
+                            .context("Failed to add resume_data column");
+                    }
+                }
+            }
             
             sqlx::query(
                 "INSERT OR IGNORE INTO _sqlx_migrations (version, description, success, checksum, execution_time)

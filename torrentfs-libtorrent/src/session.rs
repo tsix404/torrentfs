@@ -56,6 +56,63 @@ impl Session {
         Ok(())
     }
 
+    pub fn add_torrent_with_resume(&self, data: &[u8], save_path: &str, resume_data: Option<&[u8]>) -> Result<()> {
+        let guard = self.inner.lock().unwrap();
+        let inner = *guard;
+        let params = libtorrent_sys::libtorrent_add_torrent_params_t {
+            torrent_data: data.as_ptr(),
+            torrent_size: data.len(),
+        };
+
+        let save_path_c = std::ffi::CString::new(save_path)?;
+        let mut error_msg: *mut std::os::raw::c_char = std::ptr::null_mut();
+        
+        let err = match resume_data {
+            Some(resume) => {
+                unsafe {
+                    libtorrent_sys::libtorrent_add_torrent_with_resume(
+                        inner,
+                        &params,
+                        save_path_c.as_ptr(),
+                        save_path.len(),
+                        resume.as_ptr(),
+                        resume.len(),
+                        &mut error_msg
+                    )
+                }
+            }
+            None => {
+                unsafe {
+                    libtorrent_sys::libtorrent_add_torrent_ex(
+                        inner,
+                        &params,
+                        save_path_c.as_ptr(),
+                        save_path.len(),
+                        &mut error_msg
+                    )
+                }
+            }
+        };
+
+        if err != libtorrent_sys::libtorrent_error_t_LIBTORRENT_OK {
+            let msg = if !error_msg.is_null() {
+                unsafe { CStr::from_ptr(error_msg) }
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                format!("libtorrent error code: {}", err)
+            };
+
+            if !error_msg.is_null() {
+                unsafe { libc::free(error_msg as *mut std::ffi::c_void) };
+            }
+
+            bail!("Failed to add torrent with resume data: {}", msg);
+        }
+
+        Ok(())
+    }
+
     pub fn pop_alerts(&self) -> AlertList {
         let guard = self.inner.lock().unwrap();
         let alerts = unsafe { libtorrent_sys::libtorrent_pop_alerts(*guard) };
