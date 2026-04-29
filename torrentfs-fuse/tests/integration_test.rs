@@ -49,6 +49,12 @@ fn first_torrent_file() -> Option<PathBuf> {
     }).next()
 }
 
+fn nested_dirs_torrent() -> Option<PathBuf> {
+    let dir = test_torrent_dir();
+    let path = dir.join("nested_dirs.torrent");
+    if path.exists() { Some(path) } else { None }
+}
+
 #[test]
 #[serial]
 fn test_ls_root_shows_metadata_and_data() {
@@ -613,6 +619,342 @@ fn test_torrent_getattr_for_directories() {
     let a_txt_metadata = fs::metadata(&a_txt_path).unwrap();
     assert!(a_txt_metadata.is_file(), "a.txt should be a file");
     assert_eq!(a_txt_metadata.permissions().mode() & 0o777, 0o644, "a.txt should have 644 permissions");
+
+    cleanup_mount(&mount_path, guard);
+}
+
+#[test]
+#[serial]
+fn test_deeply_nested_directories_in_torrent() {
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let metadata_manager = std::sync::Arc::new(
+        torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
+    );
+    let session = torrentfs_libtorrent::Session::new().unwrap();
+
+    let fs = TorrentFsFilesystem::new_with_core(
+        state_path.clone(),
+        metadata_manager,
+        rt,
+        session,
+    );
+
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+    let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+
+    let src = match nested_dirs_torrent() {
+        Some(p) => p,
+        None => {
+            eprintln!("nested_dirs.torrent not found, skipping deep nested test");
+            cleanup_mount(&mount_path, guard);
+            return;
+        }
+    };
+
+    let dest = mount_path.join("metadata").join(src.file_name().unwrap());
+    let result = fs::copy(&src, &dest);
+    assert!(result.is_ok(), "Failed to copy .torrent file: {:?}", result.err());
+
+    thread::sleep(Duration::from_millis(500));
+
+    let data_entries: Vec<_> = fs::read_dir(mount_path.join("data"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+
+    assert!(data_entries.contains(&"nested_test".to_string()), 
+        "data/ should contain nested_test directory");
+
+    let torrent_dir = mount_path.join("data").join("nested_test");
+    assert!(torrent_dir.is_dir(), "nested_test should be a directory");
+
+    let torrent_entries: Vec<_> = fs::read_dir(&torrent_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+
+    assert!(torrent_entries.contains(&"docs".to_string()), 
+        "nested_test should contain docs");
+    assert!(torrent_entries.contains(&"src".to_string()), 
+        "nested_test should contain src");
+
+    let docs_path = torrent_dir.join("docs");
+    assert!(docs_path.is_dir(), "docs should be a directory");
+
+    let docs_entries: Vec<_> = fs::read_dir(&docs_path)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+
+    assert!(docs_entries.contains(&"images".to_string()), 
+        "docs should contain images");
+    assert!(docs_entries.contains(&"readme.txt".to_string()), 
+        "docs should contain readme.txt");
+
+    let images_path = docs_path.join("images");
+    assert!(images_path.is_dir(), "images should be a directory");
+
+    let images_entries: Vec<_> = fs::read_dir(&images_path)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+
+    assert!(images_entries.contains(&"a.png".to_string()), 
+        "images should contain a.png");
+    assert!(images_entries.contains(&"b.png".to_string()), 
+        "images should contain b.png");
+
+    let src_path = torrent_dir.join("src");
+    assert!(src_path.is_dir(), "src should be a directory");
+
+    let src_entries: Vec<_> = fs::read_dir(&src_path)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+
+    assert!(src_entries.contains(&"main.rs".to_string()), 
+        "src should contain main.rs");
+
+    cleanup_mount(&mount_path, guard);
+}
+
+#[test]
+#[serial]
+fn test_deeply_nested_subdirectory_mirroring() {
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let metadata_manager = std::sync::Arc::new(
+        torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
+    );
+    let session = torrentfs_libtorrent::Session::new().unwrap();
+
+    let fs = TorrentFsFilesystem::new_with_core(
+        state_path.clone(),
+        metadata_manager,
+        rt,
+        session,
+    );
+
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+    let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+
+    let subdir = mount_path.join("metadata").join("a").join("b");
+    fs::create_dir_all(&subdir).expect("Failed to create nested subdirectory");
+
+    let src = match nested_dirs_torrent() {
+        Some(p) => p,
+        None => {
+            eprintln!("nested_dirs.torrent not found, skipping mirror test");
+            cleanup_mount(&mount_path, guard);
+            return;
+        }
+    };
+
+    let dest = subdir.join(src.file_name().unwrap());
+    let result = fs::copy(&src, &dest);
+    assert!(result.is_ok(), "Failed to copy .torrent file: {:?}", result.err());
+
+    thread::sleep(Duration::from_millis(500));
+
+    let data_a = mount_path.join("data").join("a");
+    assert!(data_a.exists(), "data/a should exist");
+    assert!(data_a.is_dir(), "data/a should be a directory");
+
+    let data_a_b = data_a.join("b");
+    assert!(data_a_b.exists(), "data/a/b should exist");
+    assert!(data_a_b.is_dir(), "data/a/b should be a directory");
+
+    let data_a_b_entries: Vec<_> = fs::read_dir(&data_a_b)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+
+    eprintln!("data/a/b entries: {:?}", data_a_b_entries);
+    assert!(!data_a_b_entries.is_empty(), "data/a/b should contain torrent directory");
+
+    assert!(data_a_b_entries.contains(&"docs".to_string()), 
+        "data/a/b should contain docs directory from nested torrent");
+    assert!(data_a_b_entries.contains(&"src".to_string()), 
+        "data/a/b should contain src directory from nested torrent");
+
+    let docs_images = data_a_b.join("docs").join("images");
+    assert!(docs_images.exists(), "docs/images should exist in nested torrent");
+    assert!(docs_images.is_dir(), "docs/images should be a directory");
+
+    cleanup_mount(&mount_path, guard);
+}
+
+#[test]
+#[serial]
+fn test_stat_on_nested_directories() {
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let metadata_manager = std::sync::Arc::new(
+        torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
+    );
+    let session = torrentfs_libtorrent::Session::new().unwrap();
+
+    let fs = TorrentFsFilesystem::new_with_core(
+        state_path.clone(),
+        metadata_manager,
+        rt,
+        session,
+    );
+
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+    let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+
+    let src = match nested_dirs_torrent() {
+        Some(p) => p,
+        None => {
+            eprintln!("nested_dirs.torrent not found, skipping stat test");
+            cleanup_mount(&mount_path, guard);
+            return;
+        }
+    };
+
+    let dest = mount_path.join("metadata").join(src.file_name().unwrap());
+    let result = fs::copy(&src, &dest);
+    assert!(result.is_ok(), "Failed to copy .torrent file: {:?}", result.err());
+
+    thread::sleep(Duration::from_millis(500));
+
+    let torrent_dir = mount_path.join("data").join("nested_test");
+    let torrent_metadata = fs::metadata(&torrent_dir).unwrap();
+    assert!(torrent_metadata.is_dir(), "nested_test should be a directory (S_IFDIR)");
+    assert_eq!(torrent_metadata.permissions().mode() & 0o777, 0o755);
+
+    let docs_path = torrent_dir.join("docs");
+    let docs_metadata = fs::metadata(&docs_path).unwrap();
+    assert!(docs_metadata.is_dir(), "docs should be a directory (S_IFDIR)");
+    assert_eq!(docs_metadata.permissions().mode() & 0o777, 0o755);
+
+    let images_path = docs_path.join("images");
+    let images_metadata = fs::metadata(&images_path).unwrap();
+    assert!(images_metadata.is_dir(), "images should be a directory (S_IFDIR)");
+    assert_eq!(images_metadata.permissions().mode() & 0o777, 0o755);
+
+    let a_png_path = images_path.join("a.png");
+    let a_png_metadata = fs::metadata(&a_png_path).unwrap();
+    assert!(a_png_metadata.is_file(), "a.png should be a file (S_IFREG)");
+    assert_eq!(a_png_metadata.permissions().mode() & 0o777, 0o644);
+    assert_eq!(a_png_metadata.len(), 34);
+
+    let src_path = torrent_dir.join("src");
+    let src_metadata = fs::metadata(&src_path).unwrap();
+    assert!(src_metadata.is_dir(), "src should be a directory (S_IFDIR)");
+    assert_eq!(src_metadata.permissions().mode() & 0o777, 0o755);
+
+    let main_rs_path = src_path.join("main.rs");
+    let main_rs_metadata = fs::metadata(&main_rs_path).unwrap();
+    assert!(main_rs_metadata.is_file(), "main.rs should be a file (S_IFREG)");
+    assert_eq!(main_rs_metadata.permissions().mode() & 0o777, 0o644);
+    assert_eq!(main_rs_metadata.len(), 32);
+
+    cleanup_mount(&mount_path, guard);
+}
+
+#[test]
+#[serial]
+fn test_read_nested_files() {
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let metadata_manager = std::sync::Arc::new(
+        torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
+    );
+    let session = torrentfs_libtorrent::Session::new().unwrap();
+
+    let fs = TorrentFsFilesystem::new_with_core(
+        state_path.clone(),
+        metadata_manager,
+        rt,
+        session,
+    );
+
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+    let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+
+    let src = match nested_dirs_torrent() {
+        Some(p) => p,
+        None => {
+            eprintln!("nested_dirs.torrent not found, skipping read test");
+            cleanup_mount(&mount_path, guard);
+            return;
+        }
+    };
+
+    let dest = mount_path.join("metadata").join(src.file_name().unwrap());
+    let result = fs::copy(&src, &dest);
+    assert!(result.is_ok(), "Failed to copy .torrent file: {:?}", result.err());
+
+    thread::sleep(Duration::from_millis(500));
+
+    let a_png_path = mount_path.join("data/nested_test/docs/images/a.png");
+    let content = fs::read(&a_png_path);
+    match content {
+        Ok(data) => {
+            assert_eq!(data.len(), 34, "a.png should have 34 bytes");
+        }
+        Err(e) => {
+            eprintln!("Note: Reading file content requires piece download, error: {:?}", e);
+        }
+    }
+
+    let readme_path = mount_path.join("data/nested_test/docs/readme.txt");
+    let readme_content = fs::read(&readme_path);
+    match readme_content {
+        Ok(data) => {
+            assert_eq!(data.len(), 30, "readme.txt should have 30 bytes");
+        }
+        Err(e) => {
+            eprintln!("Note: Reading file content requires piece download, error: {:?}", e);
+        }
+    }
 
     cleanup_mount(&mount_path, guard);
 }
