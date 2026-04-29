@@ -17,7 +17,7 @@ pub enum AlertLoopMessage {
 pub struct AlertLoop {
     session: Arc<Session>,
     _piece_cache: Arc<PieceCache>,
-    _metadata_manager: Arc<MetadataManager>,
+    metadata_manager: Arc<MetadataManager>,
     shutdown_rx: broadcast::Receiver<AlertLoopMessage>,
 }
 
@@ -33,7 +33,7 @@ impl AlertLoop {
         Self {
             session,
             _piece_cache: piece_cache,
-            _metadata_manager: metadata_manager,
+            metadata_manager,
             shutdown_rx,
         }
     }
@@ -157,13 +157,30 @@ impl AlertLoop {
     }
 
     async fn handle_save_resume_data(&self, alert: &Alert) {
-        if let Some(info_hash) = &alert.info_hash {
+        if let Some(info_hash_hex) = &alert.info_hash {
             tracing::debug!(
-                info_hash = %info_hash,
-                "Save resume data: {}",
-                alert.message
+                info_hash = %info_hash_hex,
+                "Save resume data alert received"
             );
-            // Out of scope for TSI-138: resume data persistence belongs to MVP-6 (production readiness)
+            
+            if let Ok(info_hash_bytes) = hex::decode(info_hash_hex) {
+                match self.metadata_manager.update_resume_data(&info_hash_bytes, alert.message.as_bytes()).await {
+                    Ok(()) => {
+                        tracing::info!(
+                            info_hash = %info_hash_hex,
+                            resume_data_len = alert.message.len(),
+                            "Resume data persisted to database"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            info_hash = %info_hash_hex,
+                            error = %e,
+                            "Failed to persist resume data"
+                        );
+                    }
+                }
+            }
         } else {
             tracing::debug!(
                 "Save resume data: {}",

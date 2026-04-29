@@ -9,6 +9,13 @@ use crate::metadata::MetadataManager;
 use crate::piece_cache::PieceCache;
 use torrentfs_libtorrent::Session;
 
+fn get_save_path() -> String {
+    dirs::home_dir()
+        .map(|h| h.join(".local").join("share").join("torrentfs").join("data"))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/tmp/torrentfs".to_string())
+}
+
 pub struct TorrentRuntime {
     pub db: Arc<Database>,
     pub session: Arc<Session>,
@@ -51,9 +58,28 @@ impl TorrentRuntime {
             shutdown_tx,
         };
         
+        runtime.restore_cache_index()?;
         runtime.restore_torrents().await?;
         
         Ok(runtime)
+    }
+    
+    fn restore_cache_index(&self) -> Result<()> {
+        let cached = self.piece_cache.scan_cached_pieces()?;
+        
+        if cached.is_empty() {
+            tracing::info!("No cached pieces found");
+            return Ok(());
+        }
+        
+        let total_pieces: usize = cached.iter().map(|(_, pieces)| pieces.len()).sum();
+        tracing::info!(
+            torrents = cached.len(),
+            total_pieces = total_pieces,
+            "Cache index restored"
+        );
+        
+        Ok(())
     }
     
     async fn restore_torrents(&self) -> Result<()> {
@@ -64,17 +90,28 @@ impl TorrentRuntime {
             return Ok(());
         }
         
+        let save_path = get_save_path();
         let mut restored = 0;
         let mut failed = 0;
         
         for torrent_with_data in torrents {
             let info_hash_hex = hex::encode(&torrent_with_data.torrent.info_hash);
             
-            match self.session.add_torrent_paused(&torrent_with_data.torrent_data, "/tmp/torrentfs") {
+            match self.session.add_torrent_paused(&torrent_with_data.torrent_data, &save_path) {
                 Ok(()) => {
+                    if let Some(ref resume_data) = torrent_with_data.resume_data {
+                        tracing::debug!(
+                            info_hash = %info_hash_hex,
+                            resume_data_len = resume_data.len(),
+                            "Torrent has resume_data available"
+                        );
+                    }
+                    
                     tracing::info!(
                         info_hash = %info_hash_hex,
                         name = %torrent_with_data.torrent.name,
+                        save_path = %save_path,
+                        has_resume_data = torrent_with_data.resume_data.is_some(),
                         "Restored torrent from database"
                     );
                     restored += 1;

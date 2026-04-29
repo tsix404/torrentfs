@@ -1006,20 +1006,31 @@ fn test_torrent_restored_on_restart() {
 
     cleanup_mount(&mount_path, guard);
 
+    drop(runtime);
+
     let rt2 = tokio::runtime::Runtime::new().unwrap();
     let runtime2 = rt2.block_on(torrentfs::TorrentRuntime::new()).unwrap();
-    let metadata_manager2 = std::sync::Arc::new(
-        torrentfs::MetadataManager::new(runtime2.db.clone()).unwrap()
-    );
-    let session2 = std::sync::Arc::new(torrentfs_libtorrent::Session::new().unwrap());
 
-    let torrents_with_data = rt2.block_on(metadata_manager2.list_torrents_with_data()).unwrap();
+    let torrents_with_data = rt2.block_on(runtime2.metadata_manager.list_torrents_with_data()).unwrap();
     assert!(!torrents_with_data.is_empty(), "Torrent should be restored from DB");
 
-    let torrent_name = &torrents_with_data[0].torrent.name;
-    let found = session2.find_torrent(&hex::encode(&torrents_with_data[0].torrent.info_hash));
+    let torrent = &torrents_with_data[0].torrent;
+    let info_hash_hex = hex::encode(&torrent.info_hash);
+    let found = runtime2.session.find_torrent(&info_hash_hex);
+    assert!(found, "Torrent should be found in restored session");
     
-    eprintln!("Torrent '{}' restored, found in session: {}", torrent_name, found);
+    assert!(
+        torrents_with_data[0].torrent_data.len() > 0,
+        "Torrent data should be persisted"
+    );
+    
+    let cached_pieces = runtime2.piece_cache.scan_cached_pieces().unwrap();
+    eprintln!(
+        "Torrent '{}' restored, found in session: {}, cached pieces dirs: {}",
+        torrent.name,
+        found,
+        cached_pieces.len()
+    );
 
     drop(runtime2);
 }

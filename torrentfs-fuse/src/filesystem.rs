@@ -1229,13 +1229,18 @@ impl Filesystem for TorrentFsFilesystem {
         if let Some(core) = &self.core {
             let manager = core.metadata_manager.clone();
 
+            let save_path = dirs::home_dir()
+                .map(|h| h.join(".local").join("share").join("torrentfs").join("data"))
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "/tmp/torrentfs".to_string());
+
             match core.tokio_runtime.block_on(manager.process_torrent_data(&data, &source_path)) {
                 Ok(parsed) => {
                     if let Err(e) = core.tokio_runtime.block_on(manager.persist_to_db(&parsed)) {
                         tracing::error!("Failed to persist torrent to DB: {}", e);
                     }
 
-                    if let Err(e) = core.session.add_torrent_paused(&data, "/tmp/torrentfs") {
+                    if let Err(e) = core.session.add_torrent_paused(&data, &save_path) {
                         tracing::error!("Failed to add torrent to session: {}", e);
                     } else {
                         tracing::info!("Added torrent '{}' to libtorrent session (paused)", name);

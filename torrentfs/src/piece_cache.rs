@@ -60,6 +60,56 @@ impl PieceCache {
 
         Ok(())
     }
+
+    pub fn scan_cached_pieces(&self) -> Result<Vec<(String, Vec<u32>)>> {
+        let mut result = Vec::new();
+        
+        if !self.cache_dir.exists() {
+            return Ok(result);
+        }
+        
+        let entries = std::fs::read_dir(&self.cache_dir)?;
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            
+            if path.is_dir() {
+                if let Some(info_hash) = path.file_name().and_then(|n| n.to_str()) {
+                    if info_hash.len() == 40 && info_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                        let mut pieces = Vec::new();
+                        
+                        if let Ok(piece_entries) = std::fs::read_dir(&path) {
+                            for piece_entry in piece_entries {
+                                if let Ok(piece_entry) = piece_entry {
+                                    let piece_path = piece_entry.path();
+                                    if let Some(piece_name) = piece_path.file_name().and_then(|n| n.to_str()) {
+                                        if let Some(idx_str) = piece_name.strip_suffix(".piece") {
+                                            if let Ok(piece_idx) = idx_str.parse::<u32>() {
+                                                pieces.push(piece_idx);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if !pieces.is_empty() {
+                            pieces.sort();
+                            result.push((info_hash.to_string(), pieces));
+                        }
+                    }
+                }
+            }
+        }
+        
+        tracing::info!(
+            torrents = result.len(),
+            total_pieces = result.iter().map(|(_, p)| p.len()).sum::<usize>(),
+            "Scanned cache directory"
+        );
+        
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
