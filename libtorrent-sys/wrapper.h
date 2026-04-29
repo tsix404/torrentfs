@@ -141,6 +141,26 @@ libtorrent_read_piece_result_t libtorrent_read_piece(libtorrent_session_t* sessi
 // Free read piece result
 void libtorrent_free_read_piece_result(libtorrent_read_piece_result_t* result);
 
+// Get list of all torrent info hashes in session
+// Caller must free the returned array with libtorrent_free_info_hash_list
+typedef struct {
+    char** info_hashes;  // Array of 40-char hex strings (null-terminated)
+    size_t count;
+} libtorrent_info_hash_list_t;
+
+libtorrent_info_hash_list_t libtorrent_get_torrents(libtorrent_session_t* session);
+void libtorrent_free_info_hash_list(libtorrent_info_hash_list_t* list);
+
+// Request save_resume_data for a torrent (async, generates save_resume_data_alert)
+// Returns LIBTORRENT_OK on success
+libtorrent_error_t libtorrent_save_resume_data(libtorrent_session_t* session, const char* info_hash_hex);
+
+// Pause a torrent (for graceful shutdown)
+libtorrent_error_t libtorrent_pause_torrent(libtorrent_session_t* session, const char* info_hash_hex);
+
+// Check if resume data alert is available
+int libtorrent_has_save_resume_data_alert(libtorrent_session_t* session);
+
 // Destroy a libtorrent session
 void libtorrent_destroy_session(libtorrent_session_t* session);
 
