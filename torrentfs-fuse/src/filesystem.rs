@@ -63,6 +63,16 @@ fn file_attr(ino: u64, size: u64) -> FileAttr {
     }
 }
 
+fn fuse_error_to_errno(e: &FuseError) -> i32 {
+    match e {
+        FuseError::TorrentParseError(_) => EINVAL,
+        FuseError::Timeout(_) => EIO,
+        FuseError::DatabaseError(_) => EIO,
+        FuseError::SessionError(_) => EIO,
+        FuseError::ChannelClosed => EIO,
+    }
+}
+
 struct OpenFile {
     path: String,
     data: Vec<u8>,
@@ -1253,6 +1263,29 @@ impl Filesystem for TorrentFsFilesystem {
             return;
         }
 
+        let current_data_len = open_file.data.len();
+        let additional_space = if write_end > current_data_len {
+            write_end - current_data_len
+        } else {
+            0
+        };
+        
+        if additional_space > 0 {
+            let memory_limit = 100 * 1024 * 1024;
+            let current_memory: usize = self.open_files.values().map(|f| f.data.len()).sum();
+            let estimated_total = current_memory + additional_space;
+            
+            if estimated_total > memory_limit {
+                tracing::warn!(
+                    "Memory limit reached: current={} bytes, requested={} bytes, limit={} bytes",
+                    current_memory, additional_space, memory_limit
+                );
+                reply.error(libc::ENOSPC);
+                return;
+            }
+        }
+
+        let open_file = self.open_files.get_mut(&fh).unwrap();
         if offset > open_file.data.len() {
             open_file.data.resize(offset, 0);
         }
@@ -1313,26 +1346,33 @@ impl Filesystem for TorrentFsFilesystem {
             match self.process_torrent_data_safe(&data, &source_path) {
                 Ok(parsed) => {
                     match self.persist_to_db_safe(&parsed) {
-                        Ok(_result) => {}
+                        Ok(PersistResult::Inserted) => {
+                            match self.add_torrent_paused_safe(&data, &save_path) {
+                                Ok(()) => {
+                                    tracing::info!("Added torrent '{}' to libtorrent session (paused)", name);
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to add torrent to session: {}", e);
+                                }
+                            }
+                            tracing::info!(
+                                "Processed torrent '{}' ({} files, {} bytes) - kept in metadata/{}",
+                                name, parsed.file_count, parsed.total_size, 
+                                if source_path.is_empty() { "".to_string() } else { format!("/{}/", source_path) }
+                            );
+                        }
+                        Ok(PersistResult::AlreadyExists) => {
+                            tracing::info!("Torrent '{}' already exists in database, skipping (idempotent)", name);
+                        }
                         Err(e) => {
                             tracing::error!("Failed to persist torrent to DB: {}", e);
                         }
                     }
-
-                    match self.add_torrent_paused_safe(&data, &save_path) {
-                        Ok(()) => {
-                            tracing::info!("Added torrent '{}' to libtorrent session (paused)", name);
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to add torrent to session: {}", e);
-                        }
-                    }
-
-                    tracing::info!(
-                        "Processed torrent '{}' ({} files, {} bytes) - kept in metadata/{}",
-                        name, parsed.file_count, parsed.total_size, 
-                        if source_path.is_empty() { "".to_string() } else { format!("/{}/", source_path) }
-                    );
+                }
+                Err(FuseError::TorrentParseError(e)) => {
+                    tracing::error!("Invalid torrent file '{}': {}", name, e);
+                    reply.error(EINVAL);
+                    return;
                 }
                 Err(e) => {
                     tracing::error!("Failed to process torrent data: {}", e);

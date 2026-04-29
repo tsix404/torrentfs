@@ -152,8 +152,13 @@ impl FuseAsyncRuntime {
                     let _ = reply.send(result);
                 }
                 FuseCommand::AddTorrentPaused { data, save_path, reply } => {
-                    let result = Self::handle_add_torrent_paused(&session, &data, &save_path);
-                    let _ = reply.send(result);
+                    let session = session.clone();
+                    let data = data.clone();
+                    let save_path = save_path.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let result = Self::handle_add_torrent_paused(&session, &data, &save_path);
+                        let _ = reply.send(result);
+                    });
                 }
                 FuseCommand::PersistToDb { parsed, reply } => {
                     let result = Self::handle_persist_to_db(&metadata_manager.repo, &parsed).await;
