@@ -121,6 +121,9 @@ int libtorrent_find_torrent(libtorrent_session_t* session, const char* info_hash
 // Resume a paused torrent (returns LIBTORRENT_OK on success)
 libtorrent_error_t libtorrent_resume_torrent(libtorrent_session_t* session, const char* info_hash_hex);
 
+// Check if torrent is seeding (returns 1 if seeding, 0 if not seeding or not found)
+int libtorrent_is_seeding(libtorrent_session_t* session, const char* info_hash_hex);
+
 // Set piece deadline (deadline_ms from now, returns LIBTORRENT_OK on success)
 libtorrent_error_t libtorrent_set_piece_deadline(libtorrent_session_t* session, const char* info_hash_hex, uint32_t piece_index, int deadline_ms);
 

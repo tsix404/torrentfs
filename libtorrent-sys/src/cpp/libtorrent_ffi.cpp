@@ -551,6 +551,24 @@ libtorrent_error_t libtorrent_set_piece_deadline(libtorrent_session_t* session, 
     }
 }
 
+int libtorrent_is_seeding(libtorrent_session_t* session, const char* info_hash_hex) {
+    auto handle = find_torrent_by_hash(session, info_hash_hex);
+    if (!handle.is_valid()) {
+        return 0;
+    }
+    
+    try {
+        libtorrent::torrent_status status = handle.status();
+        return status.is_seeding ? 1 : 0;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_is_seeding: %s\n", e.what());
+        return 0;
+    } catch (...) {
+        fprintf(stderr, "libtorrent_is_seeding: unknown exception\n");
+        return 0;
+    }
+}
+
 libtorrent_read_piece_result_t libtorrent_read_piece(libtorrent_session_t* session, const char* info_hash_hex, uint32_t piece_index) {
     libtorrent_read_piece_result_t result = {nullptr, 0, LIBTORRENT_OK, nullptr};
     

@@ -159,6 +159,20 @@ impl Session {
         Ok(())
     }
 
+    pub fn is_seeding(&self, info_hash_hex: &str) -> bool {
+        let guard = self.inner.lock().unwrap();
+        let info_hash_c = match std::ffi::CString::new(info_hash_hex) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        
+        let result = unsafe {
+            libtorrent_sys::libtorrent_is_seeding(*guard, info_hash_c.as_ptr())
+        };
+        
+        result != 0
+    }
+
     pub fn set_piece_deadline(&self, info_hash_hex: &str, piece_index: u32, deadline_ms: i32) -> Result<()> {
         let guard = self.inner.lock().unwrap();
         let info_hash_c = std::ffi::CString::new(info_hash_hex)?;
@@ -269,5 +283,23 @@ mod tests {
     fn test_session_drop_does_not_crash() {
         let session = Session::new().unwrap();
         drop(session);
+    }
+
+    #[test]
+    fn test_is_seeding_returns_false_for_nonexistent_torrent() {
+        let session = Session::new().unwrap();
+        let fake_info_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert!(!session.is_seeding(fake_info_hash));
+    }
+
+    #[test]
+    fn test_is_seeding_returns_false_for_paused_torrent() {
+        let session = Session::new().unwrap();
+        let test_file = first_torrent_file_session().expect("No .torrent file found");
+        let data = fs::read(&test_file).expect("Failed to read test torrent file");
+        session.add_torrent_paused(&data, "/tmp/torrentfs").unwrap();
+        
+        let ti = crate::torrent::parse_torrent(&data).unwrap();
+        assert!(!session.is_seeding(&ti.info_hash));
     }
 }

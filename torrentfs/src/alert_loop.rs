@@ -147,7 +147,31 @@ impl AlertLoop {
                 info_hash = %info_hash,
                 "Torrent download completed"
             );
-            // Out of scope for TSI-138: DB status update belongs to MVP-5 download flow
+            
+            if !self.session.is_seeding(info_hash) {
+                match self.session.resume_torrent(info_hash) {
+                    Ok(()) => {
+                        tracing::info!(
+                            info_hash = %info_hash,
+                            "Auto-seeding started after download completion"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            info_hash = %info_hash,
+                            error = %e,
+                            "Failed to start auto-seeding"
+                        );
+                    }
+                }
+            }
+            
+            if self.session.is_seeding(info_hash) {
+                tracing::info!(
+                    info_hash = %info_hash,
+                    "Torrent is now seeding"
+                );
+            }
         } else {
             tracing::info!(
                 "Torrent download completed: {}",
