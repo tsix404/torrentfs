@@ -667,29 +667,38 @@ libtorrent_info_hash_list_t libtorrent_get_torrents(libtorrent_session_t* sessio
     try {
         std::vector<libtorrent::torrent_handle> handles = session->session.get_torrents();
         
-        if (handles.empty()) {
+        size_t valid_count = 0;
+        for (const auto& h : handles) {
+            if (h.is_valid()) {
+                valid_count++;
+            }
+        }
+        
+        if (valid_count == 0) {
             return result;
         }
         
-        result.info_hashes = static_cast<char**>(malloc(handles.size() * sizeof(char*)));
+        result.info_hashes = static_cast<char**>(malloc(valid_count * sizeof(char*)));
         if (!result.info_hashes) {
             return result;
         }
-        memset(result.info_hashes, 0, handles.size() * sizeof(char*));
-        result.count = handles.size();
+        memset(result.info_hashes, 0, valid_count * sizeof(char*));
+        result.count = valid_count;
         
-        for (size_t i = 0; i < handles.size(); i++) {
-            const auto& h = handles[i];
-            if (h.is_valid()) {
-                std::string hash_str = h.info_hash().to_string();
-                std::string hash_hex = libtorrent::aux::to_hex(libtorrent::span<const char>(hash_str.data(), hash_str.size()));
-                char* hash_copy = strdup(hash_hex.c_str());
-                if (!hash_copy) {
-                    libtorrent_free_info_hash_list(&result);
-                    return {nullptr, 0};
-                }
-                result.info_hashes[i] = hash_copy;
+        size_t out_idx = 0;
+        for (const auto& h : handles) {
+            if (!h.is_valid()) {
+                continue;
             }
+            
+            std::string hash_str = h.info_hash().to_string();
+            std::string hash_hex = libtorrent::aux::to_hex(libtorrent::span<const char>(hash_str.data(), hash_str.size()));
+            char* hash_copy = strdup(hash_hex.c_str());
+            if (!hash_copy) {
+                libtorrent_free_info_hash_list(&result);
+                return {nullptr, 0};
+            }
+            result.info_hashes[out_idx++] = hash_copy;
         }
     } catch (const std::exception& e) {
         fprintf(stderr, "libtorrent_get_torrents: %s\n", e.what());
@@ -754,29 +763,6 @@ libtorrent_error_t libtorrent_pause_torrent(libtorrent_session_t* session, const
     } catch (...) {
         fprintf(stderr, "libtorrent_pause_torrent: unknown exception\n");
         return LIBTORRENT_ERROR_UNKNOWN;
-    }
-}
-
-int libtorrent_has_save_resume_data_alert(libtorrent_session_t* session) {
-    if (!session) {
-        return 0;
-    }
-    
-    try {
-        std::vector<libtorrent::alert*> alerts;
-        session->session.pop_alerts(&alerts);
-        
-        for (const auto* a : alerts) {
-            if (libtorrent::alert_cast<libtorrent::save_resume_data_alert>(a)) {
-                return 1;
-            }
-            if (libtorrent::alert_cast<libtorrent::save_resume_data_failed_alert>(a)) {
-                return -1;
-            }
-        }
-        return 0;
-    } catch (...) {
-        return 0;
     }
 }
 

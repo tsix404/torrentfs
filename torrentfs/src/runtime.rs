@@ -183,12 +183,9 @@ impl TorrentRuntime {
             let mut saved_count = 0;
             
             loop {
-                let session = Arc::clone(&self.session);
-                let alerts: Vec<_> = tokio::task::spawn_blocking(move || {
-                    session.pop_alerts().iter().collect()
-                }).await.unwrap_or_default();
+                let alerts = self.session.pop_alerts();
                 
-                for alert in &alerts {
+                for alert in alerts.iter() {
                     if alert.alert_type == AlertType::SaveResumeData {
                         if let Some(info_hash_hex) = &alert.info_hash {
                             tracing::info!(info_hash = %info_hash_hex, "Resume data saved");
@@ -210,6 +207,7 @@ impl TorrentRuntime {
             }
         }
         
+        tracing::info!("Stopping alert loop...");
         self.shutdown();
         
         tracing::info!("Closing database connection pool...");

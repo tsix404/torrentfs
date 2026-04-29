@@ -158,9 +158,6 @@ libtorrent_error_t libtorrent_save_resume_data(libtorrent_session_t* session, co
 // Pause a torrent (for graceful shutdown)
 libtorrent_error_t libtorrent_pause_torrent(libtorrent_session_t* session, const char* info_hash_hex);
 
-// Check if resume data alert is available
-int libtorrent_has_save_resume_data_alert(libtorrent_session_t* session);
-
 // Destroy a libtorrent session
 void libtorrent_destroy_session(libtorrent_session_t* session);
 
