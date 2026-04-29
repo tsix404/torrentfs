@@ -770,11 +770,18 @@ int libtorrent_has_save_resume_data_alert(libtorrent_session_t* session) {
             if (libtorrent::alert_cast<libtorrent::save_resume_data_alert>(a)) {
                 return 1;
             }
+            if (libtorrent::alert_cast<libtorrent::save_resume_data_failed_alert>(a)) {
+                return -1;
+            }
         }
         return 0;
     } catch (...) {
         return 0;
     }
+}
+
+void libtorrent_restore_signal_handlers() {
+    // No-op on C++ side - signal handlers are managed in Rust
 }
 
 } // extern "C"

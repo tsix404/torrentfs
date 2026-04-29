@@ -16,15 +16,23 @@ extern "C" fn signal_handler(sig: libc::c_int) {
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
 }
 
+static mut OLD_SIGINT_HANDLER: Option<libc::sigaction> = None;
+static mut OLD_SIGTERM_HANDLER: Option<libc::sigaction> = None;
+
 fn setup_signal_handlers() {
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_sigaction = signal_handler as *const () as usize;
-        sa.sa_flags = libc::SA_RESTART;
+        sa.sa_flags = 0;
         libc::sigemptyset(&mut sa.sa_mask);
         
-        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
-        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+        let mut old_sa: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(libc::SIGINT, &sa, &mut old_sa);
+        OLD_SIGINT_HANDLER = Some(old_sa);
+        
+        let mut old_sa: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(libc::SIGTERM, &sa, &mut old_sa);
+        OLD_SIGTERM_HANDLER = Some(old_sa);
     }
 }
 
@@ -120,6 +128,15 @@ pub fn get_received_signal() -> i32 {
 pub fn reset_shutdown_flag() {
     SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
     RECEIVED_SIGNAL.store(0, Ordering::SeqCst);
+}
+
+pub unsafe fn restore_signal_handlers() {
+    if let Some(old_sa) = OLD_SIGINT_HANDLER {
+        libc::sigaction(libc::SIGINT, &old_sa, std::ptr::null_mut());
+    }
+    if let Some(old_sa) = OLD_SIGTERM_HANDLER {
+        libc::sigaction(libc::SIGTERM, &old_sa, std::ptr::null_mut());
+    }
 }
 
 #[cfg(test)]
