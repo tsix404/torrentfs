@@ -173,6 +173,60 @@ impl Session {
         result != 0
     }
 
+    pub fn get_torrents(&self) -> Vec<String> {
+        let guard = self.inner.lock().unwrap();
+        let list = unsafe { libtorrent_sys::libtorrent_get_torrents(*guard) };
+        
+        let mut result = Vec::new();
+        if !list.info_hashes.is_null() && list.count > 0 {
+            for i in 0..list.count {
+                unsafe {
+                    if !(*list.info_hashes.add(i)).is_null() {
+                        let c_str = std::ffi::CStr::from_ptr(*list.info_hashes.add(i));
+                        if let Ok(s) = c_str.to_str() {
+                            result.push(s.to_string());
+                        }
+                    }
+                }
+            }
+            unsafe { libtorrent_sys::libtorrent_free_info_hash_list(&list as *const _ as *mut _) };
+        }
+        
+        result
+    }
+
+    pub fn save_resume_data(&self, info_hash_hex: &str) -> Result<()> {
+        let guard = self.inner.lock().unwrap();
+        let info_hash_c = std::ffi::CString::new(info_hash_hex)?;
+        
+        let err = unsafe {
+            libtorrent_sys::libtorrent_save_resume_data(*guard, info_hash_c.as_ptr())
+        };
+
+        if err != libtorrent_sys::libtorrent_error_t_LIBTORRENT_OK {
+            let code = LibtorrentErrorCode::from_ffi(err as i32);
+            bail!(LibtorrentError::new(code, "Failed to save resume data"));
+        }
+
+        Ok(())
+    }
+
+    pub fn pause_torrent(&self, info_hash_hex: &str) -> Result<()> {
+        let guard = self.inner.lock().unwrap();
+        let info_hash_c = std::ffi::CString::new(info_hash_hex)?;
+        
+        let err = unsafe {
+            libtorrent_sys::libtorrent_pause_torrent(*guard, info_hash_c.as_ptr())
+        };
+
+        if err != libtorrent_sys::libtorrent_error_t_LIBTORRENT_OK {
+            let code = LibtorrentErrorCode::from_ffi(err as i32);
+            bail!(LibtorrentError::new(code, "Failed to pause torrent"));
+        }
+
+        Ok(())
+    }
+
     pub fn set_piece_deadline(&self, info_hash_hex: &str, piece_index: u32, deadline_ms: i32) -> Result<()> {
         let guard = self.inner.lock().unwrap();
         let info_hash_c = std::ffi::CString::new(info_hash_hex)?;

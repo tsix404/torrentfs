@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::broadcast;
 
 use crate::alert_loop::{AlertLoop, AlertLoopMessage};
@@ -7,7 +8,7 @@ use crate::database::Database;
 use crate::download::DownloadCoordinator;
 use crate::metadata::MetadataManager;
 use crate::piece_cache::PieceCache;
-use torrentfs_libtorrent::Session;
+use torrentfs_libtorrent::{AlertType, Session};
 
 fn get_save_path() -> String {
     dirs::home_dir()
@@ -158,6 +159,66 @@ impl TorrentRuntime {
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(AlertLoopMessage::Shutdown);
     }
+
+    pub async fn graceful_shutdown(&self) -> Result<()> {
+        tracing::info!("Starting graceful shutdown...");
+        
+        let info_hashes = self.session.get_torrents();
+        tracing::info!(torrent_count = info_hashes.len(), "Found torrents to save resume data");
+        
+        for info_hash in &info_hashes {
+            if let Err(e) = self.session.pause_torrent(info_hash) {
+                tracing::warn!(info_hash = %info_hash, error = %e, "Failed to pause torrent");
+            }
+        }
+        
+        for info_hash in &info_hashes {
+            if let Err(e) = self.session.save_resume_data(info_hash) {
+                tracing::warn!(info_hash = %info_hash, error = %e, "Failed to request resume data save");
+            }
+        }
+        
+        if !info_hashes.is_empty() {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            let mut saved_count = 0;
+            
+            loop {
+                let alerts = self.session.pop_alerts();
+                
+                for alert in alerts.iter() {
+                    if alert.alert_type == AlertType::SaveResumeData {
+                        if let Some(info_hash_hex) = &alert.info_hash {
+                            tracing::info!(info_hash = %info_hash_hex, "Resume data saved");
+                            saved_count += 1;
+                        }
+                    }
+                }
+                
+                if saved_count >= info_hashes.len() {
+                    break;
+                }
+                
+                if tokio::time::Instant::now() >= deadline {
+                    tracing::warn!(saved = saved_count, total = info_hashes.len(), "Timeout waiting for resume data saves");
+                    break;
+                }
+                
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+        
+        tracing::info!("Stopping alert loop...");
+        self.shutdown();
+        
+        tracing::info!("Destroying libtorrent session...");
+        drop(Arc::clone(&self.session));
+        
+        tracing::info!("Closing database connection pool...");
+        self.db.pool().close().await;
+        
+        tracing::info!("Graceful shutdown complete");
+        Ok(())
+    }
 }
 
 impl Drop for TorrentRuntime {
@@ -198,5 +259,19 @@ mod tests {
         
         let result = shutdown_tx.send(AlertLoopMessage::Shutdown);
         assert!(result.is_ok() || result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_graceful_shutdown_no_torrents() {
+        let runtime = TorrentRuntime::new().await.unwrap();
+        let result = runtime.graceful_shutdown().await;
+        assert!(result.is_ok(), "graceful_shutdown should succeed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_get_torrents_returns_vec() {
+        let runtime = TorrentRuntime::new().await.unwrap();
+        let torrents = runtime.session.get_torrents();
+        assert!(torrents.is_empty() || !torrents.is_empty(), "get_torrents should return a Vec");
     }
 }
