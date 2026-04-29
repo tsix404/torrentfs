@@ -17,7 +17,16 @@ pub struct Torrent {
     pub file_count: i64,
     pub status: String,
     pub source_path: String,
+    pub torrent_data: Option<Vec<u8>>,
+    pub resume_data: Option<Vec<u8>>,
     pub added_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TorrentWithData {
+    pub torrent: Torrent,
+    pub torrent_data: Vec<u8>,
+    pub resume_data: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,17 +56,19 @@ impl TorrentRepo {
         total_size: i64,
         file_count: i64,
         source_path: &str,
+        torrent_data: Option<&[u8]>,
     ) -> Result<Torrent> {
-        let result = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, String, String, String)>(
-            "INSERT INTO torrents (info_hash, name, total_size, file_count, source_path)
-             VALUES (?, ?, ?, ?, ?)
-             RETURNING id, info_hash, name, total_size, file_count, status, source_path, added_at",
+        let result = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, String, String, Option<Vec<u8>>, Option<Vec<u8>>, String)>(
+            "INSERT INTO torrents (info_hash, name, total_size, file_count, source_path, torrent_data)
+             VALUES (?, ?, ?, ?, ?, ?)
+             RETURNING id, info_hash, name, total_size, file_count, status, source_path, torrent_data, resume_data, added_at",
         )
         .bind(info_hash)
         .bind(name)
         .bind(total_size)
         .bind(file_count)
         .bind(source_path)
+        .bind(torrent_data)
         .fetch_one(&self.pool)
         .await?;
 
@@ -69,13 +80,15 @@ impl TorrentRepo {
             file_count: result.4,
             status: result.5,
             source_path: result.6,
-            added_at: result.7,
+            torrent_data: result.7,
+            resume_data: result.8,
+            added_at: result.9,
         })
     }
 
     pub async fn find_by_info_hash(&self, hash: &[u8]) -> Result<Option<Torrent>> {
-        let row = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, String, String, String)>(
-            "SELECT id, info_hash, name, total_size, file_count, status, source_path, added_at
+        let row = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, String, String, Option<Vec<u8>>, Option<Vec<u8>>, String)>(
+            "SELECT id, info_hash, name, total_size, file_count, status, source_path, torrent_data, resume_data, added_at
              FROM torrents WHERE info_hash = ?",
         )
         .bind(hash)
@@ -90,13 +103,15 @@ impl TorrentRepo {
             file_count: r.4,
             status: r.5,
             source_path: r.6,
-            added_at: r.7,
+            torrent_data: r.7,
+            resume_data: r.8,
+            added_at: r.9,
         }))
     }
 
     pub async fn list_all(&self) -> Result<Vec<Torrent>> {
-        let rows = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, String, String, String)>(
-            "SELECT id, info_hash, name, total_size, file_count, status, source_path, added_at
+        let rows = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, String, String, Option<Vec<u8>>, Option<Vec<u8>>, String)>(
+            "SELECT id, info_hash, name, total_size, file_count, status, source_path, torrent_data, resume_data, added_at
              FROM torrents ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -112,14 +127,16 @@ impl TorrentRepo {
                 file_count: r.4,
                 status: r.5,
                 source_path: r.6,
-                added_at: r.7,
+                torrent_data: r.7,
+                resume_data: r.8,
+                added_at: r.9,
             })
             .collect())
     }
 
     pub async fn find_by_name(&self, name: &str) -> Result<Option<Torrent>> {
-        let row = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, String, String, String)>(
-            "SELECT id, info_hash, name, total_size, file_count, status, source_path, added_at
+        let row = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, String, String, Option<Vec<u8>>, Option<Vec<u8>>, String)>(
+            "SELECT id, info_hash, name, total_size, file_count, status, source_path, torrent_data, resume_data, added_at
              FROM torrents WHERE name = ?",
         )
         .bind(name)
@@ -134,7 +151,9 @@ impl TorrentRepo {
             file_count: r.4,
             status: r.5,
             source_path: r.6,
-            added_at: r.7,
+            torrent_data: r.7,
+            resume_data: r.8,
+            added_at: r.9,
         }))
     }
 
@@ -161,12 +180,13 @@ impl TorrentRepo {
         total_size: i64,
         file_count: i64,
         source_path: &str,
+        torrent_data: Option<&[u8]>,
         files: Vec<FileEntry>,
     ) -> Result<InsertResult> {
         if let Some(existing) = self.find_by_info_hash(info_hash).await? {
             return Ok(InsertResult::AlreadyExists(existing));
         }
-        let torrent = self.insert(info_hash, name, total_size, file_count, source_path).await?;
+        let torrent = self.insert(info_hash, name, total_size, file_count, source_path, torrent_data).await?;
         self.insert_files(torrent.id, files).await?;
         Ok(InsertResult::Inserted(torrent))
     }
@@ -188,6 +208,48 @@ impl TorrentRepo {
                 size: r.3,
                 first_piece: r.4,
                 last_piece: r.5,
+            })
+            .collect())
+    }
+
+    pub async fn update_resume_data(&self, info_hash: &[u8], resume_data: &[u8]) -> Result<()> {
+        sqlx::query(
+            "UPDATE torrents SET resume_data = ? WHERE info_hash = ?",
+        )
+        .bind(resume_data)
+        .bind(info_hash)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_all_with_data(&self) -> Result<Vec<TorrentWithData>> {
+        let rows = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, String, String, Option<Vec<u8>>, Option<Vec<u8>>, String)>(
+            "SELECT id, info_hash, name, total_size, file_count, status, source_path, torrent_data, resume_data, added_at
+             FROM torrents WHERE torrent_data IS NOT NULL ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                r.7.as_ref().map(|td| TorrentWithData {
+                    torrent: Torrent {
+                        id: r.0,
+                        info_hash: r.1.clone(),
+                        name: r.2.clone(),
+                        total_size: r.3,
+                        file_count: r.4,
+                        status: r.5.clone(),
+                        source_path: r.6.clone(),
+                        torrent_data: Some(td.clone()),
+                        resume_data: r.8.clone(),
+                        added_at: r.9.clone(),
+                    },
+                    torrent_data: td.clone(),
+                    resume_data: r.8.clone(),
+                })
             })
             .collect())
     }
@@ -217,6 +279,8 @@ mod tests {
                 file_count INTEGER NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
                 source_path TEXT NOT NULL DEFAULT '',
+                torrent_data BLOB,
+                resume_data BLOB,
                 added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )",
         )
@@ -250,7 +314,7 @@ mod tests {
 
         let info_hash = vec![0u8; 20];
         let torrent = repo
-            .insert(&info_hash, "test.torrent", 1024, 3, "")
+            .insert(&info_hash, "test.torrent", 1024, 3, "", None::<&[u8]>)
             .await
             .unwrap();
 
@@ -281,10 +345,10 @@ mod tests {
         let (_temp_dir, pool) = setup_test_db().await;
         let repo = TorrentRepo::new(pool);
 
-        repo.insert(&vec![1u8; 20], "torrent1", 100, 1, "")
+        repo.insert(&vec![1u8; 20], "torrent1", 100, 1, "", None::<&[u8]>)
             .await
             .unwrap();
-        repo.insert(&vec![2u8; 20], "torrent2", 200, 2, "")
+        repo.insert(&vec![2u8; 20], "torrent2", 200, 2, "", None::<&[u8]>)
             .await
             .unwrap();
 
@@ -309,7 +373,7 @@ mod tests {
         let repo = TorrentRepo::new(pool);
 
         let torrent = repo
-            .insert(&vec![1u8; 20], "test.torrent", 2048, 2, "")
+            .insert(&vec![1u8; 20], "test.torrent", 2048, 2, "", None::<&[u8]>)
             .await
             .unwrap();
 
@@ -352,7 +416,7 @@ mod tests {
         let repo = TorrentRepo::new(pool);
 
         let torrent = repo
-            .insert(&vec![1u8; 20], "empty.torrent", 0, 0, "")
+            .insert(&vec![1u8; 20], "empty.torrent", 0, 0, "", None::<&[u8]>)
             .await
             .unwrap();
 
@@ -366,9 +430,9 @@ mod tests {
         let repo = TorrentRepo::new(pool);
 
         let hash = vec![0xAA; 20];
-        repo.insert(&hash, "first", 100, 1, "").await.unwrap();
+        repo.insert(&hash, "first", 100, 1, "", None::<&[u8]>).await.unwrap();
 
-        let result = repo.insert(&hash, "duplicate", 200, 2, "").await;
+        let result = repo.insert(&hash, "duplicate", 200, 2, "", None::<&[u8]>).await;
         assert!(result.is_err());
     }
 
@@ -378,7 +442,7 @@ mod tests {
         let repo = TorrentRepo::new(pool);
 
         let torrent = repo
-            .insert(&vec![1u8; 20], "test.torrent", 100, 1, "")
+            .insert(&vec![1u8; 20], "test.torrent", 100, 1, "", None::<&[u8]>)
             .await
             .unwrap();
 
@@ -411,7 +475,7 @@ mod tests {
         let repo = TorrentRepo::new(pool);
 
         let torrent = repo
-            .insert(&vec![1u8; 20], "test.torrent", 4096, 3, "")
+            .insert(&vec![1u8; 20], "test.torrent", 4096, 3, "", None::<&[u8]>)
             .await
             .unwrap();
 
@@ -462,10 +526,10 @@ mod tests {
         let info_hash1 = vec![1u8; 20];
         let info_hash2 = vec![2u8; 20];
         
-        repo.insert(&info_hash1, "torrent1", 100, 1, "")
+        repo.insert(&info_hash1, "torrent1", 100, 1, "", None::<&[u8]>)
             .await
             .unwrap();
-        repo.insert(&info_hash2, "torrent2", 200, 2, "")
+        repo.insert(&info_hash2, "torrent2", 200, 2, "", None::<&[u8]>)
             .await
             .unwrap();
 

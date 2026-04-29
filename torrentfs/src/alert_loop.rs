@@ -4,6 +4,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 use torrentfs_libtorrent::{Alert, AlertType, Session};
 
+use crate::metadata::MetadataManager;
 use crate::piece_cache::PieceCache;
 
 const ALERT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -16,6 +17,7 @@ pub enum AlertLoopMessage {
 pub struct AlertLoop {
     session: Arc<Session>,
     _piece_cache: Arc<PieceCache>,
+    _metadata_manager: Arc<MetadataManager>,
     shutdown_rx: broadcast::Receiver<AlertLoopMessage>,
 }
 
@@ -25,11 +27,13 @@ impl AlertLoop {
     pub fn new(
         session: Arc<Session>,
         piece_cache: Arc<PieceCache>,
+        metadata_manager: Arc<MetadataManager>,
         shutdown_rx: broadcast::Receiver<AlertLoopMessage>,
     ) -> Self {
         Self {
             session,
             _piece_cache: piece_cache,
+            _metadata_manager: metadata_manager,
             shutdown_rx,
         }
     }
@@ -172,7 +176,24 @@ impl AlertLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::Database;
     use tokio::sync::broadcast;
+    use tempfile::TempDir;
+    use sqlx::sqlite::SqliteConnectOptions;
+    use sqlx::SqlitePool;
+    use std::str::FromStr;
+
+    async fn setup_test_db() -> (TempDir, Database) {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let options = SqliteConnectOptions::from_str(&db_path.to_string_lossy())
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        let db = Database::with_pool(pool);
+        db.migrate().await.unwrap();
+        (temp_dir, db)
+    }
 
     #[tokio::test]
     async fn test_alert_loop_can_be_created() {
@@ -180,9 +201,11 @@ mod tests {
         let piece_cache = Arc::new(
             PieceCache::new().expect("Failed to create piece cache")
         );
+        let (_temp_dir, db) = setup_test_db().await;
+        let metadata_manager = Arc::new(MetadataManager::new(Arc::new(db)).expect("Failed to create metadata manager"));
         let (_tx, rx) = broadcast::channel::<AlertLoopMessage>(1);
         
-        let _alert_loop = AlertLoop::new(session, piece_cache, rx);
+        let _alert_loop = AlertLoop::new(session, piece_cache, metadata_manager, rx);
     }
 
     #[tokio::test]
@@ -191,9 +214,11 @@ mod tests {
         let piece_cache = Arc::new(
             PieceCache::new().expect("Failed to create piece cache")
         );
+        let (_temp_dir, db) = setup_test_db().await;
+        let metadata_manager = Arc::new(MetadataManager::new(Arc::new(db)).expect("Failed to create metadata manager"));
         let (tx, rx) = broadcast::channel::<AlertLoopMessage>(1);
         
-        let alert_loop = AlertLoop::new(session, piece_cache, rx);
+        let alert_loop = AlertLoop::new(session, piece_cache, metadata_manager, rx);
         
         let handle = tokio::spawn(alert_loop.run());
         

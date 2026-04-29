@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::runtime::Runtime;
 use torrentfs::metadata::MetadataManager;
@@ -91,7 +91,7 @@ impl Clone for MetadataDir {
 pub struct CoreResources {
     pub metadata_manager: Arc<MetadataManager>,
     pub tokio_runtime: Runtime,
-    pub session: Mutex<Session>,
+    pub session: Arc<Session>,
 }
 
 pub struct TorrentFsFilesystem {
@@ -121,7 +121,7 @@ impl TorrentFsFilesystem {
         state_dir: PathBuf,
         metadata_manager: Arc<MetadataManager>,
         tokio_runtime: Runtime,
-        session: Session,
+        session: Arc<Session>,
     ) -> Self {
         Self {
             state_dir,
@@ -133,7 +133,7 @@ impl TorrentFsFilesystem {
             core: Some(CoreResources {
                 metadata_manager,
                 tokio_runtime,
-                session: Mutex::new(session),
+                session,
             }),
         }
     }
@@ -1235,12 +1235,10 @@ impl Filesystem for TorrentFsFilesystem {
                         tracing::error!("Failed to persist torrent to DB: {}", e);
                     }
 
-                    if let Ok(session) = core.session.lock() {
-                        if let Err(e) = session.add_torrent_paused(&data, "/tmp/torrentfs") {
-                            tracing::error!("Failed to add torrent to session: {}", e);
-                        } else {
-                            tracing::info!("Added torrent '{}' to libtorrent session (paused)", name);
-                        }
+                    if let Err(e) = core.session.add_torrent_paused(&data, "/tmp/torrentfs") {
+                        tracing::error!("Failed to add torrent to session: {}", e);
+                    } else {
+                        tracing::info!("Added torrent '{}' to libtorrent session (paused)", name);
                     }
 
                     tracing::info!(

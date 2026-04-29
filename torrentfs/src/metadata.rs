@@ -16,6 +16,7 @@ pub struct ParsedTorrent {
     pub file_count: i64,
     pub files: Vec<FileEntry>,
     pub source_path: String,
+    pub torrent_data: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +54,7 @@ impl MetadataManager {
             file_count: info.file_count as i64,
             files,
             source_path: source_path.to_string(),
+            torrent_data: data.to_vec(),
         })
     }
 
@@ -74,6 +76,7 @@ impl MetadataManager {
             parsed.total_size,
             parsed.file_count,
             &parsed.source_path,
+            Some(parsed.torrent_data.as_slice()),
             repo_files,
         ).await?;
 
@@ -96,6 +99,14 @@ impl MetadataManager {
             .ok_or_else(|| anyhow::anyhow!("Torrent '{}' not found", torrent_name))?;
         
         self.repo.get_files(torrent.id).await.map_err(|e| e.into())
+    }
+
+    pub async fn list_torrents_with_data(&self) -> anyhow::Result<Vec<crate::repo::TorrentWithData>> {
+        self.repo.list_all_with_data().await.map_err(|e| e.into())
+    }
+
+    pub async fn update_resume_data(&self, info_hash: &[u8], resume_data: &[u8]) -> anyhow::Result<()> {
+        self.repo.update_resume_data(info_hash, resume_data).await.map_err(|e| e.into())
     }
 }
 

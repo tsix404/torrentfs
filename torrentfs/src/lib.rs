@@ -12,7 +12,7 @@ pub use database::Database;
 pub use download::DownloadCoordinator;
 pub use metadata::MetadataManager;
 pub use piece_cache::PieceCache;
-pub use repo::TorrentRepo;
+pub use repo::{TorrentRepo, TorrentWithData};
 pub use runtime::TorrentRuntime;
 
 pub async fn init() -> anyhow::Result<TorrentRuntime> {

@@ -67,6 +67,13 @@ impl Database {
         .await
         .context("Failed to check migration v1 status")?;
         
+        let v2_applied: Option<i64> = sqlx::query_scalar(
+            "SELECT version FROM _sqlx_migrations WHERE version = 2 AND success = true"
+        )
+        .fetch_optional(self.pool())
+        .await
+        .context("Failed to check migration v2 status")?;
+        
         if v1_applied.is_none() {
             // Apply initial migration
             println!("Applying initial migration...");
@@ -81,6 +88,8 @@ impl Database {
                     file_count INTEGER NOT NULL,
                     status TEXT NOT NULL DEFAULT 'pending',
                     source_path TEXT NOT NULL DEFAULT '',
+                    torrent_data BLOB,
+                    resume_data BLOB,
                     added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )"
             )
@@ -139,6 +148,37 @@ impl Database {
             println!("Initial migration applied successfully.");
         } else {
             println!("Migration v1 already applied.");
+        }
+        
+        if v2_applied.is_none() {
+            println!("Applying migration v2: adding torrent_data and resume_data columns...");
+            
+            sqlx::query(
+                "ALTER TABLE torrents ADD COLUMN torrent_data BLOB"
+            )
+            .execute(self.pool())
+            .await
+            .ok();
+            
+            sqlx::query(
+                "ALTER TABLE torrents ADD COLUMN resume_data BLOB"
+            )
+            .execute(self.pool())
+            .await
+            .ok();
+            
+            sqlx::query(
+                "INSERT OR IGNORE INTO _sqlx_migrations (version, description, success, checksum, execution_time)
+                 VALUES (2, 'add_torrent_data_resume_data', true, ?, 0)"
+            )
+            .bind(vec![0u8; 32])
+            .execute(self.pool())
+            .await
+            .context("Failed to record migration v2")?;
+            
+            println!("Migration v2 applied successfully.");
+        } else {
+            println!("Migration v2 already applied.");
         }
         
         Ok(())

@@ -200,7 +200,7 @@ fn test_init_and_mount_pipeline() {
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
-    let session = torrentfs_libtorrent::Session::new().unwrap();
+    let session = std::sync::Arc::new(torrentfs_libtorrent::Session::new().unwrap());
 
     let fs = TorrentFsFilesystem::new_with_core(
         state_path.clone(),
@@ -258,7 +258,7 @@ fn test_data_directory_populated_from_db() {
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
-    let session = torrentfs_libtorrent::Session::new().unwrap();
+    let session = std::sync::Arc::new(torrentfs_libtorrent::Session::new().unwrap());
 
     let fs = TorrentFsFilesystem::new_with_core(
         state_path.clone(),
@@ -414,7 +414,7 @@ fn test_data_mirrors_source_path() {
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
-    let session = torrentfs_libtorrent::Session::new().unwrap();
+    let session = std::sync::Arc::new(torrentfs_libtorrent::Session::new().unwrap());
 
     let fs = TorrentFsFilesystem::new_with_core(
         state_path.clone(),
@@ -637,7 +637,7 @@ fn test_deeply_nested_directories_in_torrent() {
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
-    let session = torrentfs_libtorrent::Session::new().unwrap();
+    let session = std::sync::Arc::new(torrentfs_libtorrent::Session::new().unwrap());
 
     let fs = TorrentFsFilesystem::new_with_core(
         state_path.clone(),
@@ -744,7 +744,7 @@ fn test_deeply_nested_subdirectory_mirroring() {
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
-    let session = torrentfs_libtorrent::Session::new().unwrap();
+    let session = std::sync::Arc::new(torrentfs_libtorrent::Session::new().unwrap());
 
     let fs = TorrentFsFilesystem::new_with_core(
         state_path.clone(),
@@ -821,7 +821,7 @@ fn test_stat_on_nested_directories() {
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
-    let session = torrentfs_libtorrent::Session::new().unwrap();
+    let session = std::sync::Arc::new(torrentfs_libtorrent::Session::new().unwrap());
 
     let fs = TorrentFsFilesystem::new_with_core(
         state_path.clone(),
@@ -902,7 +902,7 @@ fn test_read_nested_files() {
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
-    let session = torrentfs_libtorrent::Session::new().unwrap();
+    let session = std::sync::Arc::new(torrentfs_libtorrent::Session::new().unwrap());
 
     let fs = TorrentFsFilesystem::new_with_core(
         state_path.clone(),
@@ -957,4 +957,69 @@ fn test_read_nested_files() {
     }
 
     cleanup_mount(&mount_path, guard);
+}
+
+#[test]
+#[serial]
+fn test_torrent_restored_on_restart() {
+    let state_dir = TempDir::new().unwrap();
+    let mount_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+    let mount_path = mount_dir.path().to_path_buf();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let runtime = rt.block_on(torrentfs::TorrentRuntime::new()).unwrap();
+    let metadata_manager = std::sync::Arc::new(
+        torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
+    );
+    let session = std::sync::Arc::new(torrentfs_libtorrent::Session::new().unwrap());
+
+    let fs = TorrentFsFilesystem::new_with_core(
+        state_path.clone(),
+        metadata_manager,
+        rt,
+        session,
+    );
+
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+    let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+
+    let src = match first_torrent_file() {
+        Some(p) => p,
+        None => {
+            eprintln!("No .torrent files found, skipping restart test");
+            cleanup_mount(&mount_path, guard);
+            return;
+        }
+    };
+
+    let dest = mount_path.join("metadata").join(src.file_name().unwrap());
+    let result = fs::copy(&src, &dest);
+    assert!(result.is_ok(), "Failed to copy .torrent file: {:?}", result.err());
+
+    thread::sleep(Duration::from_millis(500));
+
+    cleanup_mount(&mount_path, guard);
+
+    let rt2 = tokio::runtime::Runtime::new().unwrap();
+    let runtime2 = rt2.block_on(torrentfs::TorrentRuntime::new()).unwrap();
+    let metadata_manager2 = std::sync::Arc::new(
+        torrentfs::MetadataManager::new(runtime2.db.clone()).unwrap()
+    );
+    let session2 = std::sync::Arc::new(torrentfs_libtorrent::Session::new().unwrap());
+
+    let torrents_with_data = rt2.block_on(metadata_manager2.list_torrents_with_data()).unwrap();
+    assert!(!torrents_with_data.is_empty(), "Torrent should be restored from DB");
+
+    let torrent_name = &torrents_with_data[0].torrent.name;
+    let found = session2.find_torrent(&hex::encode(&torrents_with_data[0].torrent.info_hash));
+    
+    eprintln!("Torrent '{}' restored, found in session: {}", torrent_name, found);
+
+    drop(runtime2);
 }

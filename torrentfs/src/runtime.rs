@@ -5,6 +5,7 @@ use tokio::sync::broadcast;
 use crate::alert_loop::{AlertLoop, AlertLoopMessage};
 use crate::database::Database;
 use crate::download::DownloadCoordinator;
+use crate::metadata::MetadataManager;
 use crate::piece_cache::PieceCache;
 use torrentfs_libtorrent::Session;
 
@@ -13,12 +14,13 @@ pub struct TorrentRuntime {
     pub session: Arc<Session>,
     pub piece_cache: Arc<PieceCache>,
     pub download_coordinator: Arc<DownloadCoordinator>,
+    pub metadata_manager: Arc<MetadataManager>,
     shutdown_tx: broadcast::Sender<AlertLoopMessage>,
 }
 
 impl TorrentRuntime {
     pub async fn new() -> Result<Self> {
-        let db = Database::new().await?;
+        let db = Arc::new(Database::new().await?);
         db.migrate().await?;
         
         let session = Arc::new(Session::new()?);
@@ -27,24 +29,75 @@ impl TorrentRuntime {
             Arc::clone(&session),
             Arc::clone(&piece_cache),
         ));
+        let metadata_manager = Arc::new(MetadataManager::new(Arc::clone(&db))?);
         
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<AlertLoopMessage>(1);
         
         let alert_loop = AlertLoop::new(
             Arc::clone(&session),
             Arc::clone(&piece_cache),
+            Arc::clone(&metadata_manager),
             shutdown_rx,
         );
         
         tokio::spawn(alert_loop.run());
         
-        Ok(Self {
-            db: Arc::new(db),
+        let runtime = Self {
+            db,
             session,
             piece_cache,
             download_coordinator,
+            metadata_manager,
             shutdown_tx,
-        })
+        };
+        
+        runtime.restore_torrents().await?;
+        
+        Ok(runtime)
+    }
+    
+    async fn restore_torrents(&self) -> Result<()> {
+        let torrents = self.metadata_manager.list_torrents_with_data().await?;
+        
+        if torrents.is_empty() {
+            tracing::info!("No torrents to restore from database");
+            return Ok(());
+        }
+        
+        let mut restored = 0;
+        let mut failed = 0;
+        
+        for torrent_with_data in torrents {
+            let info_hash_hex = hex::encode(&torrent_with_data.torrent.info_hash);
+            
+            match self.session.add_torrent_paused(&torrent_with_data.torrent_data, "/tmp/torrentfs") {
+                Ok(()) => {
+                    tracing::info!(
+                        info_hash = %info_hash_hex,
+                        name = %torrent_with_data.torrent.name,
+                        "Restored torrent from database"
+                    );
+                    restored += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        info_hash = %info_hash_hex,
+                        name = %torrent_with_data.torrent.name,
+                        error = %e,
+                        "Failed to restore torrent from database"
+                    );
+                    failed += 1;
+                }
+            }
+        }
+        
+        tracing::info!(
+            restored = restored,
+            failed = failed,
+            "Torrent restoration complete"
+        );
+        
+        Ok(())
     }
     
     pub fn shutdown(&self) {
