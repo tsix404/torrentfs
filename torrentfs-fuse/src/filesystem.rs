@@ -205,8 +205,11 @@ impl TorrentFsFilesystem {
 
     fn find_metadata_dir_by_parent_and_name(&self, parent: u64, name: &str) -> Option<(u64, &MetadataDir)> {
         for (ino, dir) in &self.metadata_dirs {
-            if dir.parent_ino == parent && dir.relative_path.ends_with(&format!("/{}", name)) {
-                return Some((*ino, dir));
+            if dir.parent_ino == parent {
+                let dir_name = dir.relative_path.rsplit('/').next().unwrap_or(&dir.relative_path);
+                if dir_name == name {
+                    return Some((*ino, dir));
+                }
             }
         }
         None
@@ -1722,5 +1725,77 @@ mod tests {
         
         assert!(!(data_dir_ino >= 0xB000000000000000 && data_dir_ino < 0xC000000000000000),
             "data_dir_inode should NOT fall into torrent_file_dir range");
+    }
+
+    #[test]
+    fn test_find_metadata_dir_by_parent_and_name_top_level() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let mut fs = TorrentFsFilesystem::new(state_dir.path().to_path_buf());
+        
+        let dir_ino = fs.allocate_ino();
+        fs.metadata_dirs.insert(dir_ino, MetadataDir {
+            ino: dir_ino,
+            parent_ino: INO_METADATA,
+            relative_path: "anime".to_string(),
+        });
+        
+        let result = fs.find_metadata_dir_by_parent_and_name(INO_METADATA, "anime");
+        assert!(result.is_some(), "Should find top-level directory under metadata/");
+        let (found_ino, dir) = result.unwrap();
+        assert_eq!(found_ino, dir_ino);
+        assert_eq!(dir.relative_path, "anime");
+    }
+
+    #[test]
+    fn test_find_metadata_dir_by_parent_and_name_nested() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let mut fs = TorrentFsFilesystem::new(state_dir.path().to_path_buf());
+        
+        let parent_ino = fs.allocate_ino();
+        fs.metadata_dirs.insert(parent_ino, MetadataDir {
+            ino: parent_ino,
+            parent_ino: INO_METADATA,
+            relative_path: "media".to_string(),
+        });
+        
+        let child_ino = fs.allocate_ino();
+        fs.metadata_dirs.insert(child_ino, MetadataDir {
+            ino: child_ino,
+            parent_ino: parent_ino,
+            relative_path: "media/video".to_string(),
+        });
+        
+        let result = fs.find_metadata_dir_by_parent_and_name(parent_ino, "video");
+        assert!(result.is_some(), "Should find nested directory");
+        let (found_ino, dir) = result.unwrap();
+        assert_eq!(found_ino, child_ino);
+        assert_eq!(dir.relative_path, "media/video");
+    }
+
+    #[test]
+    fn test_find_metadata_dir_by_parent_and_name_unicode() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let mut fs = TorrentFsFilesystem::new(state_dir.path().to_path_buf());
+        
+        let dir_ino = fs.allocate_ino();
+        fs.metadata_dirs.insert(dir_ino, MetadataDir {
+            ino: dir_ino,
+            parent_ino: INO_METADATA,
+            relative_path: "中文测试".to_string(),
+        });
+        
+        let result = fs.find_metadata_dir_by_parent_and_name(INO_METADATA, "中文测试");
+        assert!(result.is_some(), "Should find directory with unicode name");
+        let (found_ino, _dir) = result.unwrap();
+        assert_eq!(found_ino, dir_ino);
+    }
+
+    #[test]
+    fn test_find_metadata_dir_by_parent_and_name_not_found() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let fs = TorrentFsFilesystem::new(state_dir.path().to_path_buf());
+        
+        let result = fs.find_metadata_dir_by_parent_and_name(INO_METADATA, "nonexistent");
+        assert!(result.is_none(), "Should return None for nonexistent directory");
     }
 }
