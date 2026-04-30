@@ -2,7 +2,7 @@ use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
     ReplyOpen, ReplyWrite, Request, ReplyCreate,
 };
-use libc::{EEXIST, EINVAL, ENOENT, ENOSYS, ENOTDIR, EFBIG, EIO};
+use libc::{EEXIST, EINVAL, ENOENT, ENOTDIR, EFBIG, EIO};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::fuse_async::{FuseAsyncRuntime, FuseCommand, FuseError, TorrentInfo, FileInfo, ParsedTorrentInfo, PersistResult};
+use crate::fuse_async::{FuseAsyncRuntime, FuseCommand, FuseError, TorrentInfo, FileInfo, ParsedTorrentInfo, PersistResult, FileInfoForRead};
 use torrentfs::metadata::MetadataManager;
 use torrentfs_libtorrent::Session;
 
@@ -78,6 +78,18 @@ struct OpenFile {
     data: Vec<u8>,
 }
 
+struct OpenTorrentFile {
+    #[allow(dead_code)]
+    torrent_name: String,
+    #[allow(dead_code)]
+    file_path: String,
+    info_hash: String,
+    file_size: i64,
+    piece_size: u32,
+    first_piece: i64,
+    last_piece: i64,
+}
+
 struct MetadataEntry {
     path: String,
     size: u64,
@@ -104,6 +116,7 @@ pub struct TorrentFsFilesystem {
     next_ino: u64,
     next_fh: u64,
     open_files: HashMap<u64, OpenFile>,
+    open_torrent_files: HashMap<u64, OpenTorrentFile>,
     metadata_entries: HashMap<u64, MetadataEntry>,
     metadata_dirs: HashMap<u64, MetadataDir>,
     async_runtime: Option<Arc<FuseAsyncRuntime>>,
@@ -116,6 +129,7 @@ impl TorrentFsFilesystem {
             next_ino: INO_DYNAMIC_START,
             next_fh: 1,
             open_files: HashMap::new(),
+            open_torrent_files: HashMap::new(),
             metadata_entries: HashMap::new(),
             metadata_dirs: HashMap::new(),
             async_runtime: None,
@@ -137,6 +151,7 @@ impl TorrentFsFilesystem {
             next_ino: INO_DYNAMIC_START,
             next_fh: 1,
             open_files: HashMap::new(),
+            open_torrent_files: HashMap::new(),
             metadata_entries: HashMap::new(),
             metadata_dirs: HashMap::new(),
             async_runtime: Some(async_runtime),
@@ -275,6 +290,64 @@ impl TorrentFsFilesystem {
         } else {
             Err(FuseError::ChannelClosed)
         }
+    }
+
+    fn get_file_info_for_read(&self, torrent_name: &str, file_path: &str) -> Result<FileInfoForRead, FuseError> {
+        if let Some(runtime) = &self.async_runtime {
+            runtime.send_command_with_timeout(|reply| FuseCommand::GetFileInfoForInode {
+                torrent_name: torrent_name.to_string(),
+                file_path: file_path.to_string(),
+                reply,
+            })
+        } else {
+            Err(FuseError::ChannelClosed)
+        }
+    }
+
+    fn read_piece_from_torrent(&self, info_hash: &str, piece_index: u32) -> Result<Vec<u8>, FuseError> {
+        if let Some(runtime) = &self.async_runtime {
+            runtime.send_command_with_timeout(|reply| FuseCommand::ReadFilePiece {
+                info_hash: info_hash.to_string(),
+                piece_index,
+                reply,
+            })
+        } else {
+            Err(FuseError::ChannelClosed)
+        }
+    }
+    
+    fn find_torrent_file_by_ino(&self, ino: u64) -> Option<(String, String)> {
+        if ino < 0x9000000000000000 || ino >= 0xA000000000000000 {
+            return None;
+        }
+        
+        if let Some(runtime) = &self.async_runtime {
+            let result: Result<Vec<TorrentInfo>, _> = runtime.send_command_with_timeout(|reply| {
+                FuseCommand::ListTorrents { reply }
+            });
+            
+            if let Ok(torrents) = result {
+                for torrent in torrents {
+                    let files_result: Result<Vec<FileInfo>, _> = runtime.send_command_with_timeout(|reply| {
+                        FuseCommand::GetTorrentFiles {
+                            torrent_name: torrent.name.clone(),
+                            reply,
+                        }
+                    });
+                    
+                    if let Ok(files) = files_result {
+                        for file in files {
+                            let file_ino = self.file_inode(&torrent.name, &file.path);
+                            if file_ino == ino {
+                                return Some((torrent.name, file.path));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        None
     }
 }
 
@@ -1343,6 +1416,11 @@ impl Filesystem for TorrentFsFilesystem {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
+        if self.open_torrent_files.remove(&fh).is_some() {
+            reply.ok();
+            return;
+        }
+        
         let open_file = match self.open_files.remove(&fh) {
             Some(f) => f,
             None => {
@@ -1432,22 +1510,123 @@ impl Filesystem for TorrentFsFilesystem {
         reply.ok();
     }
 
-    fn open(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
-        reply.error(ENOSYS);
+    fn open(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
+        if ino >= 0x9000000000000000 && ino < 0xA000000000000000 {
+            if let Some((torrent_name, file_path)) = self.find_torrent_file_by_ino(ino) {
+                match self.get_file_info_for_read(&torrent_name, &file_path) {
+                    Ok(file_info) => {
+                        let fh = self.allocate_fh();
+                        self.open_torrent_files.insert(fh, OpenTorrentFile {
+                            torrent_name: file_info.torrent_name,
+                            file_path: file_info.file_path,
+                            info_hash: file_info.info_hash,
+                            file_size: file_info.file_size,
+                            piece_size: file_info.piece_size,
+                            first_piece: file_info.first_piece,
+                            last_piece: file_info.last_piece,
+                        });
+                        reply.opened(fh, 0);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to get file info for open: {}", e);
+                        reply.error(fuse_error_to_errno(&e));
+                    }
+                }
+            } else {
+                reply.error(ENOENT);
+            }
+        } else if self.metadata_entries.contains_key(&ino) {
+            let fh = self.allocate_fh();
+            reply.opened(fh, 0);
+        } else {
+            reply.error(ENOENT);
+        }
     }
 
     fn read(
         &mut self,
         _req: &Request<'_>,
-        _ino: u64,
-        _fh: u64,
-        _offset: i64,
-        _size: u32,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        size: u32,
         _flags: i32,
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        reply.error(ENOSYS);
+        if offset < 0 {
+            reply.error(EINVAL);
+            return;
+        }
+        
+        if let Some(open_torrent_file) = self.open_torrent_files.get(&fh) {
+            let file_size = open_torrent_file.file_size;
+            let offset = offset as u64;
+            
+            if offset >= file_size as u64 {
+                reply.data(&[]);
+                return;
+            }
+            
+            let end_offset = std::cmp::min(offset + size as u64, file_size as u64);
+            let bytes_to_read = (end_offset - offset) as usize;
+            
+            let piece_size = open_torrent_file.piece_size as u64;
+            let first_piece = open_torrent_file.first_piece as u32;
+            let _last_piece = open_torrent_file.last_piece as u32;
+            
+            let start_piece_idx = first_piece + (offset / piece_size) as u32;
+            let end_piece_idx = first_piece + ((end_offset - 1) / piece_size) as u32;
+            
+            let mut result = Vec::with_capacity(bytes_to_read);
+            let mut current_offset = offset;
+            
+            for piece_idx in start_piece_idx..=end_piece_idx {
+                match self.read_piece_from_torrent(&open_torrent_file.info_hash, piece_idx) {
+                    Ok(piece_data) => {
+                        let piece_start = (current_offset % piece_size) as usize;
+                        let remaining_bytes = (end_offset - current_offset) as usize;
+                        let piece_remaining = piece_data.len().saturating_sub(piece_start);
+                        let bytes_from_piece = std::cmp::min(remaining_bytes, piece_remaining);
+                        
+                        if bytes_from_piece > 0 {
+                            result.extend_from_slice(&piece_data[piece_start..piece_start + bytes_from_piece]);
+                            current_offset += bytes_from_piece as u64;
+                        }
+                        
+                        if result.len() >= bytes_to_read {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            info_hash = %open_torrent_file.info_hash,
+                            piece_index = piece_idx,
+                            error = %e,
+                            "Failed to read piece"
+                        );
+                        reply.error(fuse_error_to_errno(&e));
+                        return;
+                    }
+                }
+            }
+            
+            reply.data(&result);
+        } else if let Some(_metadata_entry) = self.metadata_entries.get(&ino) {
+            if let Some(open_file) = self.open_files.get(&fh) {
+                let offset = offset as usize;
+                let end = std::cmp::min(offset + size as usize, open_file.data.len());
+                if offset >= open_file.data.len() {
+                    reply.data(&[]);
+                } else {
+                    reply.data(&open_file.data[offset..end]);
+                }
+            } else {
+                reply.error(ENOENT);
+            }
+        } else {
+            reply.error(ENOENT);
+        }
     }
 }
 

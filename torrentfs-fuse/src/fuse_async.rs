@@ -5,6 +5,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use torrentfs::metadata::MetadataManager;
 use torrentfs::repo::TorrentRepo;
+use torrentfs::DownloadCoordinator;
 use torrentfs_libtorrent::Session;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
@@ -33,6 +34,16 @@ pub enum FuseCommand {
         parsed: ParsedTorrentInfo,
         reply: oneshot::Sender<Result<PersistResult, FuseError>>,
     },
+    GetFileInfoForInode {
+        torrent_name: String,
+        file_path: String,
+        reply: oneshot::Sender<Result<FileInfoForRead, FuseError>>,
+    },
+    ReadFilePiece {
+        info_hash: String,
+        piece_index: u32,
+        reply: oneshot::Sender<Result<Vec<u8>, FuseError>>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +62,17 @@ pub struct TorrentInfo {
 pub struct FileInfo {
     pub path: String,
     pub size: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileInfoForRead {
+    pub torrent_name: String,
+    pub info_hash: String,
+    pub file_path: String,
+    pub file_size: i64,
+    pub piece_size: u32,
+    pub first_piece: i64,
+    pub last_piece: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +113,8 @@ pub struct FuseAsyncRuntime {
     command_tx: mpsc::Sender<FuseCommand>,
     rt: tokio::runtime::Runtime,
     _task_handle: tokio::task::JoinHandle<()>,
+    #[allow(dead_code)]
+    download_coordinator: Option<Arc<DownloadCoordinator>>,
 }
 
 impl FuseAsyncRuntime {
@@ -101,14 +125,45 @@ impl FuseAsyncRuntime {
         let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
         let (command_tx, command_rx) = mpsc::channel(CHANNEL_BUFFER_SIZE);
         
+        let piece_cache = Arc::new(
+            torrentfs::PieceCache::new().expect("Failed to create PieceCache")
+        );
+        let download_coordinator = Arc::new(DownloadCoordinator::new(
+            Arc::clone(&session),
+            Arc::clone(&piece_cache),
+        ));
+        
+        let dc_clone = Arc::clone(&download_coordinator);
         let task_handle = rt.spawn(async move {
-            Self::run_command_loop(command_rx, metadata_manager, session).await;
+            Self::run_command_loop(command_rx, metadata_manager, session, dc_clone).await;
         });
         
         Self {
             command_tx,
             rt,
             _task_handle: task_handle,
+            download_coordinator: Some(download_coordinator),
+        }
+    }
+    
+    pub fn new_with_download_coordinator(
+        metadata_manager: Arc<MetadataManager>,
+        session: Arc<Session>,
+        download_coordinator: Arc<DownloadCoordinator>,
+    ) -> Self {
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+        let (command_tx, command_rx) = mpsc::channel(CHANNEL_BUFFER_SIZE);
+        
+        let dc_clone = Arc::clone(&download_coordinator);
+        let task_handle = rt.spawn(async move {
+            Self::run_command_loop(command_rx, metadata_manager, session, dc_clone).await;
+        });
+        
+        Self {
+            command_tx,
+            rt,
+            _task_handle: task_handle,
+            download_coordinator: Some(download_coordinator),
         }
     }
     
@@ -136,6 +191,7 @@ impl FuseAsyncRuntime {
         mut command_rx: mpsc::Receiver<FuseCommand>,
         metadata_manager: Arc<MetadataManager>,
         session: Arc<Session>,
+        download_coordinator: Arc<DownloadCoordinator>,
     ) {
         while let Some(command) = command_rx.recv().await {
             match command {
@@ -163,6 +219,17 @@ impl FuseAsyncRuntime {
                 FuseCommand::PersistToDb { parsed, reply } => {
                     let result = Self::handle_persist_to_db(&metadata_manager.repo, &parsed).await;
                     let _ = reply.send(result);
+                }
+                FuseCommand::GetFileInfoForInode { torrent_name, file_path, reply } => {
+                    let result = Self::handle_get_file_info_for_inode(&metadata_manager, &torrent_name, &file_path).await;
+                    let _ = reply.send(result);
+                }
+                FuseCommand::ReadFilePiece { info_hash, piece_index, reply } => {
+                    let dc = download_coordinator.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let result = Self::handle_read_file_piece(&dc, &info_hash, piece_index);
+                        let _ = reply.send(result);
+                    });
                 }
             }
         }
@@ -271,6 +338,58 @@ impl FuseAsyncRuntime {
             torrentfs::repo::InsertResult::Inserted(_) => Ok(PersistResult::Inserted),
             torrentfs::repo::InsertResult::AlreadyExists(_) => Ok(PersistResult::AlreadyExists),
         }
+    }
+    
+    async fn handle_get_file_info_for_inode(
+        metadata_manager: &MetadataManager,
+        torrent_name: &str,
+        file_path: &str,
+    ) -> Result<FileInfoForRead, FuseError> {
+        let torrent = metadata_manager
+            .repo
+            .find_by_name(torrent_name)
+            .await
+            .map_err(|e| FuseError::DatabaseError(e.to_string()))?
+            .ok_or_else(|| FuseError::DatabaseError(format!("Torrent '{}' not found", torrent_name)))?;
+        
+        let info_hash = hex::encode(&torrent.info_hash);
+        
+        let files = metadata_manager
+            .repo
+            .get_files(torrent.id)
+            .await
+            .map_err(|e| FuseError::DatabaseError(e.to_string()))?;
+        
+        let file = files
+            .iter()
+            .find(|f| f.path == file_path)
+            .ok_or_else(|| FuseError::DatabaseError(format!("File '{}' not found in torrent", file_path)))?;
+        
+        let torrent_data = torrent.torrent_data
+            .ok_or_else(|| FuseError::DatabaseError("Torrent data not stored".to_string()))?;
+        
+        let torrent_info = torrentfs_libtorrent::parse_torrent(&torrent_data)
+            .map_err(|e| FuseError::TorrentParseError(e.to_string()))?;
+        
+        Ok(FileInfoForRead {
+            torrent_name: torrent_name.to_string(),
+            info_hash,
+            file_path: file_path.to_string(),
+            file_size: file.size,
+            piece_size: torrent_info.piece_size,
+            first_piece: file.first_piece,
+            last_piece: file.last_piece,
+        })
+    }
+    
+    fn handle_read_file_piece(
+        download_coordinator: &DownloadCoordinator,
+        info_hash: &str,
+        piece_index: u32,
+    ) -> Result<Vec<u8>, FuseError> {
+        download_coordinator
+            .get_piece(info_hash, piece_index)
+            .map_err(|e| FuseError::SessionError(e.to_string()))
     }
 }
 

@@ -973,6 +973,84 @@ fn test_read_nested_files() {
 
 #[test]
 #[serial]
+fn test_open_and_read_no_enosys() {
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let metadata_manager = std::sync::Arc::new(
+        torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
+    );
+    let session = std::sync::Arc::new(torrentfs_libtorrent::Session::new().unwrap());
+
+    let fs = TorrentFsFilesystem::new_with_core(
+        state_path.clone(),
+        metadata_manager,
+        rt,
+        session,
+    );
+
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+    let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+
+    let src = match nested_dirs_torrent() {
+        Some(p) => p,
+        None => {
+            eprintln!("nested_dirs.torrent not found, skipping open/read ENOSYS test");
+            cleanup_mount(&mount_path, guard);
+            return;
+        }
+    };
+
+    let dest = mount_path.join("metadata").join(src.file_name().unwrap());
+    let result = fs::copy(&src, &dest);
+    assert!(result.is_ok(), "Failed to copy .torrent file: {:?}", result.err());
+
+    thread::sleep(Duration::from_millis(500));
+
+    let a_png_path = mount_path.join("data/nested_test/docs/images/a.png");
+    
+    use std::os::unix::fs::FileExt;
+    let file_result = std::fs::OpenOptions::new()
+        .read(true)
+        .open(&a_png_path);
+    
+    match file_result {
+        Ok(file) => {
+            let mut buf = [0u8; 1024];
+            let read_result = file.read_at(&mut buf, 0);
+            match read_result {
+                Ok(_n) => {
+                    // open() and read() succeeded - no ENOSYS
+                }
+                Err(e) => {
+                    let errno = e.raw_os_error().unwrap_or(0);
+                    assert_ne!(errno, libc::ENOSYS, "read() should not return ENOSYS");
+                    eprintln!("Note: read() returned error {} (not ENOSYS), may be expected for piece download: {:?}", errno, e);
+                }
+            }
+        }
+        Err(e) => {
+            let errno = e.raw_os_error().unwrap_or(0);
+            assert_ne!(errno, libc::ENOSYS, "open() should not return ENOSYS");
+            eprintln!("Note: open() returned error {} (not ENOSYS): {:?}", errno, e);
+        }
+    }
+
+    cleanup_mount(&mount_path, guard);
+}
+
+#[test]
+#[serial]
 fn test_torrent_restored_on_restart() {
     let state_dir = TempDir::new().unwrap();
     let mount_dir = TempDir::new().unwrap();
