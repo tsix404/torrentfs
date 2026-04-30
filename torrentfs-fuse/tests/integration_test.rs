@@ -795,12 +795,24 @@ fn test_deeply_nested_subdirectory_mirroring() {
     eprintln!("data/a/b entries: {:?}", data_a_b_entries);
     assert!(!data_a_b_entries.is_empty(), "data/a/b should contain torrent directory");
 
-    assert!(data_a_b_entries.contains(&"docs".to_string()), 
-        "data/a/b should contain docs directory from nested torrent");
-    assert!(data_a_b_entries.contains(&"src".to_string()), 
-        "data/a/b should contain src directory from nested torrent");
+    assert!(data_a_b_entries.contains(&"nested_test".to_string()), 
+        "data/a/b should contain nested_test directory");
 
-    let docs_images = data_a_b.join("docs").join("images");
+    let nested_test_dir = data_a_b.join("nested_test");
+    assert!(nested_test_dir.exists(), "nested_test should exist");
+    assert!(nested_test_dir.is_dir(), "nested_test should be a directory");
+
+    let nested_test_entries: Vec<_> = fs::read_dir(&nested_test_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+
+    assert!(nested_test_entries.contains(&"docs".to_string()), 
+        "nested_test should contain docs directory");
+    assert!(nested_test_entries.contains(&"src".to_string()), 
+        "nested_test should contain src directory");
+
+    let docs_images = nested_test_dir.join("docs").join("images");
     assert!(docs_images.exists(), "docs/images should exist in nested torrent");
     assert!(docs_images.is_dir(), "docs/images should be a directory");
 

@@ -549,16 +549,10 @@ impl Filesystem for TorrentFsFilesystem {
                                         if !parts.is_empty() {
                                             let first_part = parts[0];
                                             if first_part == name_str {
-                                                if parts.len() == 1 {
-                                                    let torrent_ino = self.torrent_inode(&torrent.source_path, &torrent.name);
-                                                    reply.entry(&TTL, &dir_attr(torrent_ino), 0);
-                                                    return;
-                                                } else {
-                                                    let new_path = format!("{}/{}", data_dir_path, name_str);
-                                                    let dir_ino = self.data_dir_inode(&new_path);
-                                                    reply.entry(&TTL, &dir_attr(dir_ino), 0);
-                                                    return;
-                                                }
+                                                let new_path = format!("{}/{}", data_dir_path, name_str);
+                                                let dir_ino = self.data_dir_inode(&new_path);
+                                                reply.entry(&TTL, &dir_attr(dir_ino), 0);
+                                                return;
                                             }
                                         }
                                     }
@@ -1112,16 +1106,8 @@ impl Filesystem for TorrentFsFilesystem {
                                 } else {
                                     let rest = &torrent.source_path[data_dir_path.len() + 1..];
                                     if !rest.is_empty() {
-                                        let parts: Vec<&str> = rest.split('/').collect();
-                                        if parts.len() == 1 {
-                                            let torrent_ino = self.torrent_inode(&torrent.source_path, &torrent.name);
-                                            idx += 1;
-                                            if idx > offset {
-                                                if reply.add(torrent_ino, idx, FileType::Directory, &torrent.name) {
-                                                    break;
-                                                }
-                                            }
-                                        } else {
+                                        let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
+                                        if !parts.is_empty() {
                                             let first_part = parts[0];
                                             if !added_names.contains(first_part) {
                                                 let new_path = format!("{}/{}", data_dir_path, first_part);
