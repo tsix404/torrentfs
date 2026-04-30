@@ -326,23 +326,40 @@ impl TorrentFsFilesystem {
                 FuseCommand::ListTorrents { reply }
             });
             
-            if let Ok(torrents) = result {
-                for torrent in torrents {
-                    let files_result: Result<Vec<FileInfo>, _> = runtime.send_command_with_timeout(|reply| {
-                        FuseCommand::GetTorrentFiles {
-                            torrent_name: torrent.name.clone(),
-                            reply,
-                        }
-                    });
-                    
-                    if let Ok(files) = files_result {
-                        for file in files {
-                            let file_ino = self.file_inode(&torrent.name, &file.path);
-                            if file_ino == ino {
-                                return Some((torrent.name, file.path));
+            match result {
+                Ok(torrents) => {
+                    for torrent in torrents {
+                        let files_result: Result<Vec<FileInfo>, _> = runtime.send_command_with_timeout(|reply| {
+                            FuseCommand::GetTorrentFiles {
+                                torrent_name: torrent.name.clone(),
+                                reply,
+                            }
+                        });
+                        
+                        match files_result {
+                            Ok(files) => {
+                                for file in files {
+                                    let file_ino = self.file_inode(&torrent.name, &file.path);
+                                    if file_ino == ino {
+                                        return Some((torrent.name, file.path));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    torrent_name = %torrent.name,
+                                    error = %e,
+                                    "Failed to get torrent files in find_torrent_file_by_ino"
+                                );
                             }
                         }
                     }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to list torrents in find_torrent_file_by_ino"
+                    );
                 }
             }
         }
@@ -1573,10 +1590,13 @@ impl Filesystem for TorrentFsFilesystem {
             
             let piece_size = open_torrent_file.piece_size as u64;
             let first_piece = open_torrent_file.first_piece as u32;
-            let _last_piece = open_torrent_file.last_piece as u32;
+            let last_piece = open_torrent_file.last_piece as u32;
             
             let start_piece_idx = first_piece + (offset / piece_size) as u32;
-            let end_piece_idx = first_piece + ((end_offset - 1) / piece_size) as u32;
+            let end_piece_idx = std::cmp::min(
+                first_piece + ((end_offset - 1) / piece_size) as u32,
+                last_piece
+            );
             
             let mut result = Vec::with_capacity(bytes_to_read);
             let mut current_offset = offset;
