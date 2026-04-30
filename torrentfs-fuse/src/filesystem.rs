@@ -400,6 +400,16 @@ impl Filesystem for TorrentFsFilesystem {
                                             .unwrap_or(&file.path);
                                         let relative_path = relative_path.strip_prefix('/').unwrap_or(relative_path);
                                         
+                                        if relative_path.is_empty() {
+                                            let file_name = file.path.rsplit('/').next().unwrap_or(&file.path);
+                                            if file_name == name_str {
+                                                let ino = self.file_inode(&torrent.name, &file.path);
+                                                reply.entry(&TTL, &file_attr(ino, file.size as u64), 0);
+                                                return;
+                                            }
+                                            continue;
+                                        }
+                                        
                                         let parts: Vec<&str> = relative_path.split('/').collect();
                                         
                                         if parts.len() == 1 && parts[0] == name_str {
@@ -883,6 +893,18 @@ impl Filesystem for TorrentFsFilesystem {
                                         let relative_path = file.path.strip_prefix(&torrent.name)
                                             .unwrap_or(&file.path);
                                         let relative_path = relative_path.strip_prefix('/').unwrap_or(relative_path);
+                                        
+                                        if relative_path.is_empty() {
+                                            let file_name = file.path.rsplit('/').next().unwrap_or(&file.path);
+                                            idx += 1;
+                                            if idx > offset {
+                                                let file_ino = self.file_inode(&torrent.name, &file.path);
+                                                if reply.add(file_ino, idx, FileType::RegularFile, file_name) {
+                                                    break;
+                                                }
+                                            }
+                                            continue;
+                                        }
                                         
                                         let parts: Vec<&str> = relative_path.split('/').collect();
                                         
@@ -1636,5 +1658,36 @@ mod tests {
         let ino2 = fs.torrent_file_dir_inode("test_torrent", "test_torrent/docs/images");
         
         assert_ne!(ino1, ino2, "Nested directories should have different inodes");
+    }
+
+    #[test]
+    fn test_single_file_torrent_relative_path_handling() {
+        let torrent_name = "video.mkv";
+        let file_path = "video.mkv";
+        
+        let relative_path = file_path.strip_prefix(torrent_name)
+            .unwrap_or(file_path);
+        let relative_path = relative_path.strip_prefix('/').unwrap_or(relative_path);
+        
+        assert!(relative_path.is_empty(), "Single-file torrent should have empty relative path");
+        
+        let file_name = file_path.rsplit('/').next().unwrap_or(file_path);
+        assert_eq!(file_name, "video.mkv", "Should use basename for single-file torrent");
+    }
+
+    #[test]
+    fn test_multi_file_torrent_relative_path_handling() {
+        let torrent_name = "mytorrent";
+        let file_path = "mytorrent/video.mkv";
+        
+        let relative_path = file_path.strip_prefix(torrent_name)
+            .unwrap_or(file_path);
+        let relative_path = relative_path.strip_prefix('/').unwrap_or(relative_path);
+        
+        assert_eq!(relative_path, "video.mkv", "Multi-file torrent should have non-empty relative path");
+        
+        let parts: Vec<&str> = relative_path.split('/').collect();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0], "video.mkv");
     }
 }
