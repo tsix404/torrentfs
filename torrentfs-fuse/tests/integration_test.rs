@@ -1112,6 +1112,77 @@ fn test_single_level_subdirectory_data_access() {
 
 #[test]
 #[serial]
+fn test_invalid_torrent_file_rejected() {
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let metadata_manager = std::sync::Arc::new(
+        torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
+    );
+    let session = std::sync::Arc::new(torrentfs_libtorrent::Session::new().unwrap());
+
+    let fs = TorrentFsFilesystem::new_with_core(
+        state_path.clone(),
+        metadata_manager,
+        rt,
+        session,
+    );
+
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+    let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+
+    let dest = mount_path.join("metadata").join("invalid.torrent");
+    
+    use std::io::Write;
+    let file_result = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&dest);
+    
+    match file_result {
+        Ok(mut file) => {
+            let _ = file.write_all(b"not a valid torrent data");
+            let sync_result = file.sync_all();
+            if let Err(e) = sync_result {
+                assert!(
+                    e.raw_os_error() == Some(libc::EINVAL) || e.raw_os_error() == Some(libc::EIO),
+                    "sync_all should return EINVAL or EIO for invalid torrent, got: {:?}", e
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("Open error (unexpected for this test): {:?}", e);
+        }
+    }
+
+    thread::sleep(Duration::from_millis(500));
+
+    let metadata_entries: Vec<_> = fs::read_dir(mount_path.join("metadata"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+
+    assert!(
+        !metadata_entries.contains(&"invalid.torrent".to_string()),
+        "Invalid torrent file should NOT remain visible in metadata/ after rejection, found: {:?}",
+        metadata_entries
+    );
+
+    cleanup_mount(&mount_path, guard);
+}
+
+#[test]
+#[serial]
 fn test_multiple_torrents_same_subdirectory() {
     let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();

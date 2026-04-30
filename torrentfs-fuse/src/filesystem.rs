@@ -1336,7 +1336,7 @@ impl Filesystem for TorrentFsFilesystem {
     fn release(
         &mut self,
         _req: &Request<'_>,
-        _ino: u64,
+        ino: u64,
         fh: u64,
         _flags: i32,
         _lock_owner: Option<u64>,
@@ -1400,11 +1400,13 @@ impl Filesystem for TorrentFsFilesystem {
                 }
                 Err(FuseError::TorrentParseError(e)) => {
                     tracing::error!("Invalid torrent file '{}': {}", name, e);
+                    self.metadata_entries.remove(&ino);
                     reply.error(EINVAL);
                     return;
                 }
                 Err(e) => {
                     tracing::error!("Failed to process torrent data: {}", e);
+                    self.metadata_entries.remove(&ino);
                     reply.error(EIO);
                     return;
                 }
