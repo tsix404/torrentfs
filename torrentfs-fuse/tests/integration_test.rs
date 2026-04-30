@@ -1109,3 +1109,84 @@ fn test_single_level_subdirectory_data_access() {
 
     cleanup_mount(&mount_path, guard);
 }
+
+#[test]
+#[serial]
+fn test_multiple_torrents_same_subdirectory() {
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let metadata_manager = std::sync::Arc::new(
+        torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
+    );
+    let session = std::sync::Arc::new(torrentfs_libtorrent::Session::new().unwrap());
+
+    let fs = TorrentFsFilesystem::new_with_core(
+        state_path.clone(),
+        metadata_manager,
+        rt,
+        session,
+    );
+
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+    let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+
+    let subdir = mount_path.join("metadata").join("series");
+    fs::create_dir_all(&subdir).expect("Failed to create series subdirectory");
+
+    let src_dir = test_torrent_dir();
+    let torrent_files: Vec<_> = fs::read_dir(&src_dir)
+        .unwrap()
+        .filter_map(|e| {
+            let e = e.ok()?;
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".torrent") {
+                Some(e.path())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if torrent_files.len() < 2 {
+        eprintln!("Need at least 2 .torrent files for this test, skipping");
+        cleanup_mount(&mount_path, guard);
+        return;
+    }
+
+    for (i, src) in torrent_files.iter().take(2).enumerate() {
+        let dest = subdir.join(format!("{}_{}.torrent", i, src.file_name().unwrap().to_string_lossy()));
+        let result = fs::copy(src, &dest);
+        assert!(result.is_ok(), "Failed to copy .torrent file: {:?}", result.err());
+    }
+
+    thread::sleep(Duration::from_millis(500));
+
+    let data_series = mount_path.join("data").join("series");
+    assert!(data_series.exists(), "data/series should exist after copying torrents to metadata/series/");
+    assert!(data_series.is_dir(), "data/series should be a directory");
+
+    let series_entries: Vec<_> = fs::read_dir(&data_series)
+        .unwrap()
+        .map(|e| e.unwrap())
+        .collect();
+
+    assert!(series_entries.len() >= 2, "data/series should contain at least 2 torrent directories, got {:?}", series_entries.len());
+
+    for entry in &series_entries {
+        let entry_type = entry.file_type().unwrap();
+        assert!(entry_type.is_dir(), "Each entry in data/series should be a directory, got file: {:?}", entry.file_name());
+    }
+
+    cleanup_mount(&mount_path, guard);
+}
