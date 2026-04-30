@@ -171,7 +171,7 @@ impl TorrentFsFilesystem {
         let mut hasher = DefaultHasher::new();
         source_path.hash(&mut hasher);
         torrent_name.hash(&mut hasher);
-        (hasher.finish() & 0x7FFFFFFFFFFFFFFF) | 0x8000000000000000
+        (hasher.finish() & 0x0FFFFFFFFFFFFFFF) | 0x8000000000000000
     }
 
     fn file_inode(&self, torrent_name: &str, file_path: &str) -> u64 {
@@ -181,7 +181,7 @@ impl TorrentFsFilesystem {
         let mut hasher = DefaultHasher::new();
         torrent_name.hash(&mut hasher);
         file_path.hash(&mut hasher);
-        (hasher.finish() & 0x7FFFFFFFFFFFFFFF) | 0x8000000000000000
+        (hasher.finish() & 0x0FFFFFFFFFFFFFFF) | 0x9000000000000000
     }
 
     fn data_dir_inode(&self, path: &str) -> u64 {
@@ -190,7 +190,7 @@ impl TorrentFsFilesystem {
         
         let mut hasher = DefaultHasher::new();
         path.hash(&mut hasher);
-        (hasher.finish() & 0x7FFFFFFFFFFFFFFF) | 0xC000000000000000
+        (hasher.finish() & 0x0FFFFFFFFFFFFFFF) | 0xA000000000000000
     }
 
     fn torrent_file_dir_inode(&self, torrent_name: &str, dir_path: &str) -> u64 {
@@ -200,7 +200,7 @@ impl TorrentFsFilesystem {
         let mut hasher = DefaultHasher::new();
         torrent_name.hash(&mut hasher);
         dir_path.hash(&mut hasher);
-        (hasher.finish() & 0x0FFFFFFFFFFFFFFF) | 0xD000000000000000
+        (hasher.finish() & 0x0FFFFFFFFFFFFFFF) | 0xB000000000000000
     }
 
     fn find_metadata_dir_by_parent_and_name(&self, parent: u64, name: &str) -> Option<(u64, &MetadataDir)> {
@@ -431,7 +431,7 @@ impl Filesystem for TorrentFsFilesystem {
                             return;
                         }
                         
-                        if parent >= 0xD000000000000000 && parent < 0xE000000000000000 {
+                        if parent >= 0xB000000000000000 && parent < 0xC000000000000000 {
                             match self.get_torrent_files_safe(&torrent.name) {
                                 Ok(files) => {
                                     let mut current_dir_path: Option<String> = None;
@@ -597,7 +597,7 @@ impl Filesystem for TorrentFsFilesystem {
                             return;
                         }
                         
-                        if ino >= 0xD000000000000000 && ino < 0xE000000000000000 {
+                        if ino >= 0xB000000000000000 && ino < 0xC000000000000000 {
                             match self.get_torrent_files_safe(&torrent.name) {
                                 Ok(files) => {
                                     for file in &files {
@@ -634,7 +634,7 @@ impl Filesystem for TorrentFsFilesystem {
             }
         }
         
-        if ino >= 0xC000000000000000 {
+        if ino >= 0xA000000000000000 && ino < 0xB000000000000000 {
             reply.attr(&TTL, &dir_attr(ino));
             return;
         }
@@ -940,7 +940,7 @@ impl Filesystem for TorrentFsFilesystem {
                             return;
                         }
                         
-                        if ino >= 0xD000000000000000 && ino < 0xE000000000000000 {
+                        if ino >= 0xB000000000000000 && ino < 0xC000000000000000 {
                             match self.get_torrent_files_safe(&torrent.name) {
                                 Ok(files) => {
                                     let mut current_dir_path: Option<String> = None;
@@ -1650,8 +1650,8 @@ mod tests {
         
         let ino = fs.torrent_file_dir_inode("test_torrent", "test_torrent/docs");
         
-        assert!(ino >= 0xD000000000000000, "Inode should be in torrent file dir range");
-        assert!(ino < 0xE000000000000000, "Inode should be in torrent file dir range");
+        assert!(ino >= 0xB000000000000000, "Inode should be in torrent file dir range");
+        assert!(ino < 0xC000000000000000, "Inode should be in torrent file dir range");
     }
 
     #[test]
@@ -1693,5 +1693,34 @@ mod tests {
         let parts: Vec<&str> = relative_path.split('/').collect();
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0], "video.mkv");
+    }
+
+    #[test]
+    fn test_inode_ranges_are_disjoint() {
+        let fs = TorrentFsFilesystem::new(PathBuf::from("/tmp/test"));
+        
+        let torrent_ino = fs.torrent_inode("series", "test_torrent");
+        let file_ino = fs.file_inode("test_torrent", "test_torrent/video.mp4");
+        let data_dir_ino = fs.data_dir_inode("series");
+        let torrent_file_dir_ino = fs.torrent_file_dir_inode("test_torrent", "test_torrent/docs");
+        
+        assert!(torrent_ino >= 0x8000000000000000 && torrent_ino < 0x9000000000000000,
+            "torrent_inode should be in range 0x8...");
+        assert!(file_ino >= 0x9000000000000000 && file_ino < 0xA000000000000000,
+            "file_inode should be in range 0x9...");
+        assert!(data_dir_ino >= 0xA000000000000000 && data_dir_ino < 0xB000000000000000,
+            "data_dir_inode should be in range 0xA...");
+        assert!(torrent_file_dir_ino >= 0xB000000000000000 && torrent_file_dir_ino < 0xC000000000000000,
+            "torrent_file_dir_inode should be in range 0xB...");
+    }
+
+    #[test]
+    fn test_data_dir_inode_does_not_collide_with_torrent_file_dir_inode() {
+        let fs = TorrentFsFilesystem::new(PathBuf::from("/tmp/test"));
+        
+        let data_dir_ino = fs.data_dir_inode("series");
+        
+        assert!(!(data_dir_ino >= 0xB000000000000000 && data_dir_ino < 0xC000000000000000),
+            "data_dir_inode should NOT fall into torrent_file_dir range");
     }
 }
