@@ -1034,3 +1034,66 @@ fn test_torrent_restored_on_restart() {
 
     drop(runtime2);
 }
+
+#[test]
+#[serial]
+fn test_single_level_subdirectory_data_access() {
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let metadata_manager = std::sync::Arc::new(
+        torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
+    );
+    let session = std::sync::Arc::new(torrentfs_libtorrent::Session::new().unwrap());
+
+    let fs = TorrentFsFilesystem::new_with_core(
+        state_path.clone(),
+        metadata_manager,
+        rt,
+        session,
+    );
+
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+    let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+
+    let subdir = mount_path.join("metadata").join("anime");
+    fs::create_dir_all(&subdir).expect("Failed to create subdirectory");
+
+    let src = match first_torrent_file() {
+        Some(p) => p,
+        None => {
+            eprintln!("No .torrent files found, skipping single-level subdirectory test");
+            cleanup_mount(&mount_path, guard);
+            return;
+        }
+    };
+
+    let dest = subdir.join(src.file_name().unwrap());
+    let result = fs::copy(&src, &dest);
+    assert!(result.is_ok(), "Failed to copy .torrent file: {:?}", result.err());
+
+    thread::sleep(Duration::from_millis(500));
+
+    let data_anime = mount_path.join("data").join("anime");
+    assert!(data_anime.exists(), "data/anime should exist");
+    assert!(data_anime.is_dir(), "data/anime should be a directory");
+
+    let anime_entries: Vec<_> = fs::read_dir(&data_anime)
+        .expect("Should be able to read data/anime directory")
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+
+    assert!(!anime_entries.is_empty(), "data/anime should contain torrent directory");
+
+    cleanup_mount(&mount_path, guard);
+}
