@@ -370,12 +370,21 @@ impl TorrentFsFilesystem {
         None
     }
 
+    /// Rebuilds `metadata_dirs` from database `torrents.source_path` entries.
+    ///
+    /// This ensures metadata directory structures persist across FUSE restarts.
+    /// Empty directories (created via `mkdir` without torrents) are NOT restored;
+    /// only directories with actual torrent files are rebuilt.
+    ///
+    /// Failure to query the database is logged but not fatal - the filesystem
+    /// will continue with an empty `metadata_dirs`, which is safe but may
+    /// require users to re-create directory structures.
     pub fn rebuild_metadata_dirs(&mut self) {
         if let Some(runtime) = &self.async_runtime {
             let result: Result<Vec<TorrentInfo>, _> = runtime.send_command_with_timeout(|reply| {
                 FuseCommand::ListTorrents { reply }
             });
-            
+
             match result {
                 Ok(torrents) => {
                     for torrent in torrents {
@@ -673,7 +682,7 @@ impl Filesystem for TorrentFsFilesystem {
                     let mut data_dir_path = String::new();
                     for torrent in &torrents {
                         if !torrent.source_path.is_empty() {
-                            let parts: Vec<&str> = torrent.source_path.split('/').filter(|p| !p.is_empty()).collect();
+                            let parts: Vec<&str> = torrent.source_path.split('/').filter(|p| !p.trim().is_empty()).collect();
                             let mut current_path = String::new();
                             for (i, part) in parts.iter().enumerate() {
                                 if i > 0 {
@@ -704,7 +713,7 @@ impl Filesystem for TorrentFsFilesystem {
                                 } else {
                                     let rest = &torrent.source_path[data_dir_path.len() + 1..];
                                     if !rest.is_empty() {
-                                        let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
+                                        let parts: Vec<&str> = rest.split('/').filter(|p| !p.trim().is_empty()).collect();
                                         if !parts.is_empty() {
                                             let first_part = parts[0];
                                             if first_part == name_str {
@@ -1213,7 +1222,7 @@ impl Filesystem for TorrentFsFilesystem {
                     let mut data_dir_path = String::new();
                     for torrent in &torrents {
                         if !torrent.source_path.is_empty() {
-                            let parts: Vec<&str> = torrent.source_path.split('/').filter(|p| !p.is_empty()).collect();
+                            let parts: Vec<&str> = torrent.source_path.split('/').filter(|p| !p.trim().is_empty()).collect();
                             let mut current_path = String::new();
                             for (i, part) in parts.iter().enumerate() {
                                 if i > 0 {
@@ -1265,7 +1274,7 @@ impl Filesystem for TorrentFsFilesystem {
                                 } else {
                                     let rest = &torrent.source_path[data_dir_path.len() + 1..];
                                     if !rest.is_empty() {
-                                        let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
+                                        let parts: Vec<&str> = rest.split('/').filter(|p| !p.trim().is_empty()).collect();
                                         if !parts.is_empty() {
                                             let first_part = parts[0];
                                             if !added_names.contains(first_part) {
