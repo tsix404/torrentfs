@@ -1,7 +1,7 @@
 //! Database module for TorrentFS SQLite persistence.
 
 use anyhow::{Context, Result};
-use sqlx::{sqlite::SqliteConnectOptions, SqlitePool, sqlite::SqliteJournalMode};
+use sqlx::{sqlite::SqliteConnectOptions, sqlite::SqlitePoolOptions, SqlitePool, sqlite::SqliteJournalMode};
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -27,7 +27,9 @@ impl Database {
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal);
         
-        let pool = SqlitePool::connect_with(connect_options).await
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect_with(connect_options).await
             .with_context(|| format!("Failed to connect to database: {:?}", db_path))?;
         
         Ok(Self { pool })
