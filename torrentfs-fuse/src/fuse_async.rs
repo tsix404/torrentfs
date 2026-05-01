@@ -62,6 +62,9 @@ pub struct TorrentInfo {
 pub struct FileInfo {
     pub path: String,
     pub size: i64,
+    pub first_piece: i64,
+    pub last_piece: i64,
+    pub offset: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +76,7 @@ pub struct FileInfoForRead {
     pub piece_size: u32,
     pub first_piece: i64,
     pub last_piece: i64,
+    pub file_offset: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -268,6 +272,9 @@ impl FuseAsyncRuntime {
             .map(|f| FileInfo {
                 path: f.path,
                 size: f.size,
+                first_piece: f.first_piece,
+                last_piece: f.last_piece,
+                offset: f.offset,
             })
             .collect())
     }
@@ -290,6 +297,9 @@ impl FuseAsyncRuntime {
             files: parsed.files.into_iter().map(|f| FileInfo {
                 path: f.path,
                 size: f.size,
+                first_piece: f.first_piece,
+                last_piece: f.last_piece,
+                offset: f.offset,
             }).collect(),
             source_path: parsed.source_path,
             torrent_data: parsed.torrent_data,
@@ -316,8 +326,9 @@ impl FuseAsyncRuntime {
                 torrent_id: 0,
                 path: f.path.clone(),
                 size: f.size,
-                first_piece: 0,
-                last_piece: 0,
+                first_piece: f.first_piece,
+                last_piece: f.last_piece,
+                offset: f.offset,
             }
         }).collect();
         
@@ -379,6 +390,7 @@ impl FuseAsyncRuntime {
             piece_size: torrent_info.piece_size,
             first_piece: file.first_piece,
             last_piece: file.last_piece,
+            file_offset: file.offset as u64,
         })
     }
     

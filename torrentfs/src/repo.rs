@@ -37,6 +37,7 @@ pub struct FileEntry {
     pub size: i64,
     pub first_piece: i64,
     pub last_piece: i64,
+    pub offset: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -160,13 +161,14 @@ impl TorrentRepo {
     pub async fn insert_files(&self, torrent_id: i64, files: Vec<FileEntry>) -> Result<()> {
         for file in files {
             sqlx::query(
-                "INSERT INTO torrent_files (torrent_id, path, size, first_piece, last_piece) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO torrent_files (torrent_id, path, size, first_piece, last_piece, offset) VALUES (?, ?, ?, ?, ?, ?)",
             )
             .bind(torrent_id)
             .bind(&file.path)
             .bind(file.size)
             .bind(file.first_piece)
             .bind(file.last_piece)
+            .bind(file.offset)
             .execute(&self.pool)
             .await?;
         }
@@ -192,8 +194,8 @@ impl TorrentRepo {
     }
 
     pub async fn get_files(&self, torrent_id: i64) -> Result<Vec<FileEntry>> {
-        let rows = sqlx::query_as::<_, (i64, i64, String, i64, i64, i64)>(
-            "SELECT id, torrent_id, path, size, first_piece, last_piece FROM torrent_files WHERE torrent_id = ? ORDER BY id",
+        let rows = sqlx::query_as::<_, (i64, i64, String, i64, i64, i64, i64)>(
+            "SELECT id, torrent_id, path, size, first_piece, last_piece, offset FROM torrent_files WHERE torrent_id = ? ORDER BY id",
         )
         .bind(torrent_id)
         .fetch_all(&self.pool)
@@ -208,6 +210,7 @@ impl TorrentRepo {
                 size: r.3,
                 first_piece: r.4,
                 last_piece: r.5,
+                offset: r.6,
             })
             .collect())
     }
@@ -296,6 +299,7 @@ mod tests {
                 size INTEGER NOT NULL,
                 first_piece INTEGER NOT NULL DEFAULT 0,
                 last_piece INTEGER NOT NULL DEFAULT 0,
+                offset INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (torrent_id) REFERENCES torrents(id) ON DELETE CASCADE,
                 UNIQUE(torrent_id, path)
             )",
@@ -385,6 +389,7 @@ mod tests {
                 size: 1024,
                 first_piece: 0,
                 last_piece: 0,
+                offset: 0,
             },
             FileEntry {
                 id: 0,
@@ -393,6 +398,7 @@ mod tests {
                 size: 1024,
                 first_piece: 0,
                 last_piece: 0,
+                offset: 1024,
             },
         ];
 
@@ -404,10 +410,12 @@ mod tests {
         assert_eq!(retrieved[0].size, 1024);
         assert_eq!(retrieved[0].first_piece, 0);
         assert_eq!(retrieved[0].last_piece, 0);
+        assert_eq!(retrieved[0].offset, 0);
         assert_eq!(retrieved[1].path, "dir/file2.txt");
         assert_eq!(retrieved[1].torrent_id, torrent.id);
         assert_eq!(retrieved[1].first_piece, 0);
         assert_eq!(retrieved[1].last_piece, 0);
+        assert_eq!(retrieved[1].offset, 1024);
     }
 
     #[tokio::test]
@@ -454,6 +462,7 @@ mod tests {
                 size: 50,
                 first_piece: 0,
                 last_piece: 0,
+                offset: 0,
             },
             FileEntry {
                 id: 0,
@@ -462,6 +471,7 @@ mod tests {
                 size: 50,
                 first_piece: 0,
                 last_piece: 0,
+                offset: 50,
             },
         ];
 
@@ -487,6 +497,7 @@ mod tests {
                 size: 1024,
                 first_piece: 0,
                 last_piece: 1,
+                offset: 0,
             },
             FileEntry {
                 id: 0,
@@ -495,6 +506,7 @@ mod tests {
                 size: 2048,
                 first_piece: 1,
                 last_piece: 3,
+                offset: 1024,
             },
             FileEntry {
                 id: 0,
@@ -503,6 +515,7 @@ mod tests {
                 size: 0,
                 first_piece: 4,
                 last_piece: 4,
+                offset: 3072,
             },
         ];
 

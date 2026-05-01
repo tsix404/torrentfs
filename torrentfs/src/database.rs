@@ -237,6 +237,49 @@ impl Database {
             println!("Migration v3 already applied.");
         }
         
+        let v4_applied: Option<i64> = sqlx::query_scalar(
+            "SELECT version FROM _sqlx_migrations WHERE version = 4 AND success = true"
+        )
+        .fetch_optional(self.pool())
+        .await
+        .context("Failed to check migration v4 status")?;
+        
+        if v4_applied.is_none() {
+            println!("Applying migration v4: adding offset column to torrent_files...");
+            
+            let add_offset = sqlx::query(
+                "ALTER TABLE torrent_files ADD COLUMN offset INTEGER NOT NULL DEFAULT 0"
+            )
+            .execute(self.pool())
+            .await;
+            
+            match &add_offset {
+                Ok(_) => println!("Added offset column to torrent_files"),
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if err_str.contains("duplicate column name") {
+                        println!("offset column already exists, skipping");
+                    } else {
+                        return Err(add_offset.unwrap_err())
+                            .context("Failed to add offset column");
+                    }
+                }
+            }
+            
+            sqlx::query(
+                "INSERT OR IGNORE INTO _sqlx_migrations (version, description, success, checksum, execution_time)
+                 VALUES (4, 'add_file_offset_column', true, ?, 0)"
+            )
+            .bind(vec![0u8; 32])
+            .execute(self.pool())
+            .await
+            .context("Failed to record migration v4")?;
+            
+            println!("Migration v4 applied successfully.");
+        } else {
+            println!("Migration v4 already applied.");
+        }
+        
         Ok(())
     }
 }

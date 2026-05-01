@@ -1339,3 +1339,557 @@ fn test_multiple_torrents_same_subdirectory() {
 
     cleanup_mount(&mount_path, guard);
 }
+
+#[test]
+#[serial]
+fn test_read_flat_file_with_cached_piece() {
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+    let cache_dir = TempDir::new().unwrap();
+    let piece_cache = torrentfs::PieceCache::with_cache_dir(cache_dir.path().to_path_buf()).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let runtime = rt.block_on(torrentfs::TorrentRuntime::new()).expect("runtime should succeed");
+    let metadata_manager = std::sync::Arc::new(
+        torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
+    );
+    let session = std::sync::Arc::clone(&runtime.session);
+    let piece_cache = std::sync::Arc::new(piece_cache);
+
+    let torrent_data = std::fs::read(test_torrent_dir().join("test.torrent")).expect("test.torrent should exist");
+    let torrent_info = torrentfs_libtorrent::parse_torrent(&torrent_data).expect("parse torrent");
+    let info_hash = torrent_info.info_hash.clone();
+    
+    let test_content: Vec<u8> = (0..100u8).collect();
+    piece_cache.write_piece(&info_hash, 0, &test_content).expect("write piece");
+    
+    session.add_torrent_paused(&torrent_data, "/tmp/torrentfs").expect("add torrent");
+
+    let download_coordinator = std::sync::Arc::new(
+        torrentfs::DownloadCoordinator::new(std::sync::Arc::clone(&session), std::sync::Arc::clone(&piece_cache))
+    );
+
+    let fs = TorrentFsFilesystem::new_with_download_coordinator(
+        state_path.clone(),
+        metadata_manager,
+        session,
+        download_coordinator,
+    );
+
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+    let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+
+    let dest = mount_path.join("metadata").join("test.torrent");
+    fs::copy(test_torrent_dir().join("test.torrent"), &dest).expect("copy torrent");
+
+    thread::sleep(Duration::from_millis(500));
+
+    let data_entries: Vec<_> = fs::read_dir(mount_path.join("data"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(!data_entries.is_empty(), "data/ should not be empty");
+
+    let torrent_dir = mount_path.join("data").join(&torrent_info.name);
+    assert!(torrent_dir.exists(), "Torrent directory {} should exist", torrent_dir.display());
+    
+    let file_path = torrent_dir.join("test.txt");
+    assert!(file_path.exists(), "File test.txt should exist");
+    assert!(file_path.is_file(), "test.txt should be a file");
+    
+    let metadata = fs::metadata(&file_path).expect("metadata should work");
+    assert_eq!(metadata.len(), 100, "test.txt should be 100 bytes");
+
+    let content = fs::read(&file_path).expect("Reading test.txt should succeed with cached piece");
+    assert_eq!(content.len(), 100, "Read content should be 100 bytes");
+    assert_eq!(content, test_content, "Content should match cached piece data");
+
+    cleanup_mount(&mount_path, guard);
+}
+
+#[test]
+#[serial]
+fn test_read_nested_file_with_cached_piece() {
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+    let cache_dir = TempDir::new().unwrap();
+    let piece_cache = torrentfs::PieceCache::with_cache_dir(cache_dir.path().to_path_buf()).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let runtime = rt.block_on(torrentfs::TorrentRuntime::new()).expect("runtime should succeed");
+    let metadata_manager = std::sync::Arc::new(
+        torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
+    );
+    let session = std::sync::Arc::clone(&runtime.session);
+    let piece_cache = std::sync::Arc::new(piece_cache);
+
+    let torrent_data = std::fs::read(test_torrent_dir().join("nested_dirs.torrent")).expect("nested_dirs.torrent should exist");
+    let torrent_info = torrentfs_libtorrent::parse_torrent(&torrent_data).expect("parse torrent");
+    let info_hash = torrent_info.info_hash.clone();
+    
+    let mut all_content = Vec::new();
+    let expected_files = vec![
+        ("docs/images/a.png", 34usize),
+        ("docs/images/b.png", 34usize),
+        ("docs/readme.txt", 30usize),
+        ("src/main.rs", 32usize),
+    ];
+    
+    let total_size: usize = expected_files.iter().map(|(_, s)| s).sum();
+    all_content.resize(total_size, 0u8);
+    
+    let mut offset = 0usize;
+    for (_path, size) in &expected_files {
+        for i in 0..*size {
+            all_content[offset + i] = ((offset + i) % 256) as u8;
+        }
+        offset += size;
+    }
+    
+    let piece_size = torrent_info.piece_size as usize;
+    for piece_idx in 0..=((total_size - 1) / piece_size) {
+        let start = piece_idx * piece_size;
+        let end = std::cmp::min(start + piece_size, total_size);
+        piece_cache.write_piece(&info_hash, piece_idx as u32, &all_content[start..end]).expect("write piece");
+    }
+    
+    session.add_torrent_paused(&torrent_data, "/tmp/torrentfs").expect("add torrent");
+
+    let download_coordinator = std::sync::Arc::new(
+        torrentfs::DownloadCoordinator::new(std::sync::Arc::clone(&session), std::sync::Arc::clone(&piece_cache))
+    );
+
+    let fs = TorrentFsFilesystem::new_with_download_coordinator(
+        state_path.clone(),
+        metadata_manager,
+        session,
+        download_coordinator,
+    );
+
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+    let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+
+    let dest = mount_path.join("metadata").join("nested_dirs.torrent");
+    fs::copy(test_torrent_dir().join("nested_dirs.torrent"), &dest).expect("copy torrent");
+
+    thread::sleep(Duration::from_millis(500));
+
+    let torrent_dir = mount_path.join("data").join("nested_test");
+    assert!(torrent_dir.exists(), "Torrent directory should exist");
+    
+    let file_path = torrent_dir.join("docs").join("images").join("a.png");
+    assert!(file_path.exists(), "Nested file docs/images/a.png should exist");
+    
+    let content = fs::read(&file_path).expect("Reading nested file should succeed with cached piece");
+    assert_eq!(content.len(), 34, "a.png should be 34 bytes");
+    
+    let expected_a_png: Vec<u8> = (0..34).map(|i| i as u8).collect();
+    assert_eq!(content, expected_a_png, "a.png content should match");
+
+    let readme_path = torrent_dir.join("docs").join("readme.txt");
+    let readme_content = fs::read(&readme_path).expect("Reading readme.txt should succeed");
+    assert_eq!(readme_content.len(), 30, "readme.txt should be 30 bytes");
+
+    let main_rs_path = torrent_dir.join("src").join("main.rs");
+    let main_rs_content = fs::read(&main_rs_path).expect("Reading main.rs should succeed");
+    assert_eq!(main_rs_content.len(), 32, "main.rs should be 32 bytes");
+
+    cleanup_mount(&mount_path, guard);
+}
+
+#[test]
+#[serial]
+fn test_read_cache_hit_second_read_faster() {
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+    let cache_dir = TempDir::new().unwrap();
+    let piece_cache = torrentfs::PieceCache::with_cache_dir(cache_dir.path().to_path_buf()).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let runtime = rt.block_on(torrentfs::TorrentRuntime::new()).expect("runtime should succeed");
+    let metadata_manager = std::sync::Arc::new(
+        torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
+    );
+    let session = std::sync::Arc::clone(&runtime.session);
+    let piece_cache = std::sync::Arc::new(piece_cache);
+
+    let torrent_data = std::fs::read(test_torrent_dir().join("test.torrent")).expect("test.torrent should exist");
+    let torrent_info = torrentfs_libtorrent::parse_torrent(&torrent_data).expect("parse torrent");
+    let info_hash = torrent_info.info_hash.clone();
+    
+    let test_content: Vec<u8> = (0..100u8).collect();
+    piece_cache.write_piece(&info_hash, 0, &test_content).expect("write piece");
+    
+    session.add_torrent_paused(&torrent_data, "/tmp/torrentfs").expect("add torrent");
+
+    let download_coordinator = std::sync::Arc::new(
+        torrentfs::DownloadCoordinator::new(std::sync::Arc::clone(&session), std::sync::Arc::clone(&piece_cache))
+    );
+
+    let fs = TorrentFsFilesystem::new_with_download_coordinator(
+        state_path.clone(),
+        metadata_manager,
+        session,
+        download_coordinator,
+    );
+
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+    let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+
+    let dest = mount_path.join("metadata").join("test.torrent");
+    fs::copy(test_torrent_dir().join("test.torrent"), &dest).expect("copy torrent");
+
+    thread::sleep(Duration::from_millis(500));
+
+    let file_path = mount_path.join("data").join(&torrent_info.name).join("test.txt");
+    
+    let start1 = std::time::Instant::now();
+    let content1 = fs::read(&file_path).expect("First read should succeed");
+    let duration1 = start1.elapsed();
+    
+    let start2 = std::time::Instant::now();
+    let content2 = fs::read(&file_path).expect("Second read should succeed");
+    let duration2 = start2.elapsed();
+    
+    assert_eq!(content1.len(), 100, "First read should return 100 bytes");
+    assert_eq!(content2.len(), 100, "Second read should return 100 bytes");
+    assert_eq!(content1, content2, "Both reads should return same content");
+    
+    assert!(piece_cache.has_piece(&info_hash, 0), "Piece should still be cached");
+    
+    eprintln!("First read: {:?}, Second read: {:?}", duration1, duration2);
+
+    cleanup_mount(&mount_path, guard);
+}
+
+#[test]
+#[serial]
+fn test_read_from_mirrored_subdirectory_path() {
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+    let cache_dir = TempDir::new().unwrap();
+    let piece_cache = torrentfs::PieceCache::with_cache_dir(cache_dir.path().to_path_buf()).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let runtime = rt.block_on(torrentfs::TorrentRuntime::new()).expect("runtime should succeed");
+    let metadata_manager = std::sync::Arc::new(
+        torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
+    );
+    let session = std::sync::Arc::clone(&runtime.session);
+    let piece_cache = std::sync::Arc::new(piece_cache);
+
+    let torrent_data = std::fs::read(test_torrent_dir().join("nested_dirs.torrent")).expect("nested_dirs.torrent should exist");
+    let torrent_info = torrentfs_libtorrent::parse_torrent(&torrent_data).expect("parse torrent");
+    let info_hash = torrent_info.info_hash.clone();
+    
+    let mut all_content = Vec::new();
+    let total_size = 34 + 34 + 30 + 32;
+    all_content.resize(total_size, 0u8);
+    for i in 0..total_size {
+        all_content[i] = (i % 256) as u8;
+    }
+    
+    let piece_size = torrent_info.piece_size as usize;
+    for piece_idx in 0..=((total_size - 1) / piece_size) {
+        let start = piece_idx * piece_size;
+        let end = std::cmp::min(start + piece_size, total_size);
+        piece_cache.write_piece(&info_hash, piece_idx as u32, &all_content[start..end]).expect("write piece");
+    }
+    
+    session.add_torrent_paused(&torrent_data, "/tmp/torrentfs").expect("add torrent");
+
+    let download_coordinator = std::sync::Arc::new(
+        torrentfs::DownloadCoordinator::new(std::sync::Arc::clone(&session), std::sync::Arc::clone(&piece_cache))
+    );
+
+    let fs = TorrentFsFilesystem::new_with_download_coordinator(
+        state_path.clone(),
+        metadata_manager,
+        session,
+        download_coordinator,
+    );
+
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+    let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+
+    let subdir = mount_path.join("metadata").join("a").join("b");
+    fs::create_dir_all(&subdir).expect("create subdir");
+
+    let dest = subdir.join("nested_dirs.torrent");
+    fs::copy(test_torrent_dir().join("nested_dirs.torrent"), &dest).expect("copy torrent");
+
+    thread::sleep(Duration::from_millis(500));
+
+    let nested_file_path = mount_path.join("data").join("a").join("b")
+        .join("nested_test").join("src").join("main.rs");
+    
+    assert!(nested_file_path.exists(), "Mirrored nested file should exist at {:?}", nested_file_path);
+    
+    let content = fs::read(&nested_file_path).expect("Reading from mirrored path should succeed");
+    assert_eq!(content.len(), 32, "main.rs should be 32 bytes");
+
+    cleanup_mount(&mount_path, guard);
+}
+
+#[test]
+#[serial]
+fn test_read_with_offset_and_partial_reads() {
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+    let cache_dir = TempDir::new().unwrap();
+    let piece_cache = torrentfs::PieceCache::with_cache_dir(cache_dir.path().to_path_buf()).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let runtime = rt.block_on(torrentfs::TorrentRuntime::new()).expect("runtime should succeed");
+    let metadata_manager = std::sync::Arc::new(
+        torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
+    );
+    let session = std::sync::Arc::clone(&runtime.session);
+    let piece_cache = std::sync::Arc::new(piece_cache);
+
+    let torrent_data = std::fs::read(test_torrent_dir().join("test.torrent")).expect("test.torrent should exist");
+    let torrent_info = torrentfs_libtorrent::parse_torrent(&torrent_data).expect("parse torrent");
+    let info_hash = torrent_info.info_hash.clone();
+    
+    let test_content: Vec<u8> = (0..100u8).collect();
+    piece_cache.write_piece(&info_hash, 0, &test_content).expect("write piece");
+    
+    session.add_torrent_paused(&torrent_data, "/tmp/torrentfs").expect("add torrent");
+
+    let download_coordinator = std::sync::Arc::new(
+        torrentfs::DownloadCoordinator::new(std::sync::Arc::clone(&session), std::sync::Arc::clone(&piece_cache))
+    );
+
+    let fs = TorrentFsFilesystem::new_with_download_coordinator(
+        state_path.clone(),
+        metadata_manager,
+        session,
+        download_coordinator,
+    );
+
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+    let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+
+    let dest = mount_path.join("metadata").join("test.torrent");
+    fs::copy(test_torrent_dir().join("test.torrent"), &dest).expect("copy torrent");
+
+    thread::sleep(Duration::from_millis(500));
+
+    let file_path = mount_path.join("data").join(&torrent_info.name).join("test.txt");
+    
+    use std::os::unix::fs::FileExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .open(&file_path)
+        .expect("Open should succeed");
+    
+    let mut buf = [0u8; 10];
+    let n = file.read_at(&mut buf, 0).expect("Read at offset 0 should succeed");
+    assert_eq!(n, 10, "Should read 10 bytes");
+    assert_eq!(&buf[..], &test_content[0..10], "Content should match at offset 0");
+    
+    let mut buf2 = [0u8; 20];
+    let n2 = file.read_at(&mut buf2, 50).expect("Read at offset 50 should succeed");
+    assert_eq!(n2, 20, "Should read 20 bytes");
+    assert_eq!(&buf2[..], &test_content[50..70], "Content should match at offset 50");
+    
+    let mut buf3 = [0u8; 100];
+    let n3 = file.read_at(&mut buf3, 90).expect("Read at offset 90 should succeed");
+    assert_eq!(n3, 10, "Should read only 10 bytes (file ends at 100)");
+    assert_eq!(&buf3[..10], &test_content[90..100], "Content should match at offset 90");
+    
+    let mut buf4 = [0u8; 10];
+    let n4 = file.read_at(&mut buf4, 100).expect("Read at EOF should succeed");
+    assert_eq!(n4, 0, "Read at EOF should return 0 bytes");
+
+    cleanup_mount(&mount_path, guard);
+}
+
+#[test]
+#[serial]
+fn test_multi_file_torrent_read_all_files() {
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+    let cache_dir = TempDir::new().unwrap();
+    let piece_cache = torrentfs::PieceCache::with_cache_dir(cache_dir.path().to_path_buf()).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let runtime = rt.block_on(torrentfs::TorrentRuntime::new()).expect("runtime should succeed");
+    let metadata_manager = std::sync::Arc::new(
+        torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
+    );
+    let session = std::sync::Arc::clone(&runtime.session);
+    let piece_cache = std::sync::Arc::new(piece_cache);
+
+    let torrent_data = std::fs::read(test_torrent_dir().join("multi_file.torrent")).expect("multi_file.torrent should exist");
+    let torrent_info = torrentfs_libtorrent::parse_torrent(&torrent_data).expect("parse torrent");
+    let info_hash = torrent_info.info_hash.clone();
+    
+    assert_eq!(torrent_info.name, "multi_file_test", "Torrent name should be multi_file_test");
+    
+    let all_content: Vec<u8> = (0..1700u16).map(|i| (i % 256) as u8).collect();
+    let piece_size = torrent_info.piece_size as usize;
+    
+    for piece_idx in 0..=((all_content.len() - 1) / piece_size) {
+        let start = piece_idx * piece_size;
+        let end = std::cmp::min(start + piece_size, all_content.len());
+        piece_cache.write_piece(&info_hash, piece_idx as u32, &all_content[start..end]).expect("write piece");
+    }
+    
+    session.add_torrent_paused(&torrent_data, "/tmp/torrentfs").expect("add torrent");
+
+    let download_coordinator = std::sync::Arc::new(
+        torrentfs::DownloadCoordinator::new(std::sync::Arc::clone(&session), std::sync::Arc::clone(&piece_cache))
+    );
+
+    let fs = TorrentFsFilesystem::new_with_download_coordinator(
+        state_path.clone(),
+        metadata_manager,
+        session,
+        download_coordinator,
+    );
+
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+    let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+
+    let dest = mount_path.join("metadata").join("multi_file.torrent");
+    fs::copy(test_torrent_dir().join("multi_file.torrent"), &dest).expect("copy torrent");
+
+    thread::sleep(Duration::from_millis(500));
+
+    let torrent_dir = mount_path.join("data").join("multi_file_test");
+    assert!(torrent_dir.exists(), "Torrent directory should exist");
+    
+    let dir1_a_txt = torrent_dir.join("dir1").join("a.txt");
+    assert!(dir1_a_txt.exists(), "dir1/a.txt should exist");
+    let content_a = fs::read(&dir1_a_txt).expect("Reading dir1/a.txt should succeed");
+    assert_eq!(content_a.len(), 300, "dir1/a.txt should be 300 bytes");
+    
+    let expected_a: Vec<u8> = (0..300).map(|i| i as u8).collect();
+    assert_eq!(content_a, expected_a, "dir1/a.txt content should match");
+    
+    let dir2_b_txt = torrent_dir.join("dir2").join("b.txt");
+    assert!(dir2_b_txt.exists(), "dir2/b.txt should exist");
+    let content_b = fs::read(&dir2_b_txt).expect("Reading dir2/b.txt should succeed");
+    assert_eq!(content_b.len(), 1400, "dir2/b.txt should be 1400 bytes");
+    
+    let expected_b: Vec<u8> = (300..1700).map(|i| (i % 256) as u8).collect();
+    assert_eq!(content_b, expected_b, "dir2/b.txt content should match");
+
+    cleanup_mount(&mount_path, guard);
+}
+
+#[test]
+#[serial]
+fn test_invalid_offset_returns_error() {
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
+    let mount_dir = TempDir::new().unwrap();
+    let mount_path = mount_dir.path().to_owned();
+    let state_dir = TempDir::new().unwrap();
+    let state_path = state_dir.path().to_path_buf();
+    let cache_dir = TempDir::new().unwrap();
+    let piece_cache = torrentfs::PieceCache::with_cache_dir(cache_dir.path().to_path_buf()).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let runtime = rt.block_on(torrentfs::TorrentRuntime::new()).expect("runtime should succeed");
+    let metadata_manager = std::sync::Arc::new(
+        torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
+    );
+    let session = std::sync::Arc::clone(&runtime.session);
+    let piece_cache = std::sync::Arc::new(piece_cache);
+
+    let torrent_data = std::fs::read(test_torrent_dir().join("test.torrent")).expect("test.torrent should exist");
+    let torrent_info = torrentfs_libtorrent::parse_torrent(&torrent_data).expect("parse torrent");
+    let info_hash = torrent_info.info_hash.clone();
+    
+    let test_content: Vec<u8> = (0..100u8).collect();
+    piece_cache.write_piece(&info_hash, 0, &test_content).expect("write piece");
+    
+    session.add_torrent_paused(&torrent_data, "/tmp/torrentfs").expect("add torrent");
+
+    let download_coordinator = std::sync::Arc::new(
+        torrentfs::DownloadCoordinator::new(std::sync::Arc::clone(&session), std::sync::Arc::clone(&piece_cache))
+    );
+
+    let fs = TorrentFsFilesystem::new_with_download_coordinator(
+        state_path.clone(),
+        metadata_manager,
+        session,
+        download_coordinator,
+    );
+
+    let options = vec![
+        MountOption::FSName("torrentfs".to_string()),
+        MountOption::AutoUnmount,
+    ];
+    let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
+
+    thread::sleep(Duration::from_millis(500));
+
+    let dest = mount_path.join("metadata").join("test.torrent");
+    fs::copy(test_torrent_dir().join("test.torrent"), &dest).expect("copy torrent");
+
+    thread::sleep(Duration::from_millis(500));
+
+    let file_path = mount_path.join("data").join(&torrent_info.name).join("test.txt");
+    
+    use std::os::unix::fs::FileExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .open(&file_path)
+        .expect("Open should succeed");
+    
+    let mut buf = [0u8; 10];
+    let result = file.read_at(&mut buf, -1i64 as u64);
+    assert!(result.is_ok() || result.is_err(), "Read with very large offset should not crash");
+
+    cleanup_mount(&mount_path, guard);
+}

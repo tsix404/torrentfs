@@ -86,8 +86,10 @@ struct OpenTorrentFile {
     info_hash: String,
     file_size: i64,
     piece_size: u32,
+    #[allow(dead_code)]
     first_piece: i64,
     last_piece: i64,
+    file_offset: u64,
 }
 
 struct MetadataEntry {
@@ -168,6 +170,33 @@ impl TorrentFsFilesystem {
         session: Arc<Session>,
     ) -> Self {
         Self::new_with_async(state_dir, metadata_manager, session)
+    }
+
+    pub fn new_with_download_coordinator(
+        state_dir: PathBuf,
+        metadata_manager: Arc<MetadataManager>,
+        session: Arc<Session>,
+        download_coordinator: Arc<torrentfs::DownloadCoordinator>,
+    ) -> Self {
+        let async_runtime = Arc::new(FuseAsyncRuntime::new_with_download_coordinator(
+            Arc::clone(&metadata_manager),
+            Arc::clone(&session),
+            download_coordinator,
+        ));
+        
+        let mut fs = Self {
+            state_dir,
+            next_ino: INO_DYNAMIC_START,
+            next_fh: 1,
+            open_files: HashMap::new(),
+            open_torrent_files: HashMap::new(),
+            metadata_entries: HashMap::new(),
+            metadata_dirs: HashMap::new(),
+            async_runtime: Some(async_runtime),
+        };
+        
+        fs.rebuild_metadata_dirs();
+        fs
     }
 
     fn allocate_ino(&mut self) -> u64 {
@@ -1616,6 +1645,7 @@ impl Filesystem for TorrentFsFilesystem {
                             piece_size: file_info.piece_size,
                             first_piece: file_info.first_piece,
                             last_piece: file_info.last_piece,
+                            file_offset: file_info.file_offset,
                         });
                         reply.opened(fh, 0);
                     }
@@ -1653,40 +1683,43 @@ impl Filesystem for TorrentFsFilesystem {
         
         if let Some(open_torrent_file) = self.open_torrent_files.get(&fh) {
             let file_size = open_torrent_file.file_size;
-            let offset = offset as u64;
+            let file_offset = open_torrent_file.file_offset;
+            let file_rel_offset = offset as u64;
             
-            if offset >= file_size as u64 {
+            if file_rel_offset >= file_size as u64 {
                 reply.data(&[]);
                 return;
             }
             
-            let end_offset = std::cmp::min(offset + size as u64, file_size as u64);
-            let bytes_to_read = (end_offset - offset) as usize;
+            let end_file_offset = std::cmp::min(file_rel_offset + size as u64, file_size as u64);
+            let bytes_to_read = (end_file_offset - file_rel_offset) as usize;
             
             let piece_size = open_torrent_file.piece_size as u64;
-            let first_piece = open_torrent_file.first_piece as u32;
             let last_piece = open_torrent_file.last_piece as u32;
             
-            let start_piece_idx = first_piece + (offset / piece_size) as u32;
+            let torrent_start_offset = file_offset + file_rel_offset;
+            let torrent_end_offset = file_offset + end_file_offset;
+            
+            let start_piece_idx = (torrent_start_offset / piece_size) as u32;
             let end_piece_idx = std::cmp::min(
-                first_piece + ((end_offset - 1) / piece_size) as u32,
+                ((torrent_end_offset - 1) / piece_size) as u32,
                 last_piece
             );
             
             let mut result = Vec::with_capacity(bytes_to_read);
-            let mut current_offset = offset;
+            let mut current_torrent_offset = torrent_start_offset;
             
             for piece_idx in start_piece_idx..=end_piece_idx {
                 match self.read_piece_from_torrent(&open_torrent_file.info_hash, piece_idx) {
                     Ok(piece_data) => {
-                        let piece_start = (current_offset % piece_size) as usize;
-                        let remaining_bytes = (end_offset - current_offset) as usize;
+                        let piece_start = (current_torrent_offset % piece_size) as usize;
+                        let remaining_bytes = (torrent_end_offset - current_torrent_offset) as usize;
                         let piece_remaining = piece_data.len().saturating_sub(piece_start);
                         let bytes_from_piece = std::cmp::min(remaining_bytes, piece_remaining);
                         
                         if bytes_from_piece > 0 {
                             result.extend_from_slice(&piece_data[piece_start..piece_start + bytes_from_piece]);
-                            current_offset += bytes_from_piece as u64;
+                            current_torrent_offset += bytes_from_piece as u64;
                         }
                         
                         if result.len() >= bytes_to_read {

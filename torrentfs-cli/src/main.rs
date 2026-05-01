@@ -41,6 +41,7 @@ async fn main() -> Result<()> {
             size: f.size as i64,
             first_piece: f.first_piece as i64,
             last_piece: f.last_piece as i64,
+            offset: f.offset as i64,
         })
         .collect();
 
@@ -134,6 +135,7 @@ mod tests {
             size: 1024,
             first_piece: 0,
             last_piece: 0,
+            offset: 0,
         }];
 
         let result = repo
