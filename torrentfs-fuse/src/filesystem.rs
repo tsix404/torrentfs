@@ -146,7 +146,7 @@ impl TorrentFsFilesystem {
             Arc::clone(&session),
         ));
         
-        Self {
+        let mut fs = Self {
             state_dir,
             next_ino: INO_DYNAMIC_START,
             next_fh: 1,
@@ -155,7 +155,10 @@ impl TorrentFsFilesystem {
             metadata_entries: HashMap::new(),
             metadata_dirs: HashMap::new(),
             async_runtime: Some(async_runtime),
-        }
+        };
+        
+        fs.rebuild_metadata_dirs();
+        fs
     }
 
     pub fn new_with_core(
@@ -365,6 +368,69 @@ impl TorrentFsFilesystem {
         }
         
         None
+    }
+
+    pub fn rebuild_metadata_dirs(&mut self) {
+        if let Some(runtime) = &self.async_runtime {
+            let result: Result<Vec<TorrentInfo>, _> = runtime.send_command_with_timeout(|reply| {
+                FuseCommand::ListTorrents { reply }
+            });
+            
+            match result {
+                Ok(torrents) => {
+                    for torrent in torrents {
+                        if !torrent.source_path.is_empty() {
+                            self.ensure_metadata_dirs_for_path(&torrent.source_path);
+                        }
+                    }
+                    tracing::info!(
+                        dirs_count = self.metadata_dirs.len(),
+                        "Rebuilt metadata_dirs from database"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to rebuild metadata_dirs from database"
+                    );
+                }
+            }
+        }
+    }
+
+    fn ensure_metadata_dirs_for_path(&mut self, source_path: &str) {
+        let parts: Vec<&str> = source_path.split('/').filter(|p| !p.trim().is_empty()).collect();
+        if parts.is_empty() {
+            return;
+        }
+
+        let mut current_path = String::new();
+        let mut parent_ino = INO_METADATA;
+
+        for part in parts {
+            let new_path = if current_path.is_empty() {
+                part.to_string()
+            } else {
+                format!("{}/{}", current_path, part)
+            };
+
+            let existing = self.find_metadata_dir_by_parent_and_name(parent_ino, part);
+            let ino = match existing {
+                Some((ino, _)) => ino,
+                None => {
+                    let ino = self.allocate_ino();
+                    self.metadata_dirs.insert(ino, MetadataDir {
+                        ino,
+                        parent_ino,
+                        relative_path: new_path.clone(),
+                    });
+                    ino
+                }
+            };
+
+            parent_ino = ino;
+            current_path = new_path;
+        }
     }
 }
 
@@ -1998,5 +2064,98 @@ mod tests {
         
         let result = fs.find_metadata_dir_by_parent_and_name(INO_METADATA, "nonexistent");
         assert!(result.is_none(), "Should return None for nonexistent directory");
+    }
+
+    #[test]
+    fn test_ensure_metadata_dirs_for_path_single() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let mut fs = TorrentFsFilesystem::new(state_dir.path().to_path_buf());
+        
+        fs.ensure_metadata_dirs_for_path("anime");
+        
+        assert_eq!(fs.metadata_dirs.len(), 1, "Should create one directory");
+        
+        let result = fs.find_metadata_dir_by_parent_and_name(INO_METADATA, "anime");
+        assert!(result.is_some(), "Should find 'anime' under metadata/");
+        let (_, dir) = result.unwrap();
+        assert_eq!(dir.relative_path, "anime");
+    }
+
+    #[test]
+    fn test_ensure_metadata_dirs_for_path_nested() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let mut fs = TorrentFsFilesystem::new(state_dir.path().to_path_buf());
+        
+        fs.ensure_metadata_dirs_for_path("anime/series/2024");
+        
+        assert_eq!(fs.metadata_dirs.len(), 3, "Should create three nested directories");
+        
+        let result1 = fs.find_metadata_dir_by_parent_and_name(INO_METADATA, "anime");
+        assert!(result1.is_some(), "Should find 'anime'");
+        let (anime_ino, _) = result1.unwrap();
+        
+        let result2 = fs.find_metadata_dir_by_parent_and_name(anime_ino, "series");
+        assert!(result2.is_some(), "Should find 'series' under 'anime'");
+        let (series_ino, _) = result2.unwrap();
+        
+        let result3 = fs.find_metadata_dir_by_parent_and_name(series_ino, "2024");
+        assert!(result3.is_some(), "Should find '2024' under 'series'");
+    }
+
+    #[test]
+    fn test_ensure_metadata_dirs_for_path_idempotent() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let mut fs = TorrentFsFilesystem::new(state_dir.path().to_path_buf());
+        
+        fs.ensure_metadata_dirs_for_path("media/video");
+        let ino_after_first = fs.metadata_dirs.len();
+        
+        fs.ensure_metadata_dirs_for_path("media/video");
+        let ino_after_second = fs.metadata_dirs.len();
+        
+        assert_eq!(ino_after_first, ino_after_second, "Should not create duplicate directories");
+    }
+
+    #[test]
+    fn test_ensure_metadata_dirs_for_path_multiple_sharing_prefix() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let mut fs = TorrentFsFilesystem::new(state_dir.path().to_path_buf());
+        
+        fs.ensure_metadata_dirs_for_path("media/video");
+        fs.ensure_metadata_dirs_for_path("media/audio");
+        
+        assert_eq!(fs.metadata_dirs.len(), 3, "Should create 'media', 'media/video', 'media/audio'");
+        
+        let result = fs.find_metadata_dir_by_parent_and_name(INO_METADATA, "media");
+        assert!(result.is_some(), "Should find shared parent 'media'");
+        let (media_ino, _) = result.unwrap();
+        
+        let video = fs.find_metadata_dir_by_parent_and_name(media_ino, "video");
+        assert!(video.is_some(), "Should find 'video'");
+        
+        let audio = fs.find_metadata_dir_by_parent_and_name(media_ino, "audio");
+        assert!(audio.is_some(), "Should find 'audio'");
+    }
+
+    #[test]
+    fn test_ensure_metadata_dirs_for_path_empty() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let mut fs = TorrentFsFilesystem::new(state_dir.path().to_path_buf());
+        
+        fs.ensure_metadata_dirs_for_path("");
+        
+        assert!(fs.metadata_dirs.is_empty(), "Should not create directories for empty path");
+    }
+
+    #[test]
+    fn test_ensure_metadata_dirs_for_path_whitespace_only() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let mut fs = TorrentFsFilesystem::new(state_dir.path().to_path_buf());
+        
+        fs.ensure_metadata_dirs_for_path("   ");
+        fs.ensure_metadata_dirs_for_path("  /  ");
+        
+        let parts: Vec<&str> = "   ".split('/').filter(|p| !p.is_empty()).collect();
+        assert!(parts.iter().all(|p| p.trim().is_empty()), "Whitespace-only parts should be filtered");
     }
 }
