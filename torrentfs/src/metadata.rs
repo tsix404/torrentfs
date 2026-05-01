@@ -25,6 +25,7 @@ pub struct FileEntry {
     pub size: i64,
     pub first_piece: i64,
     pub last_piece: i64,
+    pub offset: i64,
 }
 
 impl MetadataManager {
@@ -45,6 +46,7 @@ impl MetadataManager {
             size: f.size as i64,
             first_piece: f.first_piece as i64,
             last_piece: f.last_piece as i64,
+            offset: f.offset as i64,
         }).collect();
 
         Ok(ParsedTorrent {
@@ -67,6 +69,7 @@ impl MetadataManager {
                 size: f.size,
                 first_piece: f.first_piece,
                 last_piece: f.last_piece,
+                offset: f.offset,
             }
         }).collect();
 
