@@ -1,6 +1,7 @@
 -- Drop indexes
 DROP INDEX IF EXISTS idx_torrent_files_path;
 DROP INDEX IF EXISTS idx_torrent_files_torrent_id;
+DROP INDEX IF EXISTS idx_torrents_source_path;
 DROP INDEX IF EXISTS idx_torrents_status;
 DROP INDEX IF EXISTS idx_torrents_info_hash;
 

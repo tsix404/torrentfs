@@ -7,6 +7,9 @@ CREATE TABLE torrents (
     piece_size INTEGER NOT NULL DEFAULT 16384,
     file_count INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
+    source_path TEXT NOT NULL DEFAULT '',
+    torrent_data BLOB,
+    resume_data BLOB,
     added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -16,6 +19,8 @@ CREATE TABLE torrent_files (
     torrent_id INTEGER NOT NULL,
     path TEXT NOT NULL,
     size INTEGER NOT NULL,
+    first_piece INTEGER NOT NULL DEFAULT 0,
+    last_piece INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (torrent_id) REFERENCES torrents(id) ON DELETE CASCADE,
     UNIQUE(torrent_id, path)
 );
@@ -23,5 +28,6 @@ CREATE TABLE torrent_files (
 -- Create indexes for faster queries
 CREATE INDEX idx_torrents_info_hash ON torrents(info_hash);
 CREATE INDEX idx_torrents_status ON torrents(status);
+CREATE INDEX idx_torrents_source_path ON torrents(source_path);
 CREATE INDEX idx_torrent_files_torrent_id ON torrent_files(torrent_id);
 CREATE INDEX idx_torrent_files_path ON torrent_files(path);
