@@ -205,6 +205,35 @@ impl Database {
             println!("Migration v2 already applied.");
         }
         
+        let v3_applied: Option<i64> = sqlx::query_scalar(
+            "SELECT version FROM _sqlx_migrations WHERE version = 3 AND success = true"
+        )
+        .fetch_optional(self.pool())
+        .await
+        .context("Failed to check migration v3 status")?;
+        
+        if v3_applied.is_none() {
+            println!("Applying migration v3: adding idx_torrents_source_path index...");
+            
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_torrents_source_path ON torrents(source_path)")
+                .execute(self.pool())
+                .await
+                .context("Failed to create index on torrents.source_path")?;
+            
+            sqlx::query(
+                "INSERT OR IGNORE INTO _sqlx_migrations (version, description, success, checksum, execution_time)
+                 VALUES (3, 'add_source_path_index', true, ?, 0)"
+            )
+            .bind(vec![0u8; 32])
+            .execute(self.pool())
+            .await
+            .context("Failed to record migration v3")?;
+            
+            println!("Migration v3 applied successfully.");
+        } else {
+            println!("Migration v3 already applied.");
+        }
+        
         Ok(())
     }
 }
@@ -249,5 +278,29 @@ mod tests {
             .unwrap();
         
         assert_eq!(result, 1);
+    }
+    
+    #[tokio::test]
+    async fn test_migration_creates_source_path_index() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        
+        let connect_options = SqliteConnectOptions::from_str(&db_path.to_string_lossy())
+            .unwrap()
+            .create_if_missing(true);
+        
+        let pool = SqlitePool::connect_with(connect_options).await.unwrap();
+        let db = Database::with_pool(pool);
+        
+        db.migrate().await.unwrap();
+        
+        let index_exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_torrents_source_path'"
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        
+        assert_eq!(index_exists, 1, "idx_torrents_source_path index should exist after migration");
     }
 }
