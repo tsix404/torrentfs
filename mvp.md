@@ -47,6 +47,48 @@ TorrentFS 是一个基于 FUSE 用户态文件系统的 BitTorrent 虚拟文件�
     └── resume/              # resume_data 快照
 ```
 
+## 数据库 Schema
+
+### torrents 表
+
+```sql
+CREATE TABLE torrents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    info_hash BLOB NOT NULL UNIQUE,        -- 种子 info_hash（20字节 SHA1）
+    name TEXT NOT NULL,                     -- 种子名称
+    total_size INTEGER NOT NULL,            -- 总大小（字节）
+    file_count INTEGER NOT NULL,            -- 文件数量
+    status TEXT NOT NULL DEFAULT 'pending', -- 状态：pending/downloading/seeding/error
+    source_path TEXT NOT NULL DEFAULT '',   -- 原始 .torrent 文件路径
+    torrent_data BLOB,                      -- 原始 .torrent 文件内容（支持重启恢复）
+    resume_data BLOB,                       -- libtorrent resume data（支持重启恢复）
+    added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### torrent_files 表
+
+```sql
+CREATE TABLE torrent_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    torrent_id INTEGER NOT NULL,            -- 关联 torrents.id
+    path TEXT NOT NULL,                     -- 文件相对路径
+    size INTEGER NOT NULL,                  -- 文件大小（字节）
+    first_piece INTEGER NOT NULL DEFAULT 0, -- 文件起始 piece 索引
+    last_piece INTEGER NOT NULL DEFAULT 0,  -- 文件结束 piece 索引
+    FOREIGN KEY (torrent_id) REFERENCES torrents(id) ON DELETE CASCADE,
+    UNIQUE(torrent_id, path)
+);
+```
+
+### 索引
+
+- `idx_torrents_info_hash` — 按 info_hash 快速查找
+- `idx_torrents_status` — 按状态筛选种子
+- `idx_torrents_source_path` — 按源路径查找
+- `idx_torrent_files_torrent_id` — 按种子 ID 查找文件
+- `idx_torrent_files_path` — 按路径查找文件
+
 ## MVP 阶段总览
 
 | 阶段 | 目标 | 可演示 |
