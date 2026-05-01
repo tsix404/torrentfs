@@ -15,8 +15,8 @@ pub use piece_cache::PieceCache;
 pub use repo::{TorrentRepo, TorrentWithData};
 pub use runtime::TorrentRuntime;
 
-pub async fn init() -> anyhow::Result<TorrentRuntime> {
-    let runtime = TorrentRuntime::new().await?;
+pub async fn init(state_dir: &std::path::Path) -> anyhow::Result<TorrentRuntime> {
+    let runtime = TorrentRuntime::new(state_dir).await?;
     tracing::info!("TorrentFS core initialized with alert loop");
     Ok(runtime)
 }
@@ -24,16 +24,19 @@ pub async fn init() -> anyhow::Result<TorrentRuntime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_init_returns_ok() {
-        let result = init().await;
+        let temp_dir = TempDir::new().unwrap();
+        let result = init(temp_dir.path()).await;
         assert!(result.is_ok(), "init() should return Ok: {:?}", result.err());
     }
 
     #[tokio::test]
     async fn test_init_creates_torrent_runtime() {
-        let runtime = init().await.unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let runtime = init(temp_dir.path()).await.unwrap();
         assert!(runtime.db.pool().acquire().await.is_ok());
     }
 }

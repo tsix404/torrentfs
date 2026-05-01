@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -10,13 +11,6 @@ use crate::metadata::MetadataManager;
 use crate::piece_cache::PieceCache;
 use torrentfs_libtorrent::{AlertType, Session};
 
-fn get_save_path() -> String {
-    dirs::home_dir()
-        .map(|h| h.join(".local").join("share").join("torrentfs").join("data"))
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "/tmp/torrentfs".to_string())
-}
-
 pub struct TorrentRuntime {
     pub db: Arc<Database>,
     pub session: Arc<Session>,
@@ -24,11 +18,12 @@ pub struct TorrentRuntime {
     pub download_coordinator: Arc<DownloadCoordinator>,
     pub metadata_manager: Arc<MetadataManager>,
     shutdown_tx: broadcast::Sender<AlertLoopMessage>,
+    state_dir: std::path::PathBuf,
 }
 
 impl TorrentRuntime {
-    pub async fn new() -> Result<Self> {
-        let db = Arc::new(Database::new().await?);
+    pub async fn new(state_dir: &Path) -> Result<Self> {
+        let db = Arc::new(Database::new(state_dir).await?);
         db.migrate().await?;
         
         let session = Arc::new(Session::new()?);
@@ -57,12 +52,20 @@ impl TorrentRuntime {
             download_coordinator,
             metadata_manager,
             shutdown_tx,
+            state_dir: state_dir.to_path_buf(),
         };
         
         runtime.restore_cache_index()?;
         runtime.restore_torrents().await?;
         
         Ok(runtime)
+    }
+    
+    fn get_save_path(&self) -> String {
+        self.state_dir
+            .join("data")
+            .to_string_lossy()
+            .into_owned()
     }
     
     fn restore_cache_index(&self) -> Result<()> {
@@ -91,7 +94,7 @@ impl TorrentRuntime {
             return Ok(());
         }
         
-        let save_path = get_save_path();
+        let save_path = self.get_save_path();
         let mut restored = 0;
         let mut skipped = 0;
         let mut failed = 0;
@@ -230,29 +233,34 @@ impl Drop for TorrentRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_init_returns_ok() {
-        let result = TorrentRuntime::new().await;
+        let temp_dir = TempDir::new().unwrap();
+        let result = TorrentRuntime::new(temp_dir.path()).await;
         assert!(result.is_ok(), "new() should return Ok: {:?}", result.err());
     }
 
     #[tokio::test]
     async fn test_init_creates_torrent_runtime() {
-        let runtime = TorrentRuntime::new().await.unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let runtime = TorrentRuntime::new(temp_dir.path()).await.unwrap();
         assert!(runtime.db.pool().acquire().await.is_ok());
         assert!(runtime.session.pop_alerts().is_empty() || !runtime.session.pop_alerts().is_empty());
     }
 
     #[tokio::test]
     async fn test_shutdown() {
-        let runtime = TorrentRuntime::new().await.unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let runtime = TorrentRuntime::new(temp_dir.path()).await.unwrap();
         runtime.shutdown();
     }
 
     #[tokio::test]
     async fn test_runtime_drop_sends_shutdown() {
-        let runtime = TorrentRuntime::new().await.unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let runtime = TorrentRuntime::new(temp_dir.path()).await.unwrap();
         let shutdown_tx = runtime.shutdown_tx.clone();
         
         drop(runtime);
@@ -263,14 +271,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_graceful_shutdown_no_torrents() {
-        let runtime = TorrentRuntime::new().await.unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let runtime = TorrentRuntime::new(temp_dir.path()).await.unwrap();
         let result = runtime.graceful_shutdown().await;
         assert!(result.is_ok(), "graceful_shutdown should succeed: {:?}", result.err());
     }
 
     #[tokio::test]
     async fn test_get_torrents_returns_vec() {
-        let runtime = TorrentRuntime::new().await.unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let runtime = TorrentRuntime::new(temp_dir.path()).await.unwrap();
         let torrents = runtime.session.get_torrents();
         assert!(torrents.is_empty() || !torrents.is_empty(), "get_torrents should return a Vec");
     }

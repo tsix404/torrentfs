@@ -11,6 +11,10 @@ use torrentfs_libtorrent::torrent;
 struct Args {
     /// Path to the .torrent file
     torrent_file: PathBuf,
+
+    /// State directory for database storage
+    #[clap(long, default_value = "~/.local/share/torrentfs")]
+    state_dir: String,
 }
 
 #[tokio::main]
@@ -25,7 +29,15 @@ async fn main() -> Result<()> {
 
     print_metadata(&info);
 
-    let db = Database::new().await?;
+    let state_dir = if args.state_dir.starts_with("~/") {
+        dirs::home_dir()
+            .map(|h| h.join(&args.state_dir[2..]))
+            .unwrap_or_else(|| PathBuf::from(&args.state_dir))
+    } else {
+        PathBuf::from(&args.state_dir)
+    };
+
+    let db = Database::new(&state_dir).await?;
     db.migrate().await?;
 
     let repo = TorrentRepo::new(db.pool().clone());
