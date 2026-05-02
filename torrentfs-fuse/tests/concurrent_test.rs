@@ -35,7 +35,7 @@ fn test_concurrent_random_read_no_deadlock() {
     let state_path = state_dir.path().to_path_buf();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(TorrentRuntime::new()).expect("TorrentRuntime::new() should succeed");
+    let runtime = rt.block_on(TorrentRuntime::new(&state_path)).expect("TorrentRuntime::new() should succeed");
     let metadata_manager = Arc::new(
         MetadataManager::new(runtime.db.clone()).unwrap()
     );
@@ -174,7 +174,7 @@ fn test_concurrent_metadata_operations() {
     let state_path = state_dir.path().to_path_buf();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(TorrentRuntime::new()).expect("TorrentRuntime::new() should succeed");
+    let runtime = rt.block_on(TorrentRuntime::new(&state_path)).expect("TorrentRuntime::new() should succeed");
     let metadata_manager = Arc::new(
         MetadataManager::new(runtime.db.clone()).unwrap()
     );

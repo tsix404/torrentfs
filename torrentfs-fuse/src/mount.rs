@@ -41,7 +41,7 @@ pub fn init_and_mount(mount_point: &str, state_dir: &Path) -> Result<()> {
     
     let rt = Arc::new(Runtime::new()?);
 
-    let runtime = Arc::new(rt.block_on(TorrentRuntime::new())?);
+    let runtime = Arc::new(rt.block_on(TorrentRuntime::new(state_dir))?);
 
     let options = vec![
         MountOption::FSName("torrentfs".to_string()),

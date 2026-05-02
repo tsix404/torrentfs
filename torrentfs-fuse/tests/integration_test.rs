@@ -196,7 +196,7 @@ fn test_init_and_mount_pipeline() {
     let state_path = state_dir.path().to_path_buf();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let runtime = rt.block_on(torrentfs::init(&state_path)).expect("torrentfs::init(&state_path) should succeed");
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
@@ -247,14 +247,13 @@ fn test_init_and_mount_pipeline() {
 #[test]
 #[serial]
 fn test_data_directory_populated_from_db() {
-    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
     let state_path = state_dir.path().to_path_buf();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let runtime = rt.block_on(torrentfs::init(&state_path)).expect("torrentfs::init(&state_path) should succeed");
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
@@ -403,14 +402,13 @@ fn test_cp_torrent_to_metadata_subdirectory() {
 #[test]
 #[serial]
 fn test_data_mirrors_source_path() {
-    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
     let state_path = state_dir.path().to_path_buf();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let runtime = rt.block_on(torrentfs::init(&state_path)).expect("torrentfs::init(&state_path) should succeed");
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
@@ -510,7 +508,6 @@ fn test_nested_subdirectory_in_metadata() {
 #[test]
 #[serial]
 fn test_torrent_nested_directory_operations() {
-    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
@@ -582,7 +579,6 @@ fn test_torrent_nested_directory_operations() {
 #[test]
 #[serial]
 fn test_torrent_getattr_for_directories() {
-    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
@@ -626,14 +622,13 @@ fn test_torrent_getattr_for_directories() {
 #[test]
 #[serial]
 fn test_deeply_nested_directories_in_torrent() {
-    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
     let state_path = state_dir.path().to_path_buf();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let runtime = rt.block_on(torrentfs::init(&state_path)).expect("torrentfs::init(&state_path) should succeed");
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
@@ -733,14 +728,13 @@ fn test_deeply_nested_directories_in_torrent() {
 #[test]
 #[serial]
 fn test_deeply_nested_subdirectory_mirroring() {
-    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
     let state_path = state_dir.path().to_path_buf();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let runtime = rt.block_on(torrentfs::init(&state_path)).expect("torrentfs::init(&state_path) should succeed");
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
@@ -822,14 +816,13 @@ fn test_deeply_nested_subdirectory_mirroring() {
 #[test]
 #[serial]
 fn test_stat_on_nested_directories() {
-    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
     let state_path = state_dir.path().to_path_buf();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let runtime = rt.block_on(torrentfs::init(&state_path)).expect("torrentfs::init(&state_path) should succeed");
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
@@ -903,14 +896,13 @@ fn test_stat_on_nested_directories() {
 #[test]
 #[serial]
 fn test_read_nested_files() {
-    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
     let state_path = state_dir.path().to_path_buf();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let runtime = rt.block_on(torrentfs::init(&state_path)).expect("torrentfs::init(&state_path) should succeed");
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
@@ -974,14 +966,13 @@ fn test_read_nested_files() {
 #[test]
 #[serial]
 fn test_open_and_read_no_enosys() {
-    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
     let state_path = state_dir.path().to_path_buf();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let runtime = rt.block_on(torrentfs::init(&state_path)).expect("torrentfs::init(&state_path) should succeed");
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
@@ -1058,7 +1049,7 @@ fn test_torrent_restored_on_restart() {
     let mount_path = mount_dir.path().to_path_buf();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(torrentfs::TorrentRuntime::new()).unwrap();
+    let runtime = rt.block_on(torrentfs::TorrentRuntime::new(&state_path)).unwrap();
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
@@ -1099,7 +1090,7 @@ fn test_torrent_restored_on_restart() {
     drop(runtime);
 
     let rt2 = tokio::runtime::Runtime::new().unwrap();
-    let runtime2 = rt2.block_on(torrentfs::TorrentRuntime::new()).unwrap();
+    let runtime2 = rt2.block_on(torrentfs::TorrentRuntime::new(&state_path)).unwrap();
 
     let torrents_with_data = rt2.block_on(runtime2.metadata_manager.list_torrents_with_data()).unwrap();
     assert!(!torrents_with_data.is_empty(), "Torrent should be restored from DB");
@@ -1128,14 +1119,13 @@ fn test_torrent_restored_on_restart() {
 #[test]
 #[serial]
 fn test_single_level_subdirectory_data_access() {
-    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
     let state_path = state_dir.path().to_path_buf();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let runtime = rt.block_on(torrentfs::init(&state_path)).expect("torrentfs::init(&state_path) should succeed");
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
@@ -1191,14 +1181,13 @@ fn test_single_level_subdirectory_data_access() {
 #[test]
 #[serial]
 fn test_invalid_torrent_file_rejected() {
-    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
     let state_path = state_dir.path().to_path_buf();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let runtime = rt.block_on(torrentfs::init(&state_path)).expect("torrentfs::init(&state_path) should succeed");
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
@@ -1262,14 +1251,13 @@ fn test_invalid_torrent_file_rejected() {
 #[test]
 #[serial]
 fn test_multiple_torrents_same_subdirectory() {
-    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
     let state_path = state_dir.path().to_path_buf();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(torrentfs::init()).expect("torrentfs::init() should succeed");
+    let runtime = rt.block_on(torrentfs::init(&state_path)).expect("torrentfs::init(&state_path) should succeed");
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
@@ -1343,7 +1331,6 @@ fn test_multiple_torrents_same_subdirectory() {
 #[test]
 #[serial]
 fn test_read_flat_file_with_cached_piece() {
-    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
@@ -1352,7 +1339,7 @@ fn test_read_flat_file_with_cached_piece() {
     let piece_cache = torrentfs::PieceCache::with_cache_dir(cache_dir.path().to_path_buf()).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(torrentfs::TorrentRuntime::new()).expect("runtime should succeed");
+    let runtime = rt.block_on(torrentfs::TorrentRuntime::new(&state_path)).expect("runtime should succeed");
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
@@ -1418,7 +1405,6 @@ fn test_read_flat_file_with_cached_piece() {
 #[test]
 #[serial]
 fn test_read_nested_file_with_cached_piece() {
-    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
@@ -1427,7 +1413,7 @@ fn test_read_nested_file_with_cached_piece() {
     let piece_cache = torrentfs::PieceCache::with_cache_dir(cache_dir.path().to_path_buf()).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(torrentfs::TorrentRuntime::new()).expect("runtime should succeed");
+    let runtime = rt.block_on(torrentfs::TorrentRuntime::new(&state_path)).expect("runtime should succeed");
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
@@ -1516,7 +1502,6 @@ fn test_read_nested_file_with_cached_piece() {
 #[test]
 #[serial]
 fn test_read_cache_hit_second_read_faster() {
-    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
@@ -1525,7 +1510,7 @@ fn test_read_cache_hit_second_read_faster() {
     let piece_cache = torrentfs::PieceCache::with_cache_dir(cache_dir.path().to_path_buf()).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(torrentfs::TorrentRuntime::new()).expect("runtime should succeed");
+    let runtime = rt.block_on(torrentfs::TorrentRuntime::new(&state_path)).expect("runtime should succeed");
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
@@ -1589,7 +1574,6 @@ fn test_read_cache_hit_second_read_faster() {
 #[test]
 #[serial]
 fn test_read_from_mirrored_subdirectory_path() {
-    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
@@ -1598,7 +1582,7 @@ fn test_read_from_mirrored_subdirectory_path() {
     let piece_cache = torrentfs::PieceCache::with_cache_dir(cache_dir.path().to_path_buf()).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(torrentfs::TorrentRuntime::new()).expect("runtime should succeed");
+    let runtime = rt.block_on(torrentfs::TorrentRuntime::new(&state_path)).expect("runtime should succeed");
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
@@ -1666,7 +1650,6 @@ fn test_read_from_mirrored_subdirectory_path() {
 #[test]
 #[serial]
 fn test_read_with_offset_and_partial_reads() {
-    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
@@ -1675,7 +1658,7 @@ fn test_read_with_offset_and_partial_reads() {
     let piece_cache = torrentfs::PieceCache::with_cache_dir(cache_dir.path().to_path_buf()).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(torrentfs::TorrentRuntime::new()).expect("runtime should succeed");
+    let runtime = rt.block_on(torrentfs::TorrentRuntime::new(&state_path)).expect("runtime should succeed");
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
@@ -1748,7 +1731,6 @@ fn test_read_with_offset_and_partial_reads() {
 #[test]
 #[serial]
 fn test_multi_file_torrent_read_all_files() {
-    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
@@ -1757,7 +1739,7 @@ fn test_multi_file_torrent_read_all_files() {
     let piece_cache = torrentfs::PieceCache::with_cache_dir(cache_dir.path().to_path_buf()).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(torrentfs::TorrentRuntime::new()).expect("runtime should succeed");
+    let runtime = rt.block_on(torrentfs::TorrentRuntime::new(&state_path)).expect("runtime should succeed");
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );
@@ -1830,7 +1812,6 @@ fn test_multi_file_torrent_read_all_files() {
 #[test]
 #[serial]
 fn test_invalid_offset_returns_error() {
-    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".local/share/torrentfs/db/metadata.db"));
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
@@ -1839,7 +1820,7 @@ fn test_invalid_offset_returns_error() {
     let piece_cache = torrentfs::PieceCache::with_cache_dir(cache_dir.path().to_path_buf()).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let runtime = rt.block_on(torrentfs::TorrentRuntime::new()).expect("runtime should succeed");
+    let runtime = rt.block_on(torrentfs::TorrentRuntime::new(&state_path)).expect("runtime should succeed");
     let metadata_manager = std::sync::Arc::new(
         torrentfs::MetadataManager::new(runtime.db.clone()).unwrap()
     );

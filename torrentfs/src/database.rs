@@ -2,7 +2,6 @@
 
 use anyhow::{Context, Result};
 use sqlx::{sqlite::SqliteConnectOptions, sqlite::SqlitePoolOptions, SqlitePool, sqlite::SqliteJournalMode};
-use std::path::PathBuf;
 use std::str::FromStr;
 
 /// Database connection pool and configuration.
@@ -13,13 +12,12 @@ pub struct Database {
 impl Database {
     /// Initialize the database connection pool.
     /// Creates the state directory if it doesn't exist.
-    pub async fn new() -> Result<Self> {
-        let state_dir = get_state_dir()?;
+    pub async fn new(state_dir: &std::path::Path) -> Result<Self> {
         let db_path = state_dir.join("metadata.db");
         
         // Create state directory if it doesn't exist
         if !state_dir.exists() {
-            std::fs::create_dir_all(&state_dir)
+            std::fs::create_dir_all(state_dir)
                 .with_context(|| format!("Failed to create state directory: {:?}", state_dir))?;
         }
         
@@ -407,20 +405,7 @@ impl Database {
     }
 }
 
-/// Get the TorrentFS state directory.
-/// Defaults to `~/.local/share/torrentfs/db/`.
-fn get_state_dir() -> Result<PathBuf> {
-    let home_dir = dirs::home_dir()
-        .context("Could not determine home directory")?;
-    
-    let state_dir = home_dir
-        .join(".local")
-        .join("share")
-        .join("torrentfs")
-        .join("db");
-    
-    Ok(state_dir)
-}
+
 
 #[cfg(test)]
 mod tests {
@@ -432,7 +417,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
         
-        // Override state directory for test
         let connect_options = SqliteConnectOptions::from_str(&db_path.to_string_lossy())
             .unwrap()
             .create_if_missing(true);
@@ -440,7 +424,6 @@ mod tests {
         let pool = SqlitePool::connect_with(connect_options).await.unwrap();
         let db = Database { pool };
         
-        // Test that we can run a simple query
         let result: i64 = sqlx::query_scalar("SELECT 1")
             .fetch_one(db.pool())
             .await
@@ -452,15 +435,8 @@ mod tests {
     #[tokio::test]
     async fn test_migration_creates_source_path_index() {
         let temp_dir = TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("test.db");
         
-        let connect_options = SqliteConnectOptions::from_str(&db_path.to_string_lossy())
-            .unwrap()
-            .create_if_missing(true);
-        
-        let pool = SqlitePool::connect_with(connect_options).await.unwrap();
-        let db = Database::with_pool(pool);
-        
+        let db = Database::new(temp_dir.path()).await.unwrap();
         db.migrate().await.unwrap();
         
         let index_exists: i64 = sqlx::query_scalar(
