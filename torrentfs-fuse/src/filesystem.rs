@@ -1567,10 +1567,10 @@ impl Filesystem for TorrentFsFilesystem {
         };
 
         if self.async_runtime.is_some() {
-            let save_path = dirs::home_dir()
-                .map(|h| h.join(".local").join("share").join("torrentfs").join("data"))
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "/tmp/torrentfs".to_string());
+            let save_path = self.state_dir
+                .join("data")
+                .to_string_lossy()
+                .into_owned();
 
             match self.process_torrent_data_safe(&data, &source_path) {
                 Ok(parsed) => {
