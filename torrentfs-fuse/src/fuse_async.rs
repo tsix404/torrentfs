@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -125,12 +126,13 @@ impl FuseAsyncRuntime {
     pub fn new(
         metadata_manager: Arc<MetadataManager>,
         session: Arc<Session>,
+        state_dir: &Path,
     ) -> Self {
         let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
         let (command_tx, command_rx) = mpsc::channel(CHANNEL_BUFFER_SIZE);
         
         let piece_cache = Arc::new(
-            torrentfs::PieceCache::new().expect("Failed to create PieceCache")
+            torrentfs::PieceCache::with_state_dir(state_dir).expect("Failed to create PieceCache")
         );
         let download_coordinator = Arc::new(DownloadCoordinator::new(
             Arc::clone(&session),
@@ -429,21 +431,23 @@ mod tests {
     #[test]
     fn test_fuse_async_runtime_creation() {
         let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_state_dir = TempDir::new().unwrap();
         let (_temp_dir, db) = rt.block_on(setup_test_db());
         let metadata_manager = Arc::new(MetadataManager::new(Arc::new(db)).unwrap());
         let session = Arc::new(Session::new().unwrap());
         
-        let _runtime = FuseAsyncRuntime::new(metadata_manager, session);
+        let _runtime = FuseAsyncRuntime::new(metadata_manager, session, temp_state_dir.path());
     }
 
     #[test]
     fn test_list_torrents_empty() {
         let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_state_dir = TempDir::new().unwrap();
         let (_temp_dir, db) = rt.block_on(setup_test_db());
         let metadata_manager = Arc::new(MetadataManager::new(Arc::new(db)).unwrap());
         let session = Arc::new(Session::new().unwrap());
         
-        let runtime = FuseAsyncRuntime::new(metadata_manager, session);
+        let runtime = FuseAsyncRuntime::new(metadata_manager, session, temp_state_dir.path());
         
         let result = runtime.send_command_with_timeout(|reply| {
             FuseCommand::ListTorrents { reply }
