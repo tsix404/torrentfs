@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::error::Result;
 
@@ -9,6 +9,14 @@ pub struct PieceCache {
 impl PieceCache {
     pub fn new() -> Result<Self> {
         let cache_dir = Self::get_cache_dir()?;
+        if !cache_dir.exists() {
+            std::fs::create_dir_all(&cache_dir)?;
+        }
+        Ok(Self { cache_dir })
+    }
+
+    pub fn with_state_dir(state_dir: &Path) -> Result<Self> {
+        let cache_dir = state_dir.join("cache").join("pieces");
         if !cache_dir.exists() {
             std::fs::create_dir_all(&cache_dir)?;
         }

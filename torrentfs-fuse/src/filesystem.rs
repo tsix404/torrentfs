@@ -146,6 +146,7 @@ impl TorrentFsFilesystem {
         let async_runtime = Arc::new(FuseAsyncRuntime::new(
             Arc::clone(&metadata_manager),
             Arc::clone(&session),
+            &state_dir,
         ));
         
         let mut fs = Self {
