@@ -85,7 +85,7 @@ impl Database {
             sqlx::query(
                 "CREATE TABLE IF NOT EXISTS torrents (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    info_hash BLOB NOT NULL UNIQUE,
+                    info_hash BLOB NOT NULL,
                     name TEXT NOT NULL,
                     total_size INTEGER NOT NULL,
                     file_count INTEGER NOT NULL,
@@ -93,7 +93,8 @@ impl Database {
                     source_path TEXT NOT NULL DEFAULT '',
                     torrent_data BLOB,
                     resume_data BLOB,
-                    added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(info_hash, source_path)
                 )"
             )
             .execute(self.pool())
@@ -122,6 +123,11 @@ impl Database {
                 .execute(self.pool())
                 .await
                 .context("Failed to create index on torrents.info_hash")?;
+            
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_torrents_info_hash_source_path ON torrents(info_hash, source_path)")
+                .execute(self.pool())
+                .await
+                .context("Failed to create composite index on torrents(info_hash, source_path)")?;
             
             sqlx::query("CREATE INDEX IF NOT EXISTS idx_torrents_status ON torrents(status)")
                 .execute(self.pool())
@@ -278,6 +284,123 @@ impl Database {
             println!("Migration v4 applied successfully.");
         } else {
             println!("Migration v4 already applied.");
+        }
+        
+        let v5_applied: Option<i64> = sqlx::query_scalar(
+            "SELECT version FROM _sqlx_migrations WHERE version = 5 AND success = true"
+        )
+        .fetch_optional(self.pool())
+        .await
+        .context("Failed to check migration v5 status")?;
+        
+        if v5_applied.is_none() {
+            println!("Applying migration v5: changing unique constraint to (info_hash, source_path)...");
+            
+            // Cleanup any leftover tables from failed migrations
+            let _ = sqlx::query("DROP TABLE IF EXISTS torrents_new")
+                .execute(self.pool())
+                .await;
+            
+            // Check if we need to migrate (check if old constraint exists)
+            let constraint_check: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pragma_index_info('sqlite_autoindex_torrents_1')"
+            )
+            .fetch_one(self.pool())
+            .await
+            .unwrap_or(0);
+            
+            // If constraint_check is 1, it means single-column unique index exists
+            // We need to recreate the table with composite constraint
+            if constraint_check == 1 {
+                println!("Found old single-column unique constraint, migrating...");
+                
+                // Create new table with composite unique constraint
+                sqlx::query(
+                    "CREATE TABLE torrents_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        info_hash BLOB NOT NULL,
+                        name TEXT NOT NULL,
+                        total_size INTEGER NOT NULL,
+                        file_count INTEGER NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        source_path TEXT NOT NULL DEFAULT '',
+                        torrent_data BLOB,
+                        resume_data BLOB,
+                        added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(info_hash, source_path)
+                    )"
+                )
+                .execute(self.pool())
+                .await
+                .context("Failed to create torrents_new table")?;
+                
+                // Copy data from old table
+                sqlx::query(
+                    "INSERT INTO torrents_new 
+                     SELECT id, info_hash, name, total_size, file_count, status, source_path, 
+                            torrent_data, resume_data, added_at 
+                     FROM torrents"
+                )
+                .execute(self.pool())
+                .await
+                .context("Failed to copy data to torrents_new")?;
+                
+                // Drop old table
+                sqlx::query("DROP TABLE torrents")
+                    .execute(self.pool())
+                    .await
+                    .context("Failed to drop old torrents table")?;
+                
+                // Rename new table
+                sqlx::query("ALTER TABLE torrents_new RENAME TO torrents")
+                    .execute(self.pool())
+                    .await
+                    .context("Failed to rename torrents_new to torrents")?;
+                
+                // Recreate indexes
+                sqlx::query("CREATE INDEX IF NOT EXISTS idx_torrents_info_hash ON torrents(info_hash)")
+                    .execute(self.pool())
+                    .await
+                    .context("Failed to recreate idx_torrents_info_hash")?;
+                
+                sqlx::query("CREATE INDEX IF NOT EXISTS idx_torrents_info_hash_source_path ON torrents(info_hash, source_path)")
+                    .execute(self.pool())
+                    .await
+                    .context("Failed to create idx_torrents_info_hash_source_path")?;
+                
+                sqlx::query("CREATE INDEX IF NOT EXISTS idx_torrents_status ON torrents(status)")
+                    .execute(self.pool())
+                    .await
+                    .context("Failed to recreate idx_torrents_status")?;
+                
+                sqlx::query("CREATE INDEX IF NOT EXISTS idx_torrents_source_path ON torrents(source_path)")
+                    .execute(self.pool())
+                    .await
+                    .context("Failed to recreate idx_torrents_source_path")?;
+                
+                println!("Migration v5: table recreated with composite unique constraint");
+            } else {
+                // Already has correct schema or no data, just ensure index exists
+                sqlx::query("CREATE INDEX IF NOT EXISTS idx_torrents_info_hash_source_path ON torrents(info_hash, source_path)")
+                    .execute(self.pool())
+                    .await
+                    .context("Failed to create idx_torrents_info_hash_source_path")?;
+                
+                println!("Migration v5: composite index created (schema already correct)");
+            }
+            
+            sqlx::query(
+                "INSERT OR IGNORE INTO _sqlx_migrations (version, description, success, checksum, execution_time)
+                 VALUES (5, 'change_unique_constraint_to_composite', true, ?, 0)"
+            )
+            .bind(vec![0u8; 32])
+            .execute(self.pool())
+            .await
+            .context("Failed to record migration v5")?;
+            
+            println!("Migration v5 applied successfully.");
+        } else {
+            println!("Migration v5 already applied.");
         }
         
         Ok(())
