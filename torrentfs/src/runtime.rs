@@ -61,13 +61,6 @@ impl TorrentRuntime {
         Ok(runtime)
     }
     
-    fn get_save_path(&self) -> String {
-        self.state_dir
-            .join("data")
-            .to_string_lossy()
-            .into_owned()
-    }
-    
     fn restore_cache_index(&self) -> Result<()> {
         let cached = self.piece_cache.scan_cached_pieces()?;
         
@@ -94,7 +87,6 @@ impl TorrentRuntime {
             return Ok(());
         }
         
-        let save_path = self.get_save_path();
         let mut restored = 0;
         let mut skipped = 0;
         let mut failed = 0;
@@ -102,6 +94,7 @@ impl TorrentRuntime {
         for torrent_with_data in torrents {
             let info_hash_hex = hex::encode(&torrent_with_data.torrent.info_hash);
             let torrent_name = &torrent_with_data.torrent.name;
+            let source_path = &torrent_with_data.torrent.source_path;
             
             if self.session.find_torrent(&info_hash_hex) {
                 tracing::debug!(
@@ -112,6 +105,13 @@ impl TorrentRuntime {
                 skipped += 1;
                 continue;
             }
+            
+            let save_path = self.state_dir
+                .join("data")
+                .join(source_path)
+                .join(torrent_name)
+                .to_string_lossy()
+                .into_owned();
             
             match self.session.add_torrent_with_resume(
                 &torrent_with_data.torrent_data,
