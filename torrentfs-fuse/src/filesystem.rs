@@ -1590,7 +1590,7 @@ impl Filesystem for TorrentFsFilesystem {
                             );
                         }
                         Ok(PersistResult::AlreadyExists) => {
-                            tracing::info!("Torrent '{}' already exists in database, skipping (idempotent)", name);
+                            tracing::info!("Torrent '{}' (source: '{}') already exists in database, skipping (idempotent)", name, source_path);
                         }
                         Err(e) => {
                             tracing::error!("Failed to persist torrent to DB: {}", e);

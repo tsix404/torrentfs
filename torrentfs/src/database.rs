@@ -296,6 +296,11 @@ impl Database {
         if v5_applied.is_none() {
             println!("Applying migration v5: changing unique constraint to (info_hash, source_path)...");
             
+            // Cleanup any leftover tables from failed migrations
+            let _ = sqlx::query("DROP TABLE IF EXISTS torrents_new")
+                .execute(self.pool())
+                .await;
+            
             // Check if we need to migrate (check if old constraint exists)
             let constraint_check: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM pragma_index_info('sqlite_autoindex_torrents_1')"

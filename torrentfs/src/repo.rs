@@ -110,6 +110,30 @@ impl TorrentRepo {
         }))
     }
 
+    pub async fn find_by_info_hash_and_source_path(&self, hash: &[u8], source_path: &str) -> Result<Option<Torrent>> {
+        let row = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, String, String, Option<Vec<u8>>, Option<Vec<u8>>, String)>(
+            "SELECT id, info_hash, name, total_size, file_count, status, source_path, torrent_data, resume_data, added_at
+             FROM torrents WHERE info_hash = ? AND source_path = ?",
+        )
+        .bind(hash)
+        .bind(source_path)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| Torrent {
+            id: r.0,
+            info_hash: r.1,
+            name: r.2,
+            total_size: r.3,
+            file_count: r.4,
+            status: r.5,
+            source_path: r.6,
+            torrent_data: r.7,
+            resume_data: r.8,
+            added_at: r.9,
+        }))
+    }
+
     pub async fn list_all(&self) -> Result<Vec<Torrent>> {
         let rows = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, String, String, Option<Vec<u8>>, Option<Vec<u8>>, String)>(
             "SELECT id, info_hash, name, total_size, file_count, status, source_path, torrent_data, resume_data, added_at
@@ -185,7 +209,7 @@ impl TorrentRepo {
         torrent_data: Option<&[u8]>,
         files: Vec<FileEntry>,
     ) -> Result<InsertResult> {
-        if let Some(existing) = self.find_by_info_hash(info_hash).await? {
+        if let Some(existing) = self.find_by_info_hash_and_source_path(info_hash, source_path).await? {
             return Ok(InsertResult::AlreadyExists(existing));
         }
         let torrent = self.insert(info_hash, name, total_size, file_count, source_path, torrent_data).await?;
@@ -276,7 +300,7 @@ mod tests {
         sqlx::query(
             "CREATE TABLE torrents (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                info_hash BLOB NOT NULL UNIQUE,
+                info_hash BLOB NOT NULL,
                 name TEXT NOT NULL,
                 total_size INTEGER NOT NULL,
                 file_count INTEGER NOT NULL,
@@ -284,7 +308,8 @@ mod tests {
                 source_path TEXT NOT NULL DEFAULT '',
                 torrent_data BLOB,
                 resume_data BLOB,
-                added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(info_hash, source_path)
             )",
         )
         .execute(&pool)
@@ -433,15 +458,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_insert_duplicate_info_hash() {
+    async fn test_insert_duplicate_info_hash_same_source_path() {
         let (_temp_dir, pool) = setup_test_db().await;
         let repo = TorrentRepo::new(pool);
 
         let hash = vec![0xAA; 20];
-        repo.insert(&hash, "first", 100, 1, "", None::<&[u8]>).await.unwrap();
+        repo.insert(&hash, "first", 100, 1, "movies", None::<&[u8]>).await.unwrap();
 
-        let result = repo.insert(&hash, "duplicate", 200, 2, "", None::<&[u8]>).await;
+        let result = repo.insert(&hash, "duplicate", 200, 2, "movies", None::<&[u8]>).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_insert_same_info_hash_different_source_path() {
+        let (_temp_dir, pool) = setup_test_db().await;
+        let repo = TorrentRepo::new(pool);
+
+        let hash = vec![0xAA; 20];
+        let t1 = repo.insert(&hash, "first", 100, 1, "movies", None::<&[u8]>).await.unwrap();
+        let t2 = repo.insert(&hash, "second", 200, 2, "backup", None::<&[u8]>).await.unwrap();
+
+        assert_ne!(t1.id, t2.id);
+        assert_eq!(t1.source_path, "movies");
+        assert_eq!(t2.source_path, "backup");
+
+        let all = repo.list_all().await.unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_find_by_info_hash_and_source_path() {
+        let (_temp_dir, pool) = setup_test_db().await;
+        let repo = TorrentRepo::new(pool);
+
+        let hash = vec![0xAA; 20];
+        repo.insert(&hash, "first", 100, 1, "movies", None::<&[u8]>).await.unwrap();
+        repo.insert(&hash, "second", 200, 2, "backup", None::<&[u8]>).await.unwrap();
+
+        let found_movies = repo.find_by_info_hash_and_source_path(&hash, "movies").await.unwrap();
+        assert!(found_movies.is_some());
+        assert_eq!(found_movies.unwrap().source_path, "movies");
+
+        let found_backup = repo.find_by_info_hash_and_source_path(&hash, "backup").await.unwrap();
+        assert!(found_backup.is_some());
+        assert_eq!(found_backup.unwrap().source_path, "backup");
+
+        let found_other = repo.find_by_info_hash_and_source_path(&hash, "other").await.unwrap();
+        assert!(found_other.is_none());
     }
 
     #[tokio::test]
