@@ -27,7 +27,7 @@ impl TorrentRuntime {
         db.migrate().await?;
         
         let session = Arc::new(Session::new()?);
-        let piece_cache = Arc::new(PieceCache::new()?);
+        let piece_cache = Arc::new(PieceCache::with_state_dir(state_dir)?);
         let download_coordinator = Arc::new(DownloadCoordinator::new(
             Arc::clone(&session),
             Arc::clone(&piece_cache),
