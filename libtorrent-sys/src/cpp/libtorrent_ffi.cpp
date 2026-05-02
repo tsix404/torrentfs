@@ -199,7 +199,6 @@ libtorrent_error_t libtorrent_add_torrent_ex(
         atp.save_path = std::string(save_path, save_path_len);
         atp.flags &= ~libtorrent::torrent_flags::auto_managed;
         atp.flags |= libtorrent::torrent_flags::paused;
-        atp.flags |= libtorrent::torrent_flags::upload_mode;
 
         libtorrent::torrent_handle handle = session->session.add_torrent(atp, ec);
         if (ec) {
@@ -253,7 +252,6 @@ libtorrent_error_t libtorrent_add_torrent_with_resume(
         atp.save_path = std::string(save_path, save_path_len);
         atp.flags &= ~libtorrent::torrent_flags::auto_managed;
         atp.flags |= libtorrent::torrent_flags::paused;
-        atp.flags |= libtorrent::torrent_flags::upload_mode;
         
         if (resume_data && resume_data_size > 0) {
             std::vector<char> resume_buf(resume_data_size);
@@ -522,7 +520,6 @@ libtorrent_error_t libtorrent_resume_torrent(libtorrent_session_t* session, cons
     
     try {
         handle.unset_flags(libtorrent::torrent_flags::paused);
-        handle.unset_flags(libtorrent::torrent_flags::upload_mode);
         return LIBTORRENT_OK;
     } catch (const std::exception& e) {
         fprintf(stderr, "libtorrent_resume_torrent: %s\n", e.what());
