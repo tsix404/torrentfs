@@ -1,5 +1,5 @@
-use anyhow::Result;
-use std::path::Path;
+use anyhow::{bail, Result};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -10,6 +10,53 @@ use crate::download::DownloadCoordinator;
 use crate::metadata::MetadataManager;
 use crate::piece_cache::PieceCache;
 use torrentfs_libtorrent::{AlertType, Session};
+
+pub fn sanitize_path_component(component: &str) -> Result<String> {
+    let path = Path::new(component);
+    
+    for part in path.components() {
+        match part {
+            Component::ParentDir => {
+                bail!("Path component contains directory traversal: '..' is not allowed")
+            }
+            Component::RootDir => {
+                bail!("Path component contains absolute path: root directory is not allowed")
+            }
+            Component::Prefix(_) => {
+                bail!("Path component contains Windows prefix which is not allowed")
+            }
+            _ => {}
+        }
+    }
+    
+    let sanitized = component
+        .replace("..", "")
+        .replace('/', "_")
+        .replace('\\', "_");
+    
+    if sanitized.is_empty() {
+        bail!("Path component is empty after sanitization");
+    }
+    
+    Ok(sanitized)
+}
+
+pub fn build_safe_path(base: &Path, parts: &[&str]) -> Result<PathBuf> {
+    let mut path = base.to_path_buf();
+    for part in parts {
+        let sanitized = sanitize_path_component(part)?;
+        path = path.join(sanitized);
+    }
+    
+    let canonical_base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
+    
+    if !canonical_path.starts_with(&canonical_base) {
+        bail!("Path traversal attempt detected: resulting path escapes base directory");
+    }
+    
+    Ok(path)
+}
 
 pub struct TorrentRuntime {
     pub db: Arc<Database>,
@@ -106,16 +153,16 @@ impl TorrentRuntime {
                 continue;
             }
             
-            let save_path = self.state_dir
-                .join("data")
-                .join(source_path)
-                .join(torrent_name)
-                .to_string_lossy()
-                .into_owned();
+            let save_path = build_safe_path(
+                &self.state_dir.join("data"),
+                &[source_path.as_str(), torrent_name.as_str()]
+            )?;
+            
+            let save_path_str = save_path.to_string_lossy().into_owned();
             
             match self.session.add_torrent_with_resume(
                 &torrent_with_data.torrent_data,
-                &save_path,
+                &save_path_str,
                 torrent_with_data.resume_data.as_deref()
             ) {
                 Ok(()) => {
@@ -129,7 +176,7 @@ impl TorrentRuntime {
                         tracing::info!(
                             info_hash = %info_hash_hex,
                             name = %torrent_name,
-                            save_path = %save_path,
+                            save_path = %save_path_str,
                             "Restored torrent from database"
                         );
                     }
@@ -139,7 +186,7 @@ impl TorrentRuntime {
                     tracing::error!(
                         info_hash = %info_hash_hex,
                         name = %torrent_name,
-                        save_path = %save_path,
+                        save_path = %save_path_str,
                         error = %e,
                         "Failed to restore torrent from database"
                     );
@@ -283,5 +330,62 @@ mod tests {
         let runtime = TorrentRuntime::new(temp_dir.path()).await.unwrap();
         let torrents = runtime.session.get_torrents();
         assert!(torrents.is_empty() || !torrents.is_empty(), "get_torrents should return a Vec");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_normal() {
+        assert_eq!(sanitize_path_component("normal").unwrap(), "normal");
+        assert_eq!(sanitize_path_component("file.txt").unwrap(), "file.txt");
+        assert_eq!(sanitize_path_component("my-torrent").unwrap(), "my-torrent");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_traversal() {
+        assert!(sanitize_path_component("..").is_err());
+        assert!(sanitize_path_component("../etc").is_err());
+        assert!(sanitize_path_component("../file").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_slashes() {
+        assert_eq!(sanitize_path_component("path/to/file").unwrap(), "path_to_file");
+        assert_eq!(sanitize_path_component("path\\to\\file").unwrap(), "path_to_file");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_empty() {
+        assert!(sanitize_path_component("").is_err());
+    }
+
+    #[test]
+    fn test_build_safe_path_normal() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+        let path = build_safe_path(base, &["source", "torrent"]).unwrap();
+        assert!(path.starts_with(base));
+        assert!(path.ends_with("source/torrent") || path.ends_with("source\\torrent"));
+    }
+
+    #[test]
+    fn test_build_safe_path_traversal_blocked() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+        let result = build_safe_path(base, &["..", "etc"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_safe_path_absolute_blocked() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+        let result = build_safe_path(base, &["/etc", "passwd"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_dots() {
+        assert_eq!(sanitize_path_component("..file").unwrap(), "file");
+        assert_eq!(sanitize_path_component("file..").unwrap(), "file");
+        assert_eq!(sanitize_path_component("...").unwrap(), ".");
     }
 }
