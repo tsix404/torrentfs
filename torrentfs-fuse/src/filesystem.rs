@@ -270,7 +270,29 @@ impl TorrentFsFilesystem {
         }
         self.metadata_dirs.contains_key(&ino)
     }
+}
 
+fn sanitize_path_component(name: &str) -> String {
+    let sanitized = name
+        .replace("..", "_")
+        .replace('\\', "_")
+        .replace('/', "_");
+    
+    if sanitized.is_empty() || sanitized == "." {
+        "_".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn sanitize_path(path: &str) -> String {
+    path.split('/')
+        .map(|component| sanitize_path_component(component))
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+impl TorrentFsFilesystem {
     fn list_torrents_safe(&self) -> Result<Vec<TorrentInfo>, FuseError> {
         if let Some(runtime) = &self.async_runtime {
             runtime.send_command_with_timeout(|reply| FuseCommand::ListTorrents { reply })
@@ -1554,11 +1576,12 @@ impl Filesystem for TorrentFsFilesystem {
         let path = open_file.path.clone();
         let data = open_file.data.clone();
         
-        let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+        let raw_name = path.rsplit('/').next().unwrap_or(&path).to_string();
+        let name = sanitize_path_component(&raw_name);
         let source_path = if path.contains('/') {
             let parts: Vec<&str> = path.rsplitn(2, '/').collect();
             if parts.len() > 1 {
-                parts[1].to_string()
+                sanitize_path(parts[1])
             } else {
                 String::new()
             }
@@ -2202,5 +2225,58 @@ mod tests {
         
         let parts: Vec<&str> = "   ".split('/').filter(|p| !p.is_empty()).collect();
         assert!(parts.iter().all(|p| p.trim().is_empty()), "Whitespace-only parts should be filtered");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_normal() {
+        assert_eq!(sanitize_path_component("file.txt"), "file.txt");
+        assert_eq!(sanitize_path_component("my-torrent"), "my-torrent");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_traversal() {
+        assert_eq!(sanitize_path_component(".."), "_");
+        assert_eq!(sanitize_path_component("../../../etc/passwd"), "______etc_passwd");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_backslash() {
+        assert_eq!(sanitize_path_component("..\\passwd"), "__passwd");
+        assert_eq!(sanitize_path_component("folder\\file"), "folder_file");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_slash() {
+        assert_eq!(sanitize_path_component("path/to/file"), "path_to_file");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_empty() {
+        assert_eq!(sanitize_path_component(""), "_");
+        assert_eq!(sanitize_path_component("."), "_");
+    }
+
+    #[test]
+    fn test_sanitize_path_normal() {
+        assert_eq!(sanitize_path("media/video"), "media/video");
+        assert_eq!(sanitize_path("anime/series/2024"), "anime/series/2024");
+    }
+
+    #[test]
+    fn test_sanitize_path_traversal() {
+        assert_eq!(sanitize_path("../etc/passwd"), "_/etc/passwd");
+        assert_eq!(sanitize_path("../../data"), "_/_/data");
+        assert_eq!(sanitize_path("normal/../../../escape"), "normal/_/_/_/escape");
+    }
+
+    #[test]
+    fn test_sanitize_path_backslash() {
+        assert_eq!(sanitize_path("media\\video"), "media_video");
+        assert_eq!(sanitize_path("..\\windows\\system"), "__windows_system");
+    }
+
+    #[test]
+    fn test_sanitize_path_mixed() {
+        assert_eq!(sanitize_path("valid/../escape\\path"), "valid/_/escape_path");
     }
 }
