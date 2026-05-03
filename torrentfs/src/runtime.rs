@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use percent_encoding::percent_decode;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,41 +12,55 @@ use crate::metadata::MetadataManager;
 use crate::piece_cache::PieceCache;
 use torrentfs_libtorrent::{AlertType, Session};
 
-fn decode_percent_encoding(s: &str) -> Option<String> {
-    let mut result = String::with_capacity(s.len());
-    let chars: Vec<char> = s.chars().collect();
+fn validate_percent_encoding(s: &str) -> bool {
+    let bytes = s.as_bytes();
     let mut i = 0;
     
-    while i < chars.len() {
-        if chars[i] == '%' && i + 2 < chars.len() {
-            let hex: String = chars[i+1..=i+2].iter().collect();
-            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                result.push(byte as char);
-                i += 3;
-                continue;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return false;
             }
+            let hex = &s[i+1..i+3];
+            if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return false;
+            }
+            i += 3;
+        } else {
+            i += 1;
         }
-        result.push(chars[i]);
-        i += 1;
     }
-    
-    Some(result)
+    true
+}
+
+fn decode_once(s: &str) -> Option<String> {
+    percent_decode(s.as_bytes())
+        .decode_utf8()
+        .ok()
+        .map(|cow| cow.into_owned())
 }
 
 fn contains_encoded_traversal(s: &str) -> bool {
-    let decoded = match decode_percent_encoding(s) {
-        Some(d) => d,
-        None => return true,
-    };
-    
-    if decoded.contains("..") || decoded == "." {
+    if !validate_percent_encoding(s) {
         return true;
     }
     
-    if let Some(double_decoded) = decode_percent_encoding(&decoded) {
-        if double_decoded.contains("..") || double_decoded == "." {
+    let mut current = s.to_string();
+    
+    for _ in 0..10 {
+        let Some(decoded) = decode_once(&current) else {
+            return true;
+        };
+        
+        if decoded.contains("..") || decoded == "." {
             return true;
         }
+        
+        if decoded == current {
+            break;
+        }
+        
+        current = decoded;
     }
     
     false
@@ -485,5 +500,23 @@ mod tests {
     fn test_sanitize_path_component_valid_with_percent() {
         assert!(sanitize_path_component("file%20name").is_ok());
         assert!(sanitize_path_component("100%25complete").is_ok());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_invalid_hex() {
+        assert!(sanitize_path_component("%2g").is_err());
+        assert!(sanitize_path_component("%gg").is_err());
+        assert!(sanitize_path_component("%zz").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_incomplete_percent() {
+        assert!(sanitize_path_component("%2").is_err());
+        assert!(sanitize_path_component("%").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_triple_encoded_traversal() {
+        assert!(sanitize_path_component("%25252e%25252e").is_err());
     }
 }

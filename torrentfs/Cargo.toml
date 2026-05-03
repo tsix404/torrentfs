@@ -17,6 +17,7 @@ serde.workspace = true
 sqlx.workspace = true
 dirs.workspace = true
 hex = "0.4"
+percent-encoding.workspace = true
 torrentfs-libtorrent = { path = "../torrentfs-libtorrent", version = "0.1.0" }
 
 [dev-dependencies]
