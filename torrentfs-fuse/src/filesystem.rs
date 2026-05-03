@@ -1569,6 +1569,8 @@ impl Filesystem for TorrentFsFilesystem {
         if self.async_runtime.is_some() {
             let save_path = self.state_dir
                 .join("data")
+                .join(&source_path)
+                .join(&name)
                 .to_string_lossy()
                 .into_owned();
 
