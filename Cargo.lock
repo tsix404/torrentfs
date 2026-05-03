@@ -2066,6 +2066,7 @@ dependencies = [
  "anyhow",
  "dirs",
  "hex",
+ "percent-encoding",
  "serde",
  "sqlx",
  "tempfile",

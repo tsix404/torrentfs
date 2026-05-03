@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
-use std::path::{Path, PathBuf};
+use percent_encoding::percent_decode;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -13,40 +14,99 @@ use torrentfs_libtorrent::{AlertType, Session};
 
 const MAX_PATH_COMPONENT_LENGTH: usize = 255;
 
+fn validate_percent_encoding(s: &str) -> Result<()> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                bail!("Incomplete percent encoding at end of string");
+            }
+            let hex = &s[i + 1..i + 3];
+            if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                bail!("Invalid percent encoding: invalid hex digits");
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    Ok(())
+}
+
+fn decode_fully(component: &str) -> Result<String> {
+    validate_percent_encoding(component)?;
+    
+    let mut current = component.to_string();
+    let max_iterations = 10;
+    
+    for _ in 0..max_iterations {
+        let decoded = percent_decode(current.as_bytes())
+            .decode_utf8()
+            .map_err(|e| anyhow::anyhow!("Invalid percent encoding or UTF-8 in path component: {}", e))?;
+        
+        let decoded_str = decoded.to_string();
+        if decoded_str == current {
+            return Ok(decoded_str);
+        }
+        current = decoded_str;
+    }
+    
+    bail!("Too many levels of percent encoding (potential encoding loop)");
+}
+
 pub fn sanitize_path_component(component: &str) -> Result<String> {
     if component.is_empty() {
         bail!("Path component is empty");
     }
     
-    if component.len() > MAX_PATH_COMPONENT_LENGTH {
+    let decoded_str = decode_fully(component)?;
+    
+    if decoded_str.len() > MAX_PATH_COMPONENT_LENGTH {
         bail!(
             "Path component exceeds maximum length of {} bytes (got {} bytes)",
             MAX_PATH_COMPONENT_LENGTH,
-            component.len()
+            decoded_str.len()
         );
     }
     
-    if component.contains('\0') {
+    if decoded_str.contains('\0') {
         bail!("Path component contains null byte which is not allowed");
     }
     
-    if component.contains("..") {
+    if decoded_str.contains("..") {
         bail!("Path component contains '..' sequence which is not allowed");
     }
     
-    if component.contains('/') || component.contains('\\') {
+    if decoded_str.contains('/') || decoded_str.contains('\\') {
         bail!("Path component contains path separator which is not allowed");
     }
     
-    if component == "." {
+    if decoded_str == "." {
         bail!("Path component is '.' which is not allowed");
     }
     
-    if component.starts_with('/') || (component.len() > 1 && component.as_bytes()[1] == b':') {
-        bail!("Path component contains absolute path which is not allowed");
+    let path = Path::new(&decoded_str);
+
+    for part in path.components() {
+        match part {
+            Component::ParentDir => {
+                bail!("Path component contains directory traversal: '..' is not allowed")
+            }
+            Component::RootDir => {
+                bail!("Path component contains absolute path: root directory is not allowed")
+            }
+            Component::Prefix(_) => {
+                bail!("Path component contains Windows prefix which is not allowed")
+            }
+            Component::CurDir => {
+                bail!("Path component contains current directory '.' which is not allowed")
+            }
+            _ => {}
+        }
     }
     
-    Ok(component.to_string())
+    Ok(decoded_str.to_string())
 }
 
 pub fn build_safe_path(base: &Path, parts: &[&str]) -> Result<PathBuf> {
@@ -421,5 +481,47 @@ mod tests {
         
         let very_long = "a".repeat(10000);
         assert!(sanitize_path_component(&very_long).is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_encoded_slash() {
+        assert!(sanitize_path_component("%2f").is_err());
+        assert!(sanitize_path_component("%2F").is_err());
+        assert!(sanitize_path_component("%5c").is_err());
+        assert!(sanitize_path_component("%5C").is_err());
+        assert!(sanitize_path_component("etc%2fpasswd").is_err());
+        assert!(sanitize_path_component("path%2fto%2ffile").is_err());
+        assert!(sanitize_path_component("folder%5cfile").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_encoded_traversal() {
+        assert!(sanitize_path_component("%2e%2e").is_err());
+        assert!(sanitize_path_component("%2e").is_err());
+        assert!(sanitize_path_component("%2e%2e%2fetc").is_err());
+        assert!(sanitize_path_component("..%2fetc").is_err());
+        assert!(sanitize_path_component("%2e%2e/etc").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_double_encoded() {
+        assert!(sanitize_path_component("%252f").is_err());
+        assert!(sanitize_path_component("%255c").is_err());
+        assert!(sanitize_path_component("%252e%252e").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_valid_encoded() {
+        assert_eq!(sanitize_path_component("file%20name").unwrap(), "file name");
+        assert_eq!(sanitize_path_component("torrent%2dname").unwrap(), "torrent-name");
+        assert_eq!(sanitize_path_component("test%5f123").unwrap(), "test_123");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_invalid_encoding() {
+        assert!(sanitize_path_component("%gg").is_err());
+        assert!(sanitize_path_component("%2g").is_err());
+        assert!(sanitize_path_component("%").is_err());
+        assert!(sanitize_path_component("%2").is_err());
     }
 }
