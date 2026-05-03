@@ -11,6 +11,46 @@ use crate::metadata::MetadataManager;
 use crate::piece_cache::PieceCache;
 use torrentfs_libtorrent::{AlertType, Session};
 
+fn decode_percent_encoding(s: &str) -> Option<String> {
+    let mut result = String::with_capacity(s.len());
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    
+    while i < chars.len() {
+        if chars[i] == '%' && i + 2 < chars.len() {
+            let hex: String = chars[i+1..=i+2].iter().collect();
+            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                result.push(byte as char);
+                i += 3;
+                continue;
+            }
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+    
+    Some(result)
+}
+
+fn contains_encoded_traversal(s: &str) -> bool {
+    let decoded = match decode_percent_encoding(s) {
+        Some(d) => d,
+        None => return true,
+    };
+    
+    if decoded.contains("..") || decoded == "." {
+        return true;
+    }
+    
+    if let Some(double_decoded) = decode_percent_encoding(&decoded) {
+        if double_decoded.contains("..") || double_decoded == "." {
+            return true;
+        }
+    }
+    
+    false
+}
+
 pub fn sanitize_path_component(component: &str) -> Result<String> {
     if component.is_empty() {
         bail!("Path component is empty");
@@ -18,6 +58,10 @@ pub fn sanitize_path_component(component: &str) -> Result<String> {
     
     if component.contains('\0') {
         bail!("Path component contains null byte which is not allowed");
+    }
+    
+    if contains_encoded_traversal(component) {
+        bail!("Path component contains encoded directory traversal which is not allowed");
     }
     
     if component.contains("..") {
@@ -415,5 +459,31 @@ mod tests {
     #[test]
     fn test_sanitize_path_component_backslash_traversal() {
         assert!(sanitize_path_component("valid\\..\\etc").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_url_encoded_traversal() {
+        assert!(sanitize_path_component("%2e%2e").is_err());
+        assert!(sanitize_path_component("%2E%2E").is_err());
+        assert!(sanitize_path_component("%2e.").is_err());
+        assert!(sanitize_path_component(".%2e").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_double_encoded_traversal() {
+        assert!(sanitize_path_component("%252e%252e").is_err());
+        assert!(sanitize_path_component("%252E%252E").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_encoded_dot() {
+        assert!(sanitize_path_component("%2e").is_err());
+        assert!(sanitize_path_component("%2E").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_valid_with_percent() {
+        assert!(sanitize_path_component("file%20name").is_ok());
+        assert!(sanitize_path_component("100%25complete").is_ok());
     }
 }
