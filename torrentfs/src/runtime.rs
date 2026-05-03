@@ -524,4 +524,5 @@ mod tests {
         assert!(sanitize_path_component("%").is_err());
         assert!(sanitize_path_component("%2").is_err());
     }
+    }
 }
