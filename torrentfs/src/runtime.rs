@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -42,24 +42,8 @@ pub fn sanitize_path_component(component: &str) -> Result<String> {
         bail!("Path component is '.' which is not allowed");
     }
     
-    let path = Path::new(component);
-    
-    for part in path.components() {
-        match part {
-            Component::ParentDir => {
-                bail!("Path component contains directory traversal: '..' is not allowed")
-            }
-            Component::RootDir => {
-                bail!("Path component contains absolute path: root directory is not allowed")
-            }
-            Component::Prefix(_) => {
-                bail!("Path component contains Windows prefix which is not allowed")
-            }
-            Component::CurDir => {
-                bail!("Path component contains current directory '.' which is not allowed")
-            }
-            _ => {}
-        }
+    if component.starts_with('/') || (component.len() > 1 && component.as_bytes()[1] == b':') {
+        bail!("Path component contains absolute path which is not allowed");
     }
     
     Ok(component.to_string())
