@@ -15,20 +15,25 @@ pub fn sanitize_path_component(component: &str) -> Result<String> {
     if component.is_empty() {
         bail!("Path component is empty");
     }
-
+    
     if component.contains('\0') {
         bail!("Path component contains null byte which is not allowed");
     }
-
+    
     if component.contains("..") {
-        bail!("Path component contains '..' which is not allowed");
+        bail!("Path component contains '..' sequence which is not allowed");
     }
-
-    if component.starts_with('.') || component.ends_with('.') {
-        bail!("Path component cannot start or end with '.'");
+    
+    if component.contains('/') || component.contains('\\') {
+        bail!("Path component contains path separator which is not allowed");
     }
-
+    
+    if component == "." {
+        bail!("Path component is '.' which is not allowed");
+    }
+    
     let path = Path::new(component);
+    
     for part in path.components() {
         match part {
             Component::ParentDir => {
@@ -41,25 +46,13 @@ pub fn sanitize_path_component(component: &str) -> Result<String> {
                 bail!("Path component contains Windows prefix which is not allowed")
             }
             Component::CurDir => {
-                bail!("Path component contains '.' which is not allowed")
+                bail!("Path component contains current directory '.' which is not allowed")
             }
             _ => {}
         }
     }
-
-    let sanitized = component
-        .replace('/', "_")
-        .replace('\\', "_");
     
-    if sanitized.is_empty() {
-        bail!("Path component is empty after sanitization");
-    }
-    
-    if sanitized.starts_with('.') || sanitized.ends_with('.') {
-        bail!("Path component cannot start or end with '.' after sanitization");
-    }
-    
-    Ok(sanitized)
+    Ok(component.to_string())
 }
 
 pub fn build_safe_path(base: &Path, parts: &[&str]) -> Result<PathBuf> {
@@ -369,8 +362,8 @@ mod tests {
 
     #[test]
     fn test_sanitize_path_component_slashes() {
-        assert_eq!(sanitize_path_component("path/to/file").unwrap(), "path_to_file");
-        assert_eq!(sanitize_path_component("path\\to\\file").unwrap(), "path_to_file");
+        assert!(sanitize_path_component("path/to/file").is_err());
+        assert!(sanitize_path_component("path\\to\\file").is_err());
     }
 
     #[test]
@@ -404,32 +397,23 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_path_component_null_byte() {
-        assert!(sanitize_path_component("file\0.txt").is_err());
-        assert!(sanitize_path_component("\0file").is_err());
-    }
-
-    #[test]
-    fn test_sanitize_path_component_dots() {
+    fn test_sanitize_path_component_edge_cases() {
         assert!(sanitize_path_component("..file").is_err());
         assert!(sanitize_path_component("file..").is_err());
         assert!(sanitize_path_component("...").is_err());
-        assert!(sanitize_path_component(".").is_err());
         assert!(sanitize_path_component("....").is_err());
         assert!(sanitize_path_component(".....").is_err());
-    }
-
-    #[test]
-    fn test_sanitize_path_component_edge_cases() {
         assert!(sanitize_path_component(".").is_err());
-        assert!(sanitize_path_component(".hidden").is_err());
-        assert!(sanitize_path_component("file.").is_err());
-        assert!(sanitize_path_component("valid.file.name").is_ok());
     }
 
     #[test]
-    fn test_sanitize_path_component_backslash_unix() {
+    fn test_sanitize_path_component_null_byte() {
+        assert!(sanitize_path_component("file\0.txt").is_err());
+        assert!(sanitize_path_component("\0").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_backslash_traversal() {
         assert!(sanitize_path_component("valid\\..\\etc").is_err());
-        assert_eq!(sanitize_path_component("valid\\path\\name").unwrap(), "valid_path_name");
     }
 }
