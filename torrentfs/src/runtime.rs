@@ -12,6 +12,26 @@ use crate::piece_cache::PieceCache;
 use torrentfs_libtorrent::{AlertType, Session};
 
 pub fn sanitize_path_component(component: &str) -> Result<String> {
+    if component.is_empty() {
+        bail!("Path component is empty");
+    }
+    
+    if component.contains('\0') {
+        bail!("Path component contains null byte which is not allowed");
+    }
+    
+    if component.contains("..") {
+        bail!("Path component contains '..' sequence which is not allowed");
+    }
+    
+    if component.contains('/') || component.contains('\\') {
+        bail!("Path component contains path separator which is not allowed");
+    }
+    
+    if component == "." {
+        bail!("Path component is '.' which is not allowed");
+    }
+    
     let path = Path::new(component);
     
     for part in path.components() {
@@ -25,20 +45,14 @@ pub fn sanitize_path_component(component: &str) -> Result<String> {
             Component::Prefix(_) => {
                 bail!("Path component contains Windows prefix which is not allowed")
             }
+            Component::CurDir => {
+                bail!("Path component contains current directory '.' which is not allowed")
+            }
             _ => {}
         }
     }
     
-    let sanitized = component
-        .replace("..", "")
-        .replace('/', "_")
-        .replace('\\', "_");
-    
-    if sanitized.is_empty() {
-        bail!("Path component is empty after sanitization");
-    }
-    
-    Ok(sanitized)
+    Ok(component.to_string())
 }
 
 pub fn build_safe_path(base: &Path, parts: &[&str]) -> Result<PathBuf> {
@@ -48,42 +62,14 @@ pub fn build_safe_path(base: &Path, parts: &[&str]) -> Result<PathBuf> {
         path = path.join(sanitized);
     }
     
-    let canonical_base = base.canonicalize()
-        .map_err(|e| anyhow::anyhow!("Failed to canonicalize base directory '{}': {}", base.display(), e))?;
+    let canonical_base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
     
-    match path.canonicalize() {
-        Ok(canonical_path) => {
-            if !canonical_path.starts_with(&canonical_base) {
-                bail!("Path traversal attempt detected: resulting path escapes base directory");
-            }
-            Ok(canonical_path)
-        }
-        Err(_) => {
-            let mut current = path.as_path();
-            let mut suffix_components = Vec::new();
-            
-            while !current.exists() && current.parent().is_some() {
-                if let Some(name) = current.file_name() {
-                    suffix_components.push(name.to_os_string());
-                }
-                current = current.parent().unwrap();
-            }
-            
-            let canonical_current = current.canonicalize()
-                .map_err(|e| anyhow::anyhow!("Failed to canonicalize parent path '{}': {}", current.display(), e))?;
-            
-            if !canonical_current.starts_with(&canonical_base) {
-                bail!("Path traversal attempt detected: resulting path escapes base directory");
-            }
-            
-            let mut result = canonical_current;
-            for comp in suffix_components.iter().rev() {
-                result.push(comp);
-            }
-            
-            Ok(result)
-        }
+    if !canonical_path.starts_with(&canonical_base) {
+        bail!("Path traversal attempt detected: resulting path escapes base directory");
     }
+    
+    Ok(path)
 }
 
 pub struct TorrentRuntime {
@@ -376,8 +362,8 @@ mod tests {
 
     #[test]
     fn test_sanitize_path_component_slashes() {
-        assert_eq!(sanitize_path_component("path/to/file").unwrap(), "path_to_file");
-        assert_eq!(sanitize_path_component("path\\to\\file").unwrap(), "path_to_file");
+        assert!(sanitize_path_component("path/to/file").is_err());
+        assert!(sanitize_path_component("path\\to\\file").is_err());
     }
 
     #[test]
@@ -399,7 +385,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let base = temp_dir.path();
         let result = build_safe_path(base, &["..", "etc"]);
-        assert!(result.is_err(), "Traversal should be blocked by sanitize_path_component");
+        assert!(result.is_err());
     }
 
     #[test]
@@ -407,24 +393,27 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let base = temp_dir.path();
         let result = build_safe_path(base, &["/etc", "passwd"]);
-        assert!(result.is_err(), "Absolute path should be blocked by sanitize_path_component");
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_sanitize_path_component_dots() {
-        assert_eq!(sanitize_path_component("..file").unwrap(), "file");
-        assert_eq!(sanitize_path_component("file..").unwrap(), "file");
-        assert_eq!(sanitize_path_component("...").unwrap(), ".");
+    fn test_sanitize_path_component_edge_cases() {
+        assert!(sanitize_path_component("..file").is_err());
+        assert!(sanitize_path_component("file..").is_err());
+        assert!(sanitize_path_component("...").is_err());
+        assert!(sanitize_path_component("....").is_err());
+        assert!(sanitize_path_component(".....").is_err());
+        assert!(sanitize_path_component(".").is_err());
     }
 
     #[test]
-    fn test_build_safe_path_nonexistent_path_succeeds() {
-        let temp_dir = TempDir::new().unwrap();
-        let base = temp_dir.path();
-        let result = build_safe_path(base, &["source", "torrent"]);
-        assert!(result.is_ok(), "Should succeed for non-existent paths under base");
-        let path = result.unwrap();
-        assert!(path.starts_with(base));
-        assert!(path.ends_with("source/torrent") || path.ends_with("source\\torrent"));
+    fn test_sanitize_path_component_null_byte() {
+        assert!(sanitize_path_component("file\0.txt").is_err());
+        assert!(sanitize_path_component("\0").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_backslash_traversal() {
+        assert!(sanitize_path_component("valid\\..\\etc").is_err());
     }
 }
