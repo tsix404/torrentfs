@@ -12,8 +12,23 @@ use crate::piece_cache::PieceCache;
 use torrentfs_libtorrent::{AlertType, Session};
 
 pub fn sanitize_path_component(component: &str) -> Result<String> {
+    if component.is_empty() {
+        bail!("Path component is empty");
+    }
+
+    if component.contains('\0') {
+        bail!("Path component contains null byte which is not allowed");
+    }
+
+    if component.contains("..") {
+        bail!("Path component contains '..' which is not allowed");
+    }
+
+    if component.starts_with('.') || component.ends_with('.') {
+        bail!("Path component cannot start or end with '.'");
+    }
+
     let path = Path::new(component);
-    
     for part in path.components() {
         match part {
             Component::ParentDir => {
@@ -25,17 +40,23 @@ pub fn sanitize_path_component(component: &str) -> Result<String> {
             Component::Prefix(_) => {
                 bail!("Path component contains Windows prefix which is not allowed")
             }
+            Component::CurDir => {
+                bail!("Path component contains '.' which is not allowed")
+            }
             _ => {}
         }
     }
-    
+
     let sanitized = component
-        .replace("..", "")
         .replace('/', "_")
         .replace('\\', "_");
     
     if sanitized.is_empty() {
         bail!("Path component is empty after sanitization");
+    }
+    
+    if sanitized.starts_with('.') || sanitized.ends_with('.') {
+        bail!("Path component cannot start or end with '.' after sanitization");
     }
     
     Ok(sanitized)
@@ -383,9 +404,32 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_path_component_null_byte() {
+        assert!(sanitize_path_component("file\0.txt").is_err());
+        assert!(sanitize_path_component("\0file").is_err());
+    }
+
+    #[test]
     fn test_sanitize_path_component_dots() {
-        assert_eq!(sanitize_path_component("..file").unwrap(), "file");
-        assert_eq!(sanitize_path_component("file..").unwrap(), "file");
-        assert_eq!(sanitize_path_component("...").unwrap(), ".");
+        assert!(sanitize_path_component("..file").is_err());
+        assert!(sanitize_path_component("file..").is_err());
+        assert!(sanitize_path_component("...").is_err());
+        assert!(sanitize_path_component(".").is_err());
+        assert!(sanitize_path_component("....").is_err());
+        assert!(sanitize_path_component(".....").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_edge_cases() {
+        assert!(sanitize_path_component(".").is_err());
+        assert!(sanitize_path_component(".hidden").is_err());
+        assert!(sanitize_path_component("file.").is_err());
+        assert!(sanitize_path_component("valid.file.name").is_ok());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_backslash_unix() {
+        assert!(sanitize_path_component("valid\\..\\etc").is_err());
+        assert_eq!(sanitize_path_component("valid\\path\\name").unwrap(), "valid_path_name");
     }
 }
