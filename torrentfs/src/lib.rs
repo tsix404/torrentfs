@@ -13,7 +13,7 @@ pub use download::DownloadCoordinator;
 pub use metadata::MetadataManager;
 pub use piece_cache::PieceCache;
 pub use repo::{TorrentRepo, TorrentWithData};
-pub use runtime::TorrentRuntime;
+pub use runtime::{TorrentRuntime, sanitize_path_component, build_safe_path};
 
 pub async fn init(state_dir: &std::path::Path) -> anyhow::Result<TorrentRuntime> {
     let runtime = TorrentRuntime::new(state_dir).await?;

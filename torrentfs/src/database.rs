@@ -11,15 +11,14 @@ pub struct Database {
 
 impl Database {
     /// Initialize the database connection pool.
-    /// Creates the state directory and db subdirectory if they don't exist.
+    /// Creates the state directory if it doesn't exist.
     pub async fn new(state_dir: &std::path::Path) -> Result<Self> {
-        let db_dir = state_dir.join("db");
-        let db_path = db_dir.join("metadata.db");
+        let db_path = state_dir.join("metadata.db");
         
-        // Create db directory if it doesn't exist
-        if !db_dir.exists() {
-            std::fs::create_dir_all(&db_dir)
-                .with_context(|| format!("Failed to create db directory: {:?}", db_dir))?;
+        // Create state directory if it doesn't exist
+        if !state_dir.exists() {
+            std::fs::create_dir_all(state_dir)
+                .with_context(|| format!("Failed to create state directory: {:?}", state_dir))?;
         }
         
         let connect_options = SqliteConnectOptions::from_str(&db_path.to_string_lossy())?
