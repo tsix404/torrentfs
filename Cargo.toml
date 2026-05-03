@@ -29,3 +29,4 @@ sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "sqlite"] }
 dirs = "5.0"
 hex = "0.4"
 percent-encoding = "2.3"
+unicode-normalization = "0.1"

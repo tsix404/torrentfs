@@ -4,6 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::alert_loop::{AlertLoop, AlertLoopMessage};
 use crate::database::Database;
@@ -74,19 +75,21 @@ pub fn sanitize_path_component(component: &str) -> Result<String> {
         bail!("Path component contains null byte which is not allowed");
     }
     
-    if decoded_str.contains("..") {
+    let normalized: String = decoded_str.nfkc().collect();
+    
+    if normalized.contains("..") {
         bail!("Path component contains '..' sequence which is not allowed");
     }
     
-    if decoded_str.contains('/') || decoded_str.contains('\\') {
+    if normalized.contains('/') || normalized.contains('\\') {
         bail!("Path component contains path separator which is not allowed");
     }
     
-    if decoded_str == "." {
+    if normalized == "." {
         bail!("Path component is '.' which is not allowed");
     }
     
-    let path = Path::new(&decoded_str);
+    let path = Path::new(&normalized);
 
     for part in path.components() {
         match part {
@@ -524,5 +527,30 @@ mod tests {
         assert!(sanitize_path_component("%").is_err());
         assert!(sanitize_path_component("%2").is_err());
     }
+
+    #[test]
+    fn test_sanitize_path_component_unicode_debug() {
+        let test1 = "\u{FF0E}\u{FF0E}";
+        let test2 = "\u{FE52}\u{FE52}";
+        
+        let nfc1: String = test1.nfc().collect();
+        let nfc2: String = test2.nfc().collect();
+        let nfkc1: String = test1.nfkc().collect();
+        let nfkc2: String = test2.nfkc().collect();
+        
+        eprintln!("Fullwidth NFC: {:?}", nfc1);
+        eprintln!("Small form NFC: {:?}", nfc2);
+        eprintln!("Fullwidth NFKC: {:?}", nfkc1);
+        eprintln!("Small form NFKC: {:?}", nfkc2);
+    }
+
+    #[test]
+    fn test_sanitize_path_component_unicode_homoglyphs() {
+        assert!(sanitize_path_component("\u{FF0E}\u{FF0E}").is_err());
+        assert!(sanitize_path_component("\u{FE52}\u{FE52}").is_err());
+        assert!(sanitize_path_component("\u{FF0E}").is_err());
+        assert!(sanitize_path_component("\u{FE52}").is_err());
+        assert!(sanitize_path_component("\u{FF0E}\u{FF0E}\u{FF0F}etc").is_err());
+        assert!(sanitize_path_component("\u{FE52}\u{FE52}\\etc").is_err());
     }
 }
