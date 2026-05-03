@@ -11,9 +11,19 @@ use crate::metadata::MetadataManager;
 use crate::piece_cache::PieceCache;
 use torrentfs_libtorrent::{AlertType, Session};
 
+const MAX_PATH_COMPONENT_LENGTH: usize = 255;
+
 pub fn sanitize_path_component(component: &str) -> Result<String> {
     if component.is_empty() {
         bail!("Path component is empty");
+    }
+    
+    if component.len() > MAX_PATH_COMPONENT_LENGTH {
+        bail!(
+            "Path component exceeds maximum length of {} bytes (got {} bytes)",
+            MAX_PATH_COMPONENT_LENGTH,
+            component.len()
+        );
     }
     
     if component.contains('\0') {
@@ -415,5 +425,17 @@ mod tests {
     #[test]
     fn test_sanitize_path_component_backslash_traversal() {
         assert!(sanitize_path_component("valid\\..\\etc").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_length_limit() {
+        let valid_length = "a".repeat(255);
+        assert_eq!(sanitize_path_component(&valid_length).unwrap(), valid_length);
+        
+        let too_long = "a".repeat(256);
+        assert!(sanitize_path_component(&too_long).is_err());
+        
+        let very_long = "a".repeat(10000);
+        assert!(sanitize_path_component(&very_long).is_err());
     }
 }
