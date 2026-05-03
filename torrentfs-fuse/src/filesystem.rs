@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::fuse_async::{FuseAsyncRuntime, FuseCommand, FuseError, TorrentInfo, FileInfo, ParsedTorrentInfo, PersistResult, FileInfoForRead};
-use torrentfs::metadata::MetadataManager;
+use torrentfs::{metadata::MetadataManager, build_safe_path};
 use torrentfs_libtorrent::Session;
 
 const TTL: Duration = Duration::from_secs(1);
@@ -1567,12 +1567,20 @@ impl Filesystem for TorrentFsFilesystem {
         };
 
         if self.async_runtime.is_some() {
-            let save_path = self.state_dir
-                .join("data")
-                .join(&source_path)
-                .join(&name)
-                .to_string_lossy()
-                .into_owned();
+            let save_path_result = build_safe_path(
+                &self.state_dir.join("data"),
+                &[&source_path, &name]
+            );
+            
+            let save_path = match save_path_result {
+                Ok(p) => p.to_string_lossy().into_owned(),
+                Err(e) => {
+                    tracing::error!("Path traversal attempt blocked for '{}': {}", name, e);
+                    self.metadata_entries.remove(&ino);
+                    reply.error(EINVAL);
+                    return;
+                }
+            };
 
             match self.process_torrent_data_safe(&data, &source_path) {
                 Ok(parsed) => {
