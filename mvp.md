@@ -41,11 +41,11 @@ TorrentFS 是一个基于 FUSE 用户态文件系统的 BitTorrent 虚拟文件�
 ~/.local/share/torrentfs/
 ├── db/
 │   └── metadata.db          # SQLite（torrents + torrent_files 表）
-├── cache/
-│   └── pieces/<info_hash>/  # 分块缓存（按 info_hash 组织）
-└── state/
-    └── resume/              # resume_data 快照
+└── cache/
+    └── pieces/<info_hash>/  # 分块缓存（按 info_hash 组织）
 ```
+
+**Note:** Resume data is stored in the `torrents.resume_data` BLOB column in the database, not as separate files. This provides transactional integrity and simplifies backup/migration.
 
 ## 数据库 Schema
 
