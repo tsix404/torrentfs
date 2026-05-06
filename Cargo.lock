@@ -2101,6 +2101,7 @@ dependencies = [
  "fuser",
  "hex",
  "libc",
+ "percent-encoding",
  "rand",
  "serial_test",
  "sqlx",

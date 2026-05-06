@@ -3,6 +3,7 @@ use fuser::{
     ReplyOpen, ReplyWrite, Request, ReplyCreate,
 };
 use libc::{EEXIST, EINVAL, ENOENT, ENOTDIR, EFBIG, EIO};
+use percent_encoding::percent_decode;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
@@ -272,8 +273,29 @@ impl TorrentFsFilesystem {
     }
 }
 
+fn decode_fully(component: &str) -> String {
+    let mut current = component.to_string();
+    let max_iterations = 10;
+    
+    for _ in 0..max_iterations {
+        let decoded = match percent_decode(current.as_bytes()).decode_utf8() {
+            Ok(d) => d.to_string(),
+            Err(_) => return current,
+        };
+        
+        if decoded == current {
+            return decoded;
+        }
+        current = decoded;
+    }
+    
+    current
+}
+
 fn sanitize_path_component(name: &str) -> String {
-    let sanitized = name
+    let decoded = decode_fully(name);
+    
+    let sanitized = decoded
         .replace("..", "_")
         .replace('\\', "_")
         .replace('/', "_");
@@ -2262,6 +2284,33 @@ mod tests {
     fn test_sanitize_path_component_empty() {
         assert_eq!(sanitize_path_component(""), "_");
         assert_eq!(sanitize_path_component("."), "_");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_percent_encoded_slash() {
+        assert_eq!(sanitize_path_component("%2f"), "_");
+        assert_eq!(sanitize_path_component("%2F"), "_");
+        assert_eq!(sanitize_path_component("file%2fname"), "file_name");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_percent_encoded_backslash() {
+        assert_eq!(sanitize_path_component("%5c"), "_");
+        assert_eq!(sanitize_path_component("%5C"), "_");
+        assert_eq!(sanitize_path_component("path%5cfile"), "path_file");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_percent_encoded_dotdot() {
+        assert_eq!(sanitize_path_component("%2e%2e"), "_");
+        assert_eq!(sanitize_path_component("%2E%2E"), "_");
+        assert_eq!(sanitize_path_component("%2e%2e%2f%2e%2e"), "___");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_double_encoded() {
+        assert_eq!(sanitize_path_component("%252f"), "_");
+        assert_eq!(sanitize_path_component("%255c"), "_");
     }
 
     #[test]
