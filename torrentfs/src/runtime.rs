@@ -16,6 +16,9 @@ pub fn sanitize_path_component(component: &str) -> Result<String> {
     
     for part in path.components() {
         match part {
+            Component::CurDir => {
+                bail!("Path component contains current directory reference: '.' is not allowed")
+            }
             Component::ParentDir => {
                 bail!("Path component contains directory traversal: '..' is not allowed")
             }
@@ -29,8 +32,11 @@ pub fn sanitize_path_component(component: &str) -> Result<String> {
         }
     }
     
+    if component.contains("..") {
+        bail!("Path component contains directory traversal sequence '..'");
+    }
+    
     let sanitized = component
-        .replace("..", "")
         .replace('/', "_")
         .replace('\\', "_");
     
@@ -412,9 +418,13 @@ mod tests {
 
     #[test]
     fn test_sanitize_path_component_dots() {
-        assert_eq!(sanitize_path_component("..file").unwrap(), "file");
-        assert_eq!(sanitize_path_component("file..").unwrap(), "file");
-        assert_eq!(sanitize_path_component("...").unwrap(), ".");
+        assert!(sanitize_path_component(".").is_err());
+        assert!(sanitize_path_component("..").is_err());
+        assert!(sanitize_path_component("..file").is_err());
+        assert!(sanitize_path_component("file..").is_err());
+        assert!(sanitize_path_component("...").is_err());
+        assert!(sanitize_path_component("....").is_err());
+        assert!(sanitize_path_component("valid").is_ok());
     }
 
     #[test]
