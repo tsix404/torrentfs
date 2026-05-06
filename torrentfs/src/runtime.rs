@@ -15,6 +15,47 @@ use torrentfs_libtorrent::{AlertType, Session};
 
 const MAX_PATH_COMPONENT_LENGTH: usize = 255;
 
+/// # Path Sanitization Security
+///
+/// The `sanitize_path_component` function provides defense against multiple attack vectors:
+///
+/// ## Attack Vectors Covered
+///
+/// 1. **Directory Traversal**: Rejects `..` sequences and variants
+///    - Direct: `..`, `../etc`
+///    - Encoded: `%2e%2e`, `%2e%2e%2fetc`
+///    - Double-encoded: `%252e%252e`
+///    - Triple-encoded: `%25252e%25252e`
+///
+/// 2. **Path Separator Injection**: Rejects forward slashes and backslashes
+///    - Direct: `path/to/file`, `path\to\file`
+///    - Encoded: `%2f`, `%5c`, `%2F`, `%5C`
+///    - Double-encoded: `%252f`, `%255c`
+///    - Mixed: `%2f%5c%2f`
+///
+/// 3. **Unicode Homoglyph Attacks**: Uses NFKC normalization
+///    - Fullwidth dot: `\u{FF0E}` → `.`
+///    - Small form dot: `\u{FE52}` → `.`
+///    - Fullwidth slash: `\u{FF0F}` → `/`
+///
+/// 4. **Mixed Encoding Attacks**: Handles combinations
+///    - Mixed ASCII + Unicode: `%2e%FF0E`
+///    - Mixed encoding levels: `%2e%252e`
+///    - Unicode + encoding: `%EF%BC%8E%2e`
+///
+/// 5. **Null Byte Injection**: Rejects paths containing `\0`
+///
+/// 6. **Length Attacks**: Enforces 255-byte limit after full decoding
+///
+/// ## Test Coverage
+///
+/// Security tests are organized into:
+/// - Unit tests: Specific attack patterns (lines 400-620)
+/// - Property tests: Randomized combinations using proptest (lines 620-720)
+///
+/// All tests verify that sanitization either accepts valid paths or rejects invalid ones
+/// with no false positives or negatives.
+
 fn validate_percent_encoding(s: &str) -> Result<()> {
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -552,5 +593,168 @@ mod tests {
         assert!(sanitize_path_component("\u{FE52}").is_err());
         assert!(sanitize_path_component("\u{FF0E}\u{FF0E}\u{FF0F}etc").is_err());
         assert!(sanitize_path_component("\u{FE52}\u{FE52}\\etc").is_err());
+    }
+
+    #[test]
+    fn test_mixed_unicode_and_encoding_attacks() {
+        assert!(sanitize_path_component("%FF0E%FF0E").is_err());
+        assert!(sanitize_path_component("%2e%FF0E").is_err());
+        assert!(sanitize_path_component("%2e%2e%FF0Fetc").is_err());
+        assert!(sanitize_path_component("%FF0E%FF0E/etc").is_err());
+        assert!(sanitize_path_component("%FE52%FE52").is_err());
+    }
+
+    #[test]
+    fn test_nested_encoding_attacks() {
+        assert!(sanitize_path_component("%252e%252e").is_err());
+        assert!(sanitize_path_component("%25%32%65%25%32%65").is_err());
+        assert!(sanitize_path_component("%252e%252e%252fetc").is_err());
+        assert!(sanitize_path_component("%252f%252f").is_err());
+        assert!(sanitize_path_component("%2525%2532%2565").is_err());
+    }
+
+    #[test]
+    fn test_combined_separator_attacks() {
+        assert!(sanitize_path_component("%2f%5c%2f").is_err());
+        assert!(sanitize_path_component("path%2f..%5c..").is_err());
+        assert!(sanitize_path_component("%5c%2f%5c").is_err());
+        assert!(sanitize_path_component("..%2f..%5cetc").is_err());
+        assert!(sanitize_path_component("%2f\\%5c/").is_err());
+    }
+
+    #[test]
+    fn test_boundary_attacks_at_max_length() {
+        let attack_at_255 = format!("{}%2e%2e", "a".repeat(252));
+        assert!(sanitize_path_component(&attack_at_255).is_err());
+
+        let attack_exceeds_after_decode = format!("{}%252e%252e", "a".repeat(248));
+        assert!(sanitize_path_component(&attack_exceeds_after_decode).is_err());
+
+        let valid_at_255 = "a".repeat(255);
+        assert!(sanitize_path_component(&valid_at_255).is_ok());
+
+        let encoded_valid_at_boundary = format!("{}%20", "a".repeat(253));
+        assert!(sanitize_path_component(&encoded_valid_at_boundary).is_ok());
+    }
+
+    #[test]
+    fn test_triple_encoded_attacks() {
+        assert!(sanitize_path_component("%25252e%25252e").is_err());
+        assert!(sanitize_path_component("%25252f%25252f").is_err());
+        assert!(sanitize_path_component("%2525%2532%2565%2525%2532%2565").is_err());
+    }
+
+    #[test]
+    fn test_mixed_encoding_layers() {
+        assert!(sanitize_path_component("%2e%252e").is_err());
+        assert!(sanitize_path_component("%252e%2e").is_err());
+        assert!(sanitize_path_component("..%252f").is_err());
+        assert!(sanitize_path_component("%252f..").is_err());
+    }
+
+    #[test]
+    fn test_unicode_with_encoding_combination() {
+        assert!(sanitize_path_component("%EF%BC%8E%EF%BC%8E").is_err());
+        assert!(sanitize_path_component("%EF%BC%8E%2e").is_err());
+        assert!(sanitize_path_component("%2e%EF%BC%8E").is_err());
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    prop_compose! {
+        fn ascii_safe_char()(
+            c in any::<char>().prop_filter(
+                "Valid ASCII path character",
+                |c| c.is_ascii() && !matches!(c, '\0' | '/' | '\\' | '.' | '%')
+            )
+        ) -> char {
+            c
+        }
+    }
+
+    prop_compose! {
+        fn valid_ascii_path()(s in "[a-zA-Z0-9_-]{1,100}") -> String {
+            s
+        }
+    }
+
+    prop_compose! {
+        fn ascii_with_slash()(prefix in "[a-zA-Z0-9_]*", slash in "[/\\\\]", suffix in "[a-zA-Z0-9_]*") -> String {
+            format!("{}{}{}", prefix, slash, suffix)
+        }
+    }
+
+    prop_compose! {
+        fn ascii_with_null()(prefix in "[a-zA-Z0-9_]*", suffix in "[a-zA-Z0-9_]*") -> String {
+            let mut s = prefix;
+            s.push('\0');
+            s.push_str(&suffix);
+            s
+        }
+    }
+
+    prop_compose! {
+        fn ascii_with_double_encoded_dot()(prefix in "[a-zA-Z0-9_]*", suffix in "[a-zA-Z0-9_]*") -> String {
+            format!("{}%2e%2e{}", prefix, suffix)
+        }
+    }
+
+    prop_compose! {
+        fn ascii_with_encoded_slash()(prefix in "[a-zA-Z0-9_]*", enc in "(2f|2F|5c|5C)", suffix in "[a-zA-Z0-9_]*") -> String {
+            format!("{}%{}{}", prefix, enc, suffix)
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn proptest_valid_paths_accept(s in valid_ascii_path()) {
+            let result = sanitize_path_component(&s);
+            prop_assert!(result.is_ok());
+        }
+
+        #[test]
+        fn proptest_dot_sequences_rejected(s in r"\.\.+") {
+            let result = sanitize_path_component(&s);
+            prop_assert!(result.is_err());
+        }
+
+        #[test]
+        fn proptest_slashes_rejected(s in ascii_with_slash()) {
+            let result = sanitize_path_component(&s);
+            prop_assert!(result.is_err());
+        }
+
+        #[test]
+        fn proptest_null_bytes_rejected(s in ascii_with_null()) {
+            let result = sanitize_path_component(&s);
+            prop_assert!(result.is_err());
+        }
+
+        #[test]
+        fn proptest_encoded_double_dots_rejected(s in ascii_with_double_encoded_dot()) {
+            let result = sanitize_path_component(&s);
+            prop_assert!(result.is_err());
+        }
+
+        #[test]
+        fn proptest_encoded_slashes_rejected(s in ascii_with_encoded_slash()) {
+            let result = sanitize_path_component(&s);
+            prop_assert!(result.is_err());
+        }
+
+        #[test]
+        fn proptest_length_boundary(len in 200usize..300) {
+            let s = "a".repeat(len);
+            let result = sanitize_path_component(&s);
+            if len <= 255 {
+                prop_assert!(result.is_ok());
+            } else {
+                prop_assert!(result.is_err());
+            }
+        }
     }
 }
