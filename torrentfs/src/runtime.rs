@@ -135,9 +135,6 @@ pub fn sanitize_path_component(component: &str) -> Result<String> {
 
     for part in path.components() {
         match part {
-            Component::ParentDir => {
-                bail!("Path component contains directory traversal: '..' is not allowed")
-            }
             Component::RootDir => {
                 bail!("Path component contains absolute path: root directory is not allowed")
             }
