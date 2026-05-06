@@ -1590,9 +1590,12 @@ impl Filesystem for TorrentFsFilesystem {
         };
 
         if self.async_runtime.is_some() {
+            let source_parts: Vec<&str> = source_path.split('/').filter(|p| !p.is_empty()).collect();
+            let mut all_parts: Vec<&str> = source_parts.iter().map(|s| *s).collect();
+            all_parts.push(&name);
             let save_path_result = build_safe_path(
                 &self.state_dir.join("data"),
-                &[&source_path, &name]
+                &all_parts
             );
             
             let save_path = match save_path_result {

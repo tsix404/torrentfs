@@ -224,9 +224,12 @@ impl TorrentRuntime {
                 continue;
             }
             
+            let source_parts: Vec<&str> = source_path.split('/').filter(|p| !p.is_empty()).collect();
+            let mut all_parts: Vec<&str> = source_parts.iter().map(|s| *s).collect();
+            all_parts.push(torrent_name.as_str());
             let save_path = build_safe_path(
                 &self.state_dir.join("data"),
-                &[source_path.as_str(), torrent_name.as_str()]
+                &all_parts
             )?;
             
             let save_path_str = save_path.to_string_lossy().into_owned();
@@ -552,5 +555,54 @@ mod tests {
         assert!(sanitize_path_component("\u{FE52}").is_err());
         assert!(sanitize_path_component("\u{FF0E}\u{FF0E}\u{FF0F}etc").is_err());
         assert!(sanitize_path_component("\u{FE52}\u{FE52}\\etc").is_err());
+    }
+
+    #[test]
+    fn test_build_safe_path_with_multilevel_source_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+        let path = build_safe_path(base, &["movies", "2024", "torrent"]).unwrap();
+        assert!(path.starts_with(base));
+        assert!(path.to_str().unwrap().contains("movies"));
+        assert!(path.to_str().unwrap().contains("2024"));
+        assert!(path.to_str().unwrap().contains("torrent"));
+    }
+
+    #[test]
+    fn test_build_safe_path_with_empty_source_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+        let path = build_safe_path(base, &["torrent"]).unwrap();
+        assert!(path.starts_with(base));
+        assert!(path.ends_with("torrent") || path.to_str().unwrap().ends_with("torrent"));
+    }
+
+    #[test]
+    fn test_build_safe_path_with_deeply_nested_source_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+        let path = build_safe_path(base, &["a", "b", "c", "d", "e", "torrent"]).unwrap();
+        assert!(path.starts_with(base));
+        assert!(path.to_str().unwrap().contains("a"));
+        assert!(path.to_str().unwrap().contains("b"));
+        assert!(path.to_str().unwrap().contains("c"));
+        assert!(path.to_str().unwrap().contains("d"));
+        assert!(path.to_str().unwrap().contains("e"));
+    }
+
+    #[test]
+    fn test_build_safe_path_source_path_traversal_blocked() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+        let result = build_safe_path(base, &["..", "etc", "torrent"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_safe_path_with_slash_in_component_blocked() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+        let result = build_safe_path(base, &["movies/2024", "torrent"]);
+        assert!(result.is_err(), "Should reject single component with /");
     }
 }
