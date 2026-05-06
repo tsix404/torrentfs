@@ -38,6 +38,7 @@ pub enum FuseCommand {
         reply: oneshot::Sender<Result<PersistResult, FuseError>>,
     },
     GetFileInfoForInode {
+        source_path: String,
         torrent_name: String,
         file_path: String,
         reply: oneshot::Sender<Result<FileInfoForRead, FuseError>>,
@@ -263,8 +264,8 @@ impl FuseAsyncRuntime {
                     let result = Self::handle_persist_to_db(&metadata_manager.repo, &parsed).await;
                     let _ = reply.send(result);
                 }
-                FuseCommand::GetFileInfoForInode { torrent_name, file_path, reply } => {
-                    let result = Self::handle_get_file_info_for_inode(&metadata_manager, &torrent_name, &file_path).await;
+                FuseCommand::GetFileInfoForInode { source_path, torrent_name, file_path, reply } => {
+                    let result = Self::handle_get_file_info_for_inode(&metadata_manager, &source_path, &torrent_name, &file_path).await;
                     let _ = reply.send(result);
                 }
                 FuseCommand::ReadFilePiece { info_hash, piece_index, reply } => {
@@ -392,15 +393,16 @@ impl FuseAsyncRuntime {
     
     async fn handle_get_file_info_for_inode(
         metadata_manager: &MetadataManager,
+        source_path: &str,
         torrent_name: &str,
         file_path: &str,
     ) -> Result<FileInfoForRead, FuseError> {
         let torrent = metadata_manager
             .repo
-            .find_by_name(torrent_name)
+            .find_by_name_and_source_path(torrent_name, source_path)
             .await
             .map_err(|e| FuseError::DatabaseError(e.to_string()))?
-            .ok_or_else(|| FuseError::DatabaseError(format!("Torrent '{}' not found", torrent_name)))?;
+            .ok_or_else(|| FuseError::DatabaseError(format!("Torrent '{}' with source_path '{}' not found", torrent_name, source_path)))?;
         
         let info_hash = hex::encode(&torrent.info_hash);
         

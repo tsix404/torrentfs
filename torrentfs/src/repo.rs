@@ -183,6 +183,30 @@ impl TorrentRepo {
         }))
     }
 
+    pub async fn find_by_name_and_source_path(&self, name: &str, source_path: &str) -> Result<Option<Torrent>> {
+        let row = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, String, String, Option<Vec<u8>>, Option<Vec<u8>>, String)>(
+            "SELECT id, info_hash, name, total_size, file_count, status, source_path, torrent_data, resume_data, added_at
+             FROM torrents WHERE name = ? AND source_path = ?",
+        )
+        .bind(name)
+        .bind(source_path)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| Torrent {
+            id: r.0,
+            info_hash: r.1,
+            name: r.2,
+            total_size: r.3,
+            file_count: r.4,
+            status: r.5,
+            source_path: r.6,
+            torrent_data: r.7,
+            resume_data: r.8,
+            added_at: r.9,
+        }))
+    }
+
     pub async fn insert_files(&self, torrent_id: i64, files: Vec<FileEntry>) -> Result<()> {
         for file in files {
             sqlx::query(
@@ -798,5 +822,35 @@ mod tests {
 
         let found = repo.find_by_info_hash(&info_hash).await.unwrap();
         assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_find_by_name_and_source_path() {
+        let (_temp_dir, pool) = setup_test_db().await;
+        let repo = TorrentRepo::new(pool);
+
+        let hash = vec![0xAA; 20];
+        repo.insert(&hash, "test_torrent", 100, 1, "a/b", None::<&[u8]>).await.unwrap();
+        repo.insert(&vec![0xBB; 20], "test_torrent", 200, 2, "", None::<&[u8]>).await.unwrap();
+
+        let found = repo.find_by_name_and_source_path("test_torrent", "a/b").await.unwrap();
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(found.name, "test_torrent");
+        assert_eq!(found.source_path, "a/b");
+        assert_eq!(found.total_size, 100);
+
+        let found = repo.find_by_name_and_source_path("test_torrent", "").await.unwrap();
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(found.name, "test_torrent");
+        assert_eq!(found.source_path, "");
+        assert_eq!(found.total_size, 200);
+
+        let not_found = repo.find_by_name_and_source_path("test_torrent", "other").await.unwrap();
+        assert!(not_found.is_none());
+
+        let not_found = repo.find_by_name_and_source_path("nonexistent", "").await.unwrap();
+        assert!(not_found.is_none());
     }
 }
