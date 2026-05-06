@@ -16,6 +16,7 @@ use torrentfs_libtorrent::Session;
 
 const TTL: Duration = Duration::from_secs(1);
 const MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
+const MAX_PATH_COMPONENT_LENGTH: usize = 255;
 
 pub const INO_ROOT: u64 = 1;
 pub const INO_METADATA: u64 = 2;
@@ -278,10 +279,16 @@ fn sanitize_path_component(name: &str) -> String {
         .replace('\\', "_")
         .replace('/', "_");
     
-    if sanitized.is_empty() || sanitized == "." {
+    let result = if sanitized.is_empty() || sanitized == "." {
         "_".to_string()
     } else {
         sanitized
+    };
+    
+    if result.len() > MAX_PATH_COMPONENT_LENGTH {
+        result[..MAX_PATH_COMPONENT_LENGTH].to_string()
+    } else {
+        result
     }
 }
 
@@ -2286,5 +2293,19 @@ mod tests {
     #[test]
     fn test_sanitize_path_mixed() {
         assert_eq!(sanitize_path("valid/../escape\\path"), "valid/_/escape_path");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_length_limit() {
+        let short_name = "a".repeat(100);
+        assert_eq!(sanitize_path_component(&short_name), short_name);
+        
+        let exact_limit = "b".repeat(255);
+        assert_eq!(sanitize_path_component(&exact_limit).len(), 255);
+        
+        let too_long = "c".repeat(300);
+        let result = sanitize_path_component(&too_long);
+        assert_eq!(result.len(), 255);
+        assert!(result.chars().all(|c| c == 'c'));
     }
 }
