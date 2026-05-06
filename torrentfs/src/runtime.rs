@@ -11,6 +11,7 @@ use crate::database::Database;
 use crate::download::DownloadCoordinator;
 use crate::metadata::MetadataManager;
 use crate::piece_cache::PieceCache;
+use crate::resume_saver::{ResumeSaver, ResumeSaverConfig};
 use torrentfs_libtorrent::{AlertType, Session};
 
 const MAX_PATH_COMPONENT_LENGTH: usize = 255;
@@ -142,8 +143,24 @@ pub struct TorrentRuntime {
     state_dir: std::path::PathBuf,
 }
 
+pub struct TorrentRuntimeConfig {
+    pub resume_save_interval: Duration,
+}
+
+impl Default for TorrentRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            resume_save_interval: Duration::from_secs(300),
+        }
+    }
+}
+
 impl TorrentRuntime {
     pub async fn new(state_dir: &Path) -> Result<Self> {
+        Self::with_config(state_dir, TorrentRuntimeConfig::default()).await
+    }
+
+    pub async fn with_config(state_dir: &Path, config: TorrentRuntimeConfig) -> Result<Self> {
         let db = Arc::new(Database::new(state_dir).await?);
         db.migrate().await?;
         
@@ -165,6 +182,14 @@ impl TorrentRuntime {
         );
         
         tokio::spawn(alert_loop.run());
+
+        let resume_saver_config = ResumeSaverConfig::new(config.resume_save_interval);
+        let resume_saver = ResumeSaver::new(
+            Arc::clone(&session),
+            resume_saver_config,
+            shutdown_tx.subscribe(),
+        );
+        tokio::spawn(resume_saver.run());
         
         let runtime = Self {
             db,
@@ -373,6 +398,30 @@ mod tests {
         let runtime = TorrentRuntime::new(temp_dir.path()).await.unwrap();
         assert!(runtime.db.pool().acquire().await.is_ok());
         assert!(runtime.session.pop_alerts().is_empty() || !runtime.session.pop_alerts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_with_config_default() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = TorrentRuntimeConfig::default();
+        let result = TorrentRuntime::with_config(temp_dir.path(), config).await;
+        assert!(result.is_ok(), "with_config() should return Ok: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_with_config_custom_interval() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = TorrentRuntimeConfig {
+            resume_save_interval: Duration::from_secs(60),
+        };
+        let result = TorrentRuntime::with_config(temp_dir.path(), config).await;
+        assert!(result.is_ok(), "with_config() with custom interval should return Ok: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_config_default_interval() {
+        let config = TorrentRuntimeConfig::default();
+        assert_eq!(config.resume_save_interval, Duration::from_secs(300));
     }
 
     #[tokio::test]
