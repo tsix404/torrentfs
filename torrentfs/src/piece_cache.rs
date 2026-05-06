@@ -41,26 +41,36 @@ impl PieceCache {
             .join("pieces"))
     }
 
-    fn piece_path(&self, info_hash: &str, piece_idx: u32) -> PathBuf {
-        self.cache_dir.join(info_hash).join(format!("{}.piece", piece_idx))
+    fn validate_info_hash(info_hash: &str) -> Result<()> {
+        if info_hash.len() == 40 && info_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            Ok(())
+        } else {
+            Err(crate::error::TorrentFsError::InvalidInfoHash(info_hash.to_string()).into())
+        }
+    }
+
+    fn piece_path(&self, info_hash: &str, piece_idx: u32) -> Result<PathBuf> {
+        Self::validate_info_hash(info_hash)?;
+        Ok(self.cache_dir.join(info_hash).join(format!("{}.piece", piece_idx)))
     }
 
     pub fn has_piece(&self, info_hash: &str, piece_idx: u32) -> bool {
-        self.piece_path(info_hash, piece_idx).exists()
+        self.piece_path(info_hash, piece_idx).map(|p| p.exists()).unwrap_or(false)
     }
 
     pub fn read_piece(&self, info_hash: &str, piece_idx: u32) -> Result<Vec<u8>> {
-        let path = self.piece_path(info_hash, piece_idx);
+        let path = self.piece_path(info_hash, piece_idx)?;
         std::fs::read(&path).map_err(Into::into)
     }
 
     pub fn write_piece(&self, info_hash: &str, piece_idx: u32, data: &[u8]) -> Result<()> {
+        Self::validate_info_hash(info_hash)?;
         let piece_dir = self.cache_dir.join(info_hash);
         if !piece_dir.exists() {
             std::fs::create_dir_all(&piece_dir)?;
         }
 
-        let final_path = self.piece_path(info_hash, piece_idx);
+        let final_path = self.piece_path(info_hash, piece_idx)?;
         let temp_path = final_path.with_extension("tmp");
 
         std::fs::write(&temp_path, data)?;
@@ -207,5 +217,51 @@ mod tests {
 
         let data = cache.read_piece(info_hash, piece_idx).unwrap();
         assert_eq!(data, b"updated");
+    }
+
+    #[test]
+    fn test_invalid_info_hash_traversal_attack() {
+        let (_temp_dir, cache) = setup();
+        let malicious_hash = "../etc";
+        let piece_idx = 0u32;
+
+        let result = cache.write_piece(malicious_hash, piece_idx, b"malicious");
+        assert!(result.is_err());
+        assert!(!cache.has_piece(malicious_hash, piece_idx));
+
+        let result = cache.read_piece(malicious_hash, piece_idx);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_info_hash_wrong_length() {
+        let (_temp_dir, cache) = setup();
+        let invalid_hash = "abc123";
+        let piece_idx = 0u32;
+
+        let result = cache.write_piece(invalid_hash, piece_idx, b"data");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_info_hash_invalid_chars() {
+        let (_temp_dir, cache) = setup();
+        let invalid_hash = "gggggggggggggggggggggggggggggggggggggggg";
+        let piece_idx = 0u32;
+
+        let result = cache.write_piece(invalid_hash, piece_idx, b"data");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_valid_info_hash_accepted() {
+        let (_temp_dir, cache) = setup();
+        let valid_hash = "0123456789abcdef0123456789abcdef01234567";
+        let piece_idx = 0u32;
+
+        cache.write_piece(valid_hash, piece_idx, b"data").unwrap();
+        assert!(cache.has_piece(valid_hash, piece_idx));
+        let data = cache.read_piece(valid_hash, piece_idx).unwrap();
+        assert_eq!(data, b"data");
     }
 }
