@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::fuse_async::{FuseAsyncRuntime, FuseCommand, FuseError, TorrentInfo, FileInfo, ParsedTorrentInfo, PersistResult, FileInfoForRead};
-use torrentfs::{metadata::MetadataManager, build_safe_path};
+use torrentfs::{metadata::MetadataManager, build_safe_path, sanitize_path_component};
 use torrentfs_libtorrent::Session;
 
 const TTL: Duration = Duration::from_secs(1);
@@ -270,26 +270,6 @@ impl TorrentFsFilesystem {
         }
         self.metadata_dirs.contains_key(&ino)
     }
-}
-
-fn sanitize_path_component(name: &str) -> String {
-    let sanitized = name
-        .replace("..", "_")
-        .replace('\\', "_")
-        .replace('/', "_");
-    
-    if sanitized.is_empty() || sanitized == "." {
-        "_".to_string()
-    } else {
-        sanitized
-    }
-}
-
-fn sanitize_path(path: &str) -> String {
-    path.split('/')
-        .map(|component| sanitize_path_component(component))
-        .collect::<Vec<_>>()
-        .join("/")
 }
 
 impl TorrentFsFilesystem {
@@ -1577,11 +1557,32 @@ impl Filesystem for TorrentFsFilesystem {
         let data = open_file.data.clone();
         
         let raw_name = path.rsplit('/').next().unwrap_or(&path).to_string();
-        let name = sanitize_path_component(&raw_name);
+        let name = match sanitize_path_component(&raw_name) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::error!("Path traversal attempt blocked for '{}': {}", raw_name, e);
+                self.metadata_entries.remove(&ino);
+                reply.error(EINVAL);
+                return;
+            }
+        };
+        
         let source_path = if path.contains('/') {
             let parts: Vec<&str> = path.rsplitn(2, '/').collect();
             if parts.len() > 1 {
-                sanitize_path(parts[1])
+                let mut sanitized_parts = Vec::new();
+                for part in parts[1].split('/') {
+                    match sanitize_path_component(part) {
+                        Ok(p) => sanitized_parts.push(p),
+                        Err(e) => {
+                            tracing::error!("Path traversal attempt in source_path '{}': {}", part, e);
+                            self.metadata_entries.remove(&ino);
+                            reply.error(EINVAL);
+                            return;
+                        }
+                    }
+                }
+                sanitized_parts.join("/")
             } else {
                 String::new()
             }
@@ -2237,54 +2238,30 @@ mod tests {
 
     #[test]
     fn test_sanitize_path_component_normal() {
-        assert_eq!(sanitize_path_component("file.txt"), "file.txt");
-        assert_eq!(sanitize_path_component("my-torrent"), "my-torrent");
+        assert!(sanitize_path_component("file.txt").is_ok());
+        assert!(sanitize_path_component("my-torrent").is_ok());
     }
 
     #[test]
-    fn test_sanitize_path_component_traversal() {
-        assert_eq!(sanitize_path_component(".."), "_");
-        assert_eq!(sanitize_path_component("../../../etc/passwd"), "______etc_passwd");
+    fn test_sanitize_path_component_traversal_blocked() {
+        assert!(sanitize_path_component("..").is_err());
+        assert!(sanitize_path_component("../../../etc/passwd").is_err());
     }
 
     #[test]
-    fn test_sanitize_path_component_backslash() {
-        assert_eq!(sanitize_path_component("..\\passwd"), "__passwd");
-        assert_eq!(sanitize_path_component("folder\\file"), "folder_file");
+    fn test_sanitize_path_component_backslash_blocked() {
+        assert!(sanitize_path_component("..\\passwd").is_err());
+        assert!(sanitize_path_component("folder\\file").is_err());
     }
 
     #[test]
-    fn test_sanitize_path_component_slash() {
-        assert_eq!(sanitize_path_component("path/to/file"), "path_to_file");
+    fn test_sanitize_path_component_slash_blocked() {
+        assert!(sanitize_path_component("path/to/file").is_err());
     }
 
     #[test]
-    fn test_sanitize_path_component_empty() {
-        assert_eq!(sanitize_path_component(""), "_");
-        assert_eq!(sanitize_path_component("."), "_");
-    }
-
-    #[test]
-    fn test_sanitize_path_normal() {
-        assert_eq!(sanitize_path("media/video"), "media/video");
-        assert_eq!(sanitize_path("anime/series/2024"), "anime/series/2024");
-    }
-
-    #[test]
-    fn test_sanitize_path_traversal() {
-        assert_eq!(sanitize_path("../etc/passwd"), "_/etc/passwd");
-        assert_eq!(sanitize_path("../../data"), "_/_/data");
-        assert_eq!(sanitize_path("normal/../../../escape"), "normal/_/_/_/escape");
-    }
-
-    #[test]
-    fn test_sanitize_path_backslash() {
-        assert_eq!(sanitize_path("media\\video"), "media_video");
-        assert_eq!(sanitize_path("..\\windows\\system"), "__windows_system");
-    }
-
-    #[test]
-    fn test_sanitize_path_mixed() {
-        assert_eq!(sanitize_path("valid/../escape\\path"), "valid/_/escape_path");
+    fn test_sanitize_path_component_empty_blocked() {
+        assert!(sanitize_path_component("").is_err());
+        assert!(sanitize_path_component(".").is_err());
     }
 }
