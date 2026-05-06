@@ -1567,7 +1567,7 @@ impl Filesystem for TorrentFsFilesystem {
             }
         };
         
-        let source_path = if path.contains('/') {
+        let mut source_path_parts: Vec<String> = if path.contains('/') {
             let parts: Vec<&str> = path.rsplitn(2, '/').collect();
             if parts.len() > 1 {
                 let mut sanitized_parts = Vec::new();
@@ -1582,18 +1582,21 @@ impl Filesystem for TorrentFsFilesystem {
                         }
                     }
                 }
-                sanitized_parts.join("/")
+                sanitized_parts
             } else {
-                String::new()
+                Vec::new()
             }
         } else {
-            String::new()
+            Vec::new()
         };
 
         if self.async_runtime.is_some() {
+            let mut all_parts: Vec<&str> = source_path_parts.iter().map(|s| s.as_str()).collect();
+            all_parts.push(&name);
+            
             let save_path_result = build_safe_path(
                 &self.state_dir.join("data"),
-                &[&source_path, &name]
+                &all_parts
             );
             
             let save_path = match save_path_result {
@@ -1606,7 +1609,8 @@ impl Filesystem for TorrentFsFilesystem {
                 }
             };
 
-            match self.process_torrent_data_safe(&data, &source_path) {
+            let source_path_str = source_path_parts.join("/");
+            match self.process_torrent_data_safe(&data, &source_path_str) {
                 Ok(parsed) => {
                     match self.persist_to_db_safe(&parsed) {
                         Ok(PersistResult::Inserted) => {
@@ -1621,11 +1625,11 @@ impl Filesystem for TorrentFsFilesystem {
                             tracing::info!(
                                 "Processed torrent '{}' ({} files, {} bytes) - kept in metadata/{}",
                                 name, parsed.file_count, parsed.total_size, 
-                                if source_path.is_empty() { "".to_string() } else { format!("/{}/", source_path) }
+                                if source_path_str.is_empty() { "".to_string() } else { format!("/{}/", source_path_str) }
                             );
                         }
                         Ok(PersistResult::AlreadyExists) => {
-                            tracing::info!("Torrent '{}' (source: '{}') already exists in database, skipping (idempotent)", name, source_path);
+                            tracing::info!("Torrent '{}' (source: '{}') already exists in database, skipping (idempotent)", name, source_path_str);
                         }
                         Err(e) => {
                             tracing::error!("Failed to persist torrent to DB: {}", e);

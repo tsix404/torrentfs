@@ -1,6 +1,21 @@
 use std::path::{Path, PathBuf};
 
-use crate::error::Result;
+use crate::error::{Result, TorrentFsError};
+
+fn validate_info_hash(info_hash: &str) -> Result<()> {
+    if info_hash.len() != 40 {
+        return Err(TorrentFsError::Parse(format!(
+            "Invalid info_hash length: expected 40 characters, got {}",
+            info_hash.len()
+        )));
+    }
+    if !info_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(TorrentFsError::Parse(
+            "Invalid info_hash: must contain only hex digits (0-9, a-f)".to_string()
+        ));
+    }
+    Ok(())
+}
 
 pub struct PieceCache {
     cache_dir: PathBuf,
@@ -46,15 +61,20 @@ impl PieceCache {
     }
 
     pub fn has_piece(&self, info_hash: &str, piece_idx: u32) -> bool {
+        if validate_info_hash(info_hash).is_err() {
+            return false;
+        }
         self.piece_path(info_hash, piece_idx).exists()
     }
 
     pub fn read_piece(&self, info_hash: &str, piece_idx: u32) -> Result<Vec<u8>> {
+        validate_info_hash(info_hash)?;
         let path = self.piece_path(info_hash, piece_idx);
         std::fs::read(&path).map_err(Into::into)
     }
 
     pub fn write_piece(&self, info_hash: &str, piece_idx: u32, data: &[u8]) -> Result<()> {
+        validate_info_hash(info_hash)?;
         let piece_dir = self.cache_dir.join(info_hash);
         if !piece_dir.exists() {
             std::fs::create_dir_all(&piece_dir)?;
