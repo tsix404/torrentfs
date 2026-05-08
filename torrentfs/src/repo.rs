@@ -261,7 +261,7 @@ impl TorrentRepo {
         Ok(())
     }
 
-    pub async fn delete(&self, info_hash: &[u8]) -> Result<()> {
+    pub async fn delete_torrent(&self, info_hash: &[u8]) -> Result<()> {
         sqlx::query(
             "DELETE FROM torrents WHERE info_hash = ?",
         )
@@ -685,7 +685,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete() {
+    async fn test_delete_torrent() {
         let (_temp_dir, pool) = setup_test_db().await;
         let repo = TorrentRepo::new(pool);
 
@@ -697,14 +697,14 @@ mod tests {
         let found = repo.find_by_info_hash(&info_hash).await.unwrap();
         assert!(found.is_some());
 
-        repo.delete(&info_hash).await.unwrap();
+        repo.delete_torrent(&info_hash).await.unwrap();
 
         let found = repo.find_by_info_hash(&info_hash).await.unwrap();
         assert!(found.is_none());
     }
 
     #[tokio::test]
-    async fn test_delete_with_files() {
+    async fn test_delete_torrent_with_files() {
         let (_temp_dir, pool) = setup_test_db().await;
         let repo = TorrentRepo::new(pool);
 
@@ -739,19 +739,19 @@ mod tests {
         let retrieved_files = repo.get_files(torrent.id).await.unwrap();
         assert_eq!(retrieved_files.len(), 2);
 
-        repo.delete(&info_hash).await.unwrap();
+        repo.delete_torrent(&info_hash).await.unwrap();
 
         let found = repo.find_by_info_hash(&info_hash).await.unwrap();
         assert!(found.is_none());
     }
 
     #[tokio::test]
-    async fn test_delete_not_found() {
+    async fn test_delete_torrent_not_found() {
         let (_temp_dir, pool) = setup_test_db().await;
         let repo = TorrentRepo::new(pool);
 
         let info_hash = vec![99u8; 20];
-        repo.delete(&info_hash).await.unwrap();
+        repo.delete_torrent(&info_hash).await.unwrap();
 
         let found = repo.find_by_info_hash(&info_hash).await.unwrap();
         assert!(found.is_none());
