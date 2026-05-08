@@ -14,7 +14,7 @@ use percent_encoding::percent_decode;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::fuse_async::{FuseAsyncRuntime, FuseCommand, FuseError, TorrentInfo, FileInfo, ParsedTorrentInfo, PersistResult, FileInfoForRead};
-use torrentfs::{metadata::MetadataManager, build_safe_path, sanitize_path_component};
+use torrentfs::{metadata::MetadataManager, build_safe_path};
 use torrentfs_libtorrent::Session;
 
 const TTL: Duration = Duration::from_secs(1);
