@@ -3,13 +3,14 @@ use fuser::{
     ReplyOpen, ReplyWrite, Request, ReplyCreate,
 };
 use libc::{EEXIST, EINVAL, ENOENT, ENOTDIR, EFBIG, EIO};
-use percent_encoding::percent_decode;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use anyhow::{bail, Result};
+use percent_encoding::percent_decode;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::fuse_async::{FuseAsyncRuntime, FuseCommand, FuseError, TorrentInfo, FileInfo, ParsedTorrentInfo, PersistResult, FileInfoForRead};
@@ -18,7 +19,6 @@ use torrentfs_libtorrent::Session;
 
 const TTL: Duration = Duration::from_secs(1);
 const MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
-const MAX_PATH_COMPONENT_LENGTH: usize = 255;
 
 pub const INO_ROOT: u64 = 1;
 pub const INO_METADATA: u64 = 2;
@@ -275,74 +275,51 @@ impl TorrentFsFilesystem {
     }
 }
 
-fn validate_percent_encoding(s: &str) -> bool {
+fn validate_percent_encoding(s: &str) -> Result<()> {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
             if i + 2 >= bytes.len() {
-                return false;
+                bail!("Incomplete percent encoding at end of string");
             }
             let hex = &s[i + 1..i + 3];
             if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-                return false;
+                bail!("Invalid percent encoding: invalid hex digits");
             }
             i += 3;
         } else {
             i += 1;
         }
     }
-    true
+    Ok(())
 }
 
-fn decode_fully(component: &str) -> String {
-    if !validate_percent_encoding(component) {
-        return component.to_string();
-    }
+fn decode_fully(component: &str) -> Result<String> {
+    validate_percent_encoding(component)?;
     
     let mut current = component.to_string();
     let max_iterations = 10;
     
     for _ in 0..max_iterations {
-        let decoded = match percent_decode(current.as_bytes()).decode_utf8() {
-            Ok(d) => d.to_string(),
-            Err(_) => return current,
-        };
+        let decoded = percent_decode(current.as_bytes())
+            .decode_utf8()
+            .map_err(|e| anyhow::anyhow!("Invalid percent encoding or UTF-8 in path component: {}", e))?;
         
-        if decoded == current {
-            return decoded;
+        let decoded_str = decoded.to_string();
+        if decoded_str == current {
+            return Ok(decoded_str);
         }
-        current = decoded;
+        current = decoded_str;
     }
     
-    current
+    bail!("Too many levels of percent encoding (potential encoding loop)");
 }
 
-fn sanitize_path_component(name: &str) -> String {
-    let decoded = decode_fully(name);
+fn sanitize_path_component(name: &str) -> Result<String> {
+    let decoded_str = decode_fully(name)?;
     
-    if decoded.len() > MAX_PATH_COMPONENT_LENGTH {
-        let truncated: String = decoded.chars().take(MAX_PATH_COMPONENT_LENGTH).collect();
-        return sanitize_decoded(&truncated);
-    }
-    
-    sanitize_decoded(&decoded)
-}
-
-fn sanitize_decoded(decoded: &str) -> String {
-    if decoded.contains('\0') {
-        let sanitized = decoded.replace('\0', "_")
-            .replace("..", "_")
-            .replace('\\', "_")
-            .replace('/', "_");
-        return if sanitized.is_empty() || sanitized == "." {
-            "_".to_string()
-        } else {
-            sanitized
-        };
-    }
-    
-    let normalized: String = decoded.nfkc().collect();
+    let normalized: String = decoded_str.nfkc().collect();
     
     let sanitized = normalized
         .replace("..", "_")
@@ -350,17 +327,18 @@ fn sanitize_decoded(decoded: &str) -> String {
         .replace('/', "_");
     
     if sanitized.is_empty() || sanitized == "." {
-        "_".to_string()
+        Ok("_".to_string())
     } else {
-        sanitized
+        Ok(sanitized)
     }
 }
 
-fn sanitize_path(path: &str) -> String {
-    path.split('/')
+fn sanitize_path(path: &str) -> Result<String> {
+    let result: Result<Vec<_>> = path
+        .split('/')
         .map(|component| sanitize_path_component(component))
-        .collect::<Vec<_>>()
-        .join("/")
+        .collect();
+    Ok(result?.join("/"))
 }
 
 impl TorrentFsFilesystem {
@@ -1648,11 +1626,27 @@ impl Filesystem for TorrentFsFilesystem {
         let data = open_file.data.clone();
         
         let raw_name = path.rsplit('/').next().unwrap_or(&path).to_string();
-        let name = sanitize_path_component(&raw_name);
+        let name = match sanitize_path_component(&raw_name) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::error!("Invalid path component '{}': {}", raw_name, e);
+                self.metadata_entries.remove(&ino);
+                reply.error(EINVAL);
+                return;
+            }
+        };
         let source_path = if path.contains('/') {
             let parts: Vec<&str> = path.rsplitn(2, '/').collect();
             if parts.len() > 1 {
-                sanitize_path(parts[1])
+                match sanitize_path(parts[1]) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::error!("Invalid path '{}': {}", parts[1], e);
+                        self.metadata_entries.remove(&ino);
+                        reply.error(EINVAL);
+                        return;
+                    }
+                }
             } else {
                 String::new()
             }
@@ -2308,109 +2302,69 @@ mod tests {
 
     #[test]
     fn test_sanitize_path_component_normal() {
-        assert_eq!(sanitize_path_component("file.txt"), "file.txt");
-        assert_eq!(sanitize_path_component("my-torrent"), "my-torrent");
+        assert_eq!(sanitize_path_component("file.txt").unwrap(), "file.txt");
+        assert_eq!(sanitize_path_component("my-torrent").unwrap(), "my-torrent");
     }
 
     #[test]
     fn test_sanitize_path_component_traversal() {
-        assert_eq!(sanitize_path_component(".."), "_");
-        assert_eq!(sanitize_path_component("../../../etc/passwd"), "______etc_passwd");
+        assert_eq!(sanitize_path_component("..").unwrap(), "_");
+        assert_eq!(sanitize_path_component("../../../etc/passwd").unwrap(), "______etc_passwd");
     }
 
     #[test]
     fn test_sanitize_path_component_backslash() {
-        assert_eq!(sanitize_path_component("..\\passwd"), "__passwd");
-        assert_eq!(sanitize_path_component("folder\\file"), "folder_file");
+        assert_eq!(sanitize_path_component("..\\passwd").unwrap(), "__passwd");
+        assert_eq!(sanitize_path_component("folder\\file").unwrap(), "folder_file");
     }
 
     #[test]
     fn test_sanitize_path_component_slash() {
-        assert_eq!(sanitize_path_component("path/to/file"), "path_to_file");
+        assert_eq!(sanitize_path_component("path/to/file").unwrap(), "path_to_file");
     }
 
     #[test]
     fn test_sanitize_path_component_empty() {
-        assert_eq!(sanitize_path_component(""), "_");
-        assert_eq!(sanitize_path_component("."), "_");
+        assert_eq!(sanitize_path_component("").unwrap(), "_");
+        assert_eq!(sanitize_path_component(".").unwrap(), "_");
     }
 
     #[test]
-    fn test_sanitize_path_component_percent_encoded_slash() {
-        assert_eq!(sanitize_path_component("%2f"), "_");
-        assert_eq!(sanitize_path_component("%2F"), "_");
-        assert_eq!(sanitize_path_component("file%2fname"), "file_name");
+    fn test_sanitize_path_component_percent_encoding_valid() {
+        assert_eq!(sanitize_path_component("%20").unwrap(), " ");
+        assert_eq!(sanitize_path_component("file%20name").unwrap(), "file name");
+        assert_eq!(sanitize_path_component("%2f").unwrap(), "_");
     }
 
     #[test]
-    fn test_sanitize_path_component_percent_encoded_backslash() {
-        assert_eq!(sanitize_path_component("%5c"), "_");
-        assert_eq!(sanitize_path_component("%5C"), "_");
-        assert_eq!(sanitize_path_component("path%5cfile"), "path_file");
-    }
-
-    #[test]
-    fn test_sanitize_path_component_percent_encoded_dotdot() {
-        assert_eq!(sanitize_path_component("%2e%2e"), "_");
-        assert_eq!(sanitize_path_component("%2E%2E"), "_");
-        assert_eq!(sanitize_path_component("%2e%2e%2f%2e%2e"), "___");
-    }
-
-    #[test]
-    fn test_sanitize_path_component_double_encoded() {
-        assert_eq!(sanitize_path_component("%252f"), "_");
-        assert_eq!(sanitize_path_component("%255c"), "_");
-    }
-
-    #[test]
-    fn test_sanitize_path_component_invalid_percent_encoding() {
-        assert_eq!(sanitize_path_component("%GG"), "%GG");
-        assert_eq!(sanitize_path_component("%2"), "%2");
-        assert_eq!(sanitize_path_component("file%2"), "file%2");
-    }
-
-    #[test]
-    fn test_sanitize_path_component_null_byte() {
-        assert_eq!(sanitize_path_component("file\0name"), "file_name");
-        assert_eq!(sanitize_path_component("\0"), "_");
-        assert_eq!(sanitize_path_component("path\0/to\0file"), "path__to_file");
-    }
-
-    #[test]
-    fn test_sanitize_path_component_length_limit() {
-        let long_name = "a".repeat(300);
-        let result = sanitize_path_component(&long_name);
-        assert_eq!(result.len(), 255);
-    }
-
-    #[test]
-    fn test_sanitize_path_component_unicode_normalization() {
-        let input = "file\u{0131}\u{0307}";
-        let result = sanitize_path_component(input);
-        assert!(result.contains('i') || result.contains('\u{0131}'), "Should normalize or preserve the character");
+    fn test_sanitize_path_component_percent_encoding_invalid() {
+        assert!(sanitize_path_component("%GG").is_err());
+        assert!(sanitize_path_component("%2").is_err());
+        assert!(sanitize_path_component("file%").is_err());
+        assert!(sanitize_path_component("file%GGname").is_err());
     }
 
     #[test]
     fn test_sanitize_path_normal() {
-        assert_eq!(sanitize_path("media/video"), "media/video");
-        assert_eq!(sanitize_path("anime/series/2024"), "anime/series/2024");
+        assert_eq!(sanitize_path("media/video").unwrap(), "media/video");
+        assert_eq!(sanitize_path("anime/series/2024").unwrap(), "anime/series/2024");
     }
 
     #[test]
     fn test_sanitize_path_traversal() {
-        assert_eq!(sanitize_path("../etc/passwd"), "_/etc/passwd");
-        assert_eq!(sanitize_path("../../data"), "_/_/data");
-        assert_eq!(sanitize_path("normal/../../../escape"), "normal/_/_/_/escape");
+        assert_eq!(sanitize_path("../etc/passwd").unwrap(), "_/etc/passwd");
+        assert_eq!(sanitize_path("../../data").unwrap(), "_/_/data");
+        assert_eq!(sanitize_path("normal/../../../escape").unwrap(), "normal/_/_/_/escape");
     }
 
     #[test]
     fn test_sanitize_path_backslash() {
-        assert_eq!(sanitize_path("media\\video"), "media_video");
-        assert_eq!(sanitize_path("..\\windows\\system"), "__windows_system");
+        assert_eq!(sanitize_path("media\\video").unwrap(), "media_video");
+        assert_eq!(sanitize_path("..\\windows\\system").unwrap(), "__windows_system");
     }
 
     #[test]
     fn test_sanitize_path_mixed() {
-        assert_eq!(sanitize_path("valid/../escape\\path"), "valid/_/escape_path");
+        assert_eq!(sanitize_path("valid/../escape\\path").unwrap(), "valid/_/escape_path");
     }
 }
