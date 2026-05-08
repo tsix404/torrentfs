@@ -2082,6 +2082,7 @@ dependencies = [
  "hex",
  "percent-encoding",
  "serde",
+ "serde_json",
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",
@@ -2089,20 +2090,6 @@ dependencies = [
  "torrentfs-libtorrent",
  "tracing",
  "unicode-normalization",
-]
-
-[[package]]
-name = "torrentfs-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "dirs",
- "sqlx",
- "tempfile",
- "tokio",
- "torrentfs",
- "torrentfs-libtorrent",
 ]
 
 [[package]]

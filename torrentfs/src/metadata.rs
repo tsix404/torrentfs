@@ -35,6 +35,9 @@ impl MetadataManager {
     }
 
     pub async fn process_torrent_data(&self, data: &[u8], source_path: &str) -> Result<ParsedTorrent> {
+        torrentfs_libtorrent::TorrentValidator::validate(data)
+            .context("Torrent file validation failed")?;
+
         let info = torrentfs_libtorrent::parse_torrent(data)
             .context("Failed to parse torrent data")?;
 
@@ -206,5 +209,23 @@ mod tests {
             assert!(db_file.last_piece >= db_file.first_piece,
                 "File {}: last_piece {} < first_piece {}", i, db_file.last_piece, db_file.first_piece);
         }
+    }
+
+    #[tokio::test]
+    async fn test_validation_rejects_invalid_torrent() {
+        let (_temp_dir, db) = setup_temp_db().await;
+        let manager = MetadataManager::new(Arc::new(db)).unwrap();
+
+        let result = manager.process_torrent_data(b"invalid data", "").await;
+        assert!(result.is_err(), "Should reject invalid torrent data");
+    }
+
+    #[tokio::test]
+    async fn test_validation_rejects_empty_data() {
+        let (_temp_dir, db) = setup_temp_db().await;
+        let manager = MetadataManager::new(Arc::new(db)).unwrap();
+
+        let result = manager.process_torrent_data(b"", "").await;
+        assert!(result.is_err(), "Should reject empty data");
     }
 }

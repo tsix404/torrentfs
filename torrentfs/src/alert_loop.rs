@@ -41,6 +41,13 @@ impl AlertLoop {
             downloaded_pieces: Arc::new(DashMap::new()),
         }
     }
+    
+    pub fn get_downloaded_pieces(&self, info_hash: &str) -> Vec<u32> {
+        self.downloaded_pieces
+            .get(info_hash)
+            .map(|entry| entry.iter().copied().collect())
+            .unwrap_or_default()
+    }
 
     pub async fn run(mut self) {
         tracing::info!("Alert loop started");
@@ -127,16 +134,6 @@ impl AlertLoop {
         }
     }
 
-    pub fn get_downloaded_pieces(&self, info_hash: &str) -> Vec<u32> {
-        if let Some(pieces) = self.downloaded_pieces.get(info_hash) {
-            let mut result: Vec<u32> = pieces.iter().copied().collect();
-            result.sort();
-            result
-        } else {
-            Vec::new()
-        }
-    }
-    
     async fn handle_piece_finished(&self, alert: &Alert) {
         if let Some(info_hash) = &alert.info_hash {
             let piece_index = alert.piece_index;
@@ -147,51 +144,55 @@ impl AlertLoop {
                 "Piece finished downloading, reading data"
             );
             
-            let info_hash_clone = info_hash.clone();
+            let info_hash_for_read = info_hash.clone();
+            let info_hash_for_cache = info_hash.clone();
+            let piece_index = alert.piece_index;
             let session = Arc::clone(&self.session);
+            let piece_cache = Arc::clone(&self.piece_cache);
+            let downloaded_pieces = Arc::clone(&self.downloaded_pieces);
             
             match tokio::task::spawn_blocking(move || {
-                session.read_piece(&info_hash_clone, piece_index)
+                session.read_piece(&info_hash_for_read, piece_index)
             }).await {
                 Ok(Ok(data)) => {
-                    match self.piece_cache.write_piece(info_hash, piece_index, &data) {
+                    match piece_cache.write_piece(&info_hash_for_cache, piece_index, &data) {
                         Ok(()) => {
-                            self.downloaded_pieces
-                                .entry(info_hash.clone())
+                            downloaded_pieces
+                                .entry(info_hash_for_cache.clone())
                                 .or_insert_with(HashSet::new)
                                 .insert(piece_index);
                             
                             tracing::info!(
-                                info_hash = %info_hash,
+                                info_hash = %info_hash_for_cache,
                                 piece_index = piece_index,
-                                size = data.len(),
-                                "Piece cached successfully"
+                                data_len = data.len(),
+                                "Piece data cached successfully"
                             );
                         }
                         Err(e) => {
                             tracing::warn!(
-                                info_hash = %info_hash,
+                                info_hash = %info_hash_for_cache,
                                 piece_index = piece_index,
                                 error = %e,
-                                "Failed to cache piece"
+                                "Failed to write piece to cache"
                             );
                         }
                     }
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(
-                        info_hash = %info_hash,
+                        info_hash = %info_hash_for_cache,
                         piece_index = piece_index,
                         error = %e,
-                        "Failed to read piece data"
+                        "Failed to read piece data from session"
                     );
                 }
                 Err(e) => {
                     tracing::error!(
-                        info_hash = %info_hash,
+                        info_hash = %info_hash_for_cache,
                         piece_index = piece_index,
                         error = %e,
-                        "Spawn blocking task failed"
+                        "Piece read task failed"
                     );
                 }
             }

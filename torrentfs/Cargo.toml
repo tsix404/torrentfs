@@ -25,3 +25,4 @@ dashmap.workspace = true
 [dev-dependencies]
 tokio.workspace = true
 tempfile = "3.10"
+serde_json = "1.0"

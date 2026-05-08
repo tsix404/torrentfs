@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -94,17 +95,26 @@ fn test_concurrent_random_read_no_deadlock() {
     }
 
     let num_threads = 10;
-    let test_duration = Duration::from_secs(30);
+    let test_duration = Duration::from_secs(300);
     let start_time = Instant::now();
+    
+    let total_operations = Arc::new(AtomicUsize::new(0));
+    let total_errors = Arc::new(AtomicUsize::new(0));
+    let total_bytes_read = Arc::new(AtomicUsize::new(0));
+    
     let mut handles = Vec::new();
 
     for thread_id in 0..num_threads {
         let files = file_list.clone();
         let torrent_dir = torrent_dir.clone();
+        let ops = Arc::clone(&total_operations);
+        let errs = Arc::clone(&total_errors);
+        let bytes = Arc::clone(&total_bytes_read);
         
         let handle = thread::spawn(move || {
-            let mut operations = 0usize;
-            let mut errors = 0usize;
+            let mut local_ops = 0usize;
+            let mut local_errs = 0usize;
+            let mut local_bytes = 0usize;
             
             while start_time.elapsed() < test_duration {
                 let file_idx = rand::random::<usize>() % files.len();
@@ -114,26 +124,29 @@ fn test_concurrent_random_read_no_deadlock() {
                     Ok(metadata) => {
                         if metadata.is_file() {
                             match fs::read(file_path) {
-                                Ok(_) => operations += 1,
+                                Ok(data) => {
+                                    local_ops += 1;
+                                    local_bytes += data.len();
+                                }
                                 Err(e) => {
                                     if e.kind() != std::io::ErrorKind::BrokenPipe {
-                                        errors += 1;
+                                        local_errs += 1;
                                         eprintln!("Thread {} read error: {}", thread_id, e);
                                     }
                                 }
                             }
                         } else {
                             match fs::read_dir(file_path) {
-                                Ok(_) => operations += 1,
+                                Ok(_) => local_ops += 1,
                                 Err(e) => {
-                                    errors += 1;
+                                    local_errs += 1;
                                     eprintln!("Thread {} readdir error: {}", thread_id, e);
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        errors += 1;
+                        local_errs += 1;
                         eprintln!("Thread {} metadata error: {}", thread_id, e);
                     }
                 }
@@ -141,29 +154,58 @@ fn test_concurrent_random_read_no_deadlock() {
                 thread::sleep(Duration::from_millis(10));
             }
             
-            (operations, errors)
+            ops.fetch_add(local_ops, Ordering::Relaxed);
+            errs.fetch_add(local_errs, Ordering::Relaxed);
+            bytes.fetch_add(local_bytes, Ordering::Relaxed);
+            
+            (local_ops, local_errs, local_bytes)
         });
         
         handles.push(handle);
     }
 
-    let mut total_operations = 0usize;
-    let mut total_errors = 0usize;
+    let stats_start = Instant::now();
+    let mut last_report = Instant::now();
+    let report_interval = Duration::from_secs(30);
+    
+    while stats_start.elapsed() < test_duration {
+        if last_report.elapsed() >= report_interval {
+            let ops = total_operations.load(Ordering::Relaxed);
+            let errs = total_errors.load(Ordering::Relaxed);
+            let bytes = total_bytes_read.load(Ordering::Relaxed);
+            let elapsed = stats_start.elapsed();
+            
+            println!("[{:.1}s] Operations: {}, Errors: {}, Bytes: {:.2} MB", 
+                elapsed.as_secs_f64(),
+                ops,
+                errs,
+                bytes as f64 / 1_048_576.0
+            );
+            last_report = Instant::now();
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
     
     for handle in handles {
-        let (ops, errs) = handle.join().expect("Thread panicked");
-        total_operations += ops;
-        total_errors += errs;
+        let (_ops, _errs, _bytes) = handle.join().expect("Thread panicked");
     }
 
     drop(guard);
 
-    println!("Concurrent test completed:");
-    println!("  Total operations: {}", total_operations);
-    println!("  Total errors: {}", total_errors);
-    println!("  Test duration: {:?}", test_duration);
+    let final_ops = total_operations.load(Ordering::Relaxed);
+    let final_errs = total_errors.load(Ordering::Relaxed);
+    let final_bytes = total_bytes_read.load(Ordering::Relaxed);
+    let actual_duration = start_time.elapsed();
+
+    println!("\n=== Concurrent Read Test Summary ===");
+    println!("Test duration: {:?}", actual_duration);
+    println!("Total operations: {}", final_ops);
+    println!("Total errors: {}", final_errs);
+    println!("Total bytes read: {:.2} MB", final_bytes as f64 / 1_048_576.0);
+    println!("Operations per second: {:.2}", final_ops as f64 / actual_duration.as_secs_f64());
+    println!("Throughput: {:.2} MB/s", (final_bytes as f64 / 1_048_576.0) / actual_duration.as_secs_f64());
     
-    assert_eq!(total_errors, 0, "No errors should occur during concurrent access");
+    assert_eq!(final_errs, 0, "No errors should occur during concurrent access");
 }
 
 #[test]
@@ -195,41 +237,62 @@ fn test_concurrent_metadata_operations() {
     thread::sleep(Duration::from_millis(500));
 
     let num_threads = 10;
-    let test_duration = Duration::from_secs(60);
+    let test_duration = Duration::from_secs(300);
     let start_time = Instant::now();
+    
+    let total_operations = Arc::new(AtomicUsize::new(0));
+    let total_errors = Arc::new(AtomicUsize::new(0));
+    let total_metadata_ops = Arc::new(AtomicUsize::new(0));
+    let total_readdir_ops = Arc::new(AtomicUsize::new(0));
+    
     let mut handles = Vec::new();
 
     for thread_id in 0..num_threads {
         let mount_path = mount_path.clone();
+        let ops = Arc::clone(&total_operations);
+        let errs = Arc::clone(&total_errors);
+        let meta_ops = Arc::clone(&total_metadata_ops);
+        let readdir_ops = Arc::clone(&total_readdir_ops);
         
         let handle = thread::spawn(move || {
-            let mut operations = 0usize;
-            let mut errors = 0usize;
+            let mut local_ops = 0usize;
+            let mut local_errs = 0usize;
+            let mut local_meta_ops = 0usize;
+            let mut local_readdir_ops = 0usize;
             
             while start_time.elapsed() < test_duration {
                 let metadata_dir = mount_path.join("metadata");
                 let data_dir = mount_path.join("data");
                 
                 match fs::read_dir(&metadata_dir) {
-                    Ok(_) => operations += 1,
+                    Ok(_) => {
+                        local_ops += 1;
+                        local_readdir_ops += 1;
+                    }
                     Err(e) => {
-                        errors += 1;
+                        local_errs += 1;
                         eprintln!("Thread {} metadata readdir error: {}", thread_id, e);
                     }
                 }
                 
                 match fs::read_dir(&data_dir) {
-                    Ok(_) => operations += 1,
+                    Ok(_) => {
+                        local_ops += 1;
+                        local_readdir_ops += 1;
+                    }
                     Err(e) => {
-                        errors += 1;
+                        local_errs += 1;
                         eprintln!("Thread {} data readdir error: {}", thread_id, e);
                     }
                 }
                 
                 match fs::metadata(&metadata_dir) {
-                    Ok(_) => operations += 1,
+                    Ok(_) => {
+                        local_ops += 1;
+                        local_meta_ops += 1;
+                    }
                     Err(e) => {
-                        errors += 1;
+                        local_errs += 1;
                         eprintln!("Thread {} metadata stat error: {}", thread_id, e);
                     }
                 }
@@ -237,26 +300,56 @@ fn test_concurrent_metadata_operations() {
                 thread::sleep(Duration::from_millis(50));
             }
             
-            (operations, errors)
+            ops.fetch_add(local_ops, Ordering::Relaxed);
+            errs.fetch_add(local_errs, Ordering::Relaxed);
+            meta_ops.fetch_add(local_meta_ops, Ordering::Relaxed);
+            readdir_ops.fetch_add(local_readdir_ops, Ordering::Relaxed);
+            
+            (local_ops, local_errs, local_meta_ops, local_readdir_ops)
         });
         
         handles.push(handle);
     }
 
-    let mut total_operations = 0usize;
-    let mut total_errors = 0usize;
+    let stats_start = Instant::now();
+    let mut last_report = Instant::now();
+    let report_interval = Duration::from_secs(30);
+    
+    while stats_start.elapsed() < test_duration {
+        if last_report.elapsed() >= report_interval {
+            let ops = total_operations.load(Ordering::Relaxed);
+            let errs = total_errors.load(Ordering::Relaxed);
+            let elapsed = stats_start.elapsed();
+            
+            println!("[{:.1}s] Operations: {}, Errors: {}", 
+                elapsed.as_secs_f64(),
+                ops,
+                errs
+            );
+            last_report = Instant::now();
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
     
     for handle in handles {
-        let (ops, errs) = handle.join().expect("Thread panicked");
-        total_operations += ops;
-        total_errors += errs;
+        let (_ops, _errs, _meta, _readdir) = handle.join().expect("Thread panicked");
     }
 
     drop(guard);
 
-    println!("Metadata concurrent test completed:");
-    println!("  Total operations: {}", total_operations);
-    println!("  Total errors: {}", total_errors);
+    let final_ops = total_operations.load(Ordering::Relaxed);
+    let final_errs = total_errors.load(Ordering::Relaxed);
+    let final_meta = total_metadata_ops.load(Ordering::Relaxed);
+    let final_readdir = total_readdir_ops.load(Ordering::Relaxed);
+    let actual_duration = start_time.elapsed();
+
+    println!("\n=== Concurrent Metadata Test Summary ===");
+    println!("Test duration: {:?}", actual_duration);
+    println!("Total operations: {}", final_ops);
+    println!("  Metadata ops: {}", final_meta);
+    println!("  Readdir ops: {}", final_readdir);
+    println!("Total errors: {}", final_errs);
+    println!("Operations per second: {:.2}", final_ops as f64 / actual_duration.as_secs_f64());
     
-    assert_eq!(total_errors, 0, "No errors should occur during concurrent metadata access");
+    assert_eq!(final_errs, 0, "No errors should occur during concurrent metadata access");
 }

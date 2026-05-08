@@ -13,6 +13,9 @@ pub enum TorrentFsError {
 
     #[error("Not found: {0}")]
     NotFound(String),
+
+    #[error("Invalid info_hash: {0}")]
+    InvalidInfoHash(String),
 }
 
 pub type Result<T> = std::result::Result<T, TorrentFsError>;
