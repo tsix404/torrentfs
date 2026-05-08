@@ -57,29 +57,33 @@ fn test_concurrent_random_read_no_deadlock() {
 
     thread::sleep(Duration::from_millis(500));
 
-    let src = match first_torrent_file() {
-        Some(p) => p,
-        None => {
-            eprintln!("No .torrent files found, skipping concurrent test");
-            drop(guard);
-            return;
-        }
-    };
+    let src = first_torrent_file()
+        .expect("No .torrent files found in test_data directory. Test requires .torrent files.");
 
     let dest = mount_path.join("metadata").join(src.file_name().unwrap());
     fs::copy(&src, &dest).expect("Failed to copy .torrent file");
 
-    thread::sleep(Duration::from_millis(500));
+    let max_wait = Duration::from_secs(10);
+    let wait_start = Instant::now();
+    let mut data_entries = Vec::new();
 
-    let data_entries: Vec<_> = fs::read_dir(mount_path.join("data"))
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .collect();
+    while wait_start.elapsed() < max_wait {
+        data_entries = fs::read_dir(mount_path.join("data"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+
+        if !data_entries.is_empty() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
 
     if data_entries.is_empty() {
-        eprintln!("No torrent directories in data/, skipping concurrent test");
-        drop(guard);
-        return;
+        panic!(
+            "No torrent directories appeared in data/ after {:?}. Test data setup failed.",
+            max_wait
+        );
     }
 
     let torrent_dir = data_entries[0].path();
@@ -90,9 +94,7 @@ fn test_concurrent_random_read_no_deadlock() {
         .collect();
 
     if file_list.is_empty() {
-        eprintln!("No files in torrent directory, skipping concurrent test");
-        drop(guard);
-        return;
+        panic!("No files found in torrent directory {:?}. Test requires files to test concurrent access.", torrent_dir);
     }
 
     let num_threads = 10;
@@ -395,29 +397,32 @@ fn test_random_offset_reading() {
 
     thread::sleep(Duration::from_millis(500));
 
-    let src = match first_torrent_file() {
-        Some(p) => p,
-        None => {
-            eprintln!("No .torrent files found, skipping random offset test");
-            drop(guard);
-            return;
-        }
-    };
+    let src = first_torrent_file().expect("No .torrent files found in test_data directory. Test requires .torrent files to test random offset reading.");
 
     let dest = mount_path.join("metadata").join(src.file_name().unwrap());
     fs::copy(&src, &dest).expect("Failed to copy .torrent file");
 
-    thread::sleep(Duration::from_millis(500));
+    let max_wait = Duration::from_secs(10);
+    let wait_start = Instant::now();
+    let mut data_entries = Vec::new();
 
-    let data_entries: Vec<_> = fs::read_dir(mount_path.join("data"))
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .collect();
+    while wait_start.elapsed() < max_wait {
+        data_entries = fs::read_dir(mount_path.join("data"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+
+        if !data_entries.is_empty() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
 
     if data_entries.is_empty() {
-        eprintln!("No torrent directories in data/, skipping random offset test");
-        drop(guard);
-        return;
+        panic!(
+            "No torrent directories appeared in data/ after {:?}. Test data setup failed.",
+            max_wait
+        );
     }
 
     let torrent_dir = data_entries[0].path();
@@ -435,9 +440,7 @@ fn test_random_offset_reading() {
         .collect();
 
     if file_list.is_empty() {
-        eprintln!("No files in torrent directory, skipping random offset test");
-        drop(guard);
-        return;
+        panic!("No files found in torrent directory {:?}. Test requires files to test random offset reading.", torrent_dir);
     }
 
     let seed: u64 = std::env::var("TORRENTFS_TEST_SEED")
