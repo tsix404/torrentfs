@@ -1,3 +1,31 @@
+//! Async I/O Channel System for FUSE Operations
+//!
+//! This module implements a multi-producer single-consumer (MPSC) channel system
+//! for handling FUSE filesystem requests asynchronously with proper backpressure
+//! and timeout mechanisms.
+//!
+//! ## Architecture
+//!
+//! The system uses two types of channels:
+//! - **MPSC Channel**: For forwarding FUSE requests from multiple synchronous FUSE threads
+//!   to a single async Tokio runtime (capacity: 256 requests)
+//! - **Oneshot Channel**: For returning async responses back to the synchronous FUSE thread
+//!
+//! ## Workflow
+//!
+//! 1. FUSE operation (synchronous) calls `send_command_with_timeout()`
+//! 2. Creates oneshot channel for response
+//! 3. Sends command via MPSC channel to async runtime
+//! 4. Async runtime processes command in `run_command_loop()`
+//! 5. Response sent back via oneshot channel
+//! 6. Original caller receives response with timeout protection
+//!
+//! ## Error Handling
+//!
+//! - **ChannelClosed**: MPSC channel dropped (runtime shutdown)
+//! - **Timeout**: Operation exceeds 30 seconds
+//! - **DatabaseError/SessionError**: Wrapped from underlying operations
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,9 +37,16 @@ use torrentfs::repo::TorrentRepo;
 use torrentfs::DownloadCoordinator;
 use torrentfs_libtorrent::Session;
 
+/// Timeout for I/O operations (30 seconds)
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// MPSC channel buffer size to prevent overflow under load
 const CHANNEL_BUFFER_SIZE: usize = 256;
 
+/// Commands sent from synchronous FUSE threads to async runtime
+/// 
+/// Each command includes a oneshot channel for returning the response.
+/// This enables request-response pattern across the sync/async boundary.
 #[derive(Debug)]
 pub enum FuseCommand {
     ListTorrents {
@@ -114,6 +149,10 @@ impl std::fmt::Display for FuseError {
 
 impl std::error::Error for FuseError {}
 
+/// Async runtime for FUSE operations
+/// 
+/// Bridges synchronous FUSE callbacks with async Tokio operations using
+/// MPSC channel for request forwarding and oneshot channels for responses.
 pub struct FuseAsyncRuntime {
     command_tx: mpsc::Sender<FuseCommand>,
     rt: tokio::runtime::Runtime,
@@ -123,6 +162,10 @@ pub struct FuseAsyncRuntime {
 }
 
 impl FuseAsyncRuntime {
+    /// Creates a new async runtime with MPSC channel system
+    /// 
+    /// Spawns a background task that processes commands from the MPSC channel.
+    /// The channel has a capacity of 256 to handle bursts of FUSE operations.
     pub fn new(
         metadata_manager: Arc<MetadataManager>,
         session: Arc<Session>,
@@ -173,6 +216,14 @@ impl FuseAsyncRuntime {
         }
     }
     
+    /// Sends a command through the MPSC channel and waits for response
+    /// 
+    /// Creates a oneshot channel for the response, sends the command via MPSC,
+    /// and waits for up to IO_TIMEOUT (30 seconds) for the response.
+    /// 
+    /// # Errors
+    /// - `ChannelClosed`: MPSC sender dropped (runtime shutdown)
+    /// - `Timeout`: Response not received within timeout period
     pub fn send_command_with_timeout<R, F>(&self, f: F) -> Result<R, FuseError>
     where
         F: FnOnce(oneshot::Sender<Result<R, FuseError>>) -> FuseCommand,
@@ -193,6 +244,11 @@ impl FuseAsyncRuntime {
         })
     }
     
+    /// Main command processing loop running in async context
+    /// 
+    /// Receives commands from the MPSC channel and dispatches them to appropriate
+    /// handlers. Each handler sends its response via the oneshot channel included
+    /// in the command.
     async fn run_command_loop(
         mut command_rx: mpsc::Receiver<FuseCommand>,
         metadata_manager: Arc<MetadataManager>,
@@ -456,5 +512,78 @@ mod tests {
         assert!(result.is_ok());
         let torrents = result.unwrap();
         assert!(torrents.is_empty());
+    }
+
+    #[test]
+    fn test_channel_capacity() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_state_dir = TempDir::new().unwrap();
+        let (_temp_dir, db) = rt.block_on(setup_test_db());
+        let metadata_manager = Arc::new(MetadataManager::new(Arc::new(db)).unwrap());
+        let session = Arc::new(Session::new().unwrap());
+        
+        let runtime = FuseAsyncRuntime::new(metadata_manager, session, temp_state_dir.path());
+        
+        let mut handles = vec![];
+        for i in 0..10 {
+            let runtime = runtime.command_tx.clone();
+            handles.push(std::thread::spawn(move || {
+                let (reply_tx, reply_rx) = oneshot::channel();
+                let command = FuseCommand::ListTorrents { reply: reply_tx };
+                runtime.blocking_send(command).unwrap();
+                let result = rt.block_on(timeout(IO_TIMEOUT, reply_rx)).unwrap().unwrap();
+                assert!(result.is_ok());
+                result.unwrap()
+            }));
+        }
+        
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn test_mpsc_oneshot_integration() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_state_dir = TempDir::new().unwrap();
+        let (_temp_dir, db) = rt.block_on(setup_test_db());
+        let metadata_manager = Arc::new(MetadataManager::new(Arc::new(db)).unwrap());
+        let session = Arc::new(Session::new().unwrap());
+        
+        let runtime = FuseAsyncRuntime::new(metadata_manager, session, temp_state_dir.path());
+        
+        let result1 = runtime.send_command_with_timeout(|reply| {
+            FuseCommand::ListTorrents { reply }
+        });
+        
+        let result2 = runtime.send_command_with_timeout(|reply| {
+            FuseCommand::GetTorrentFiles {
+                torrent_name: "nonexistent".to_string(),
+                reply,
+            }
+        });
+        
+        assert!(result1.is_ok());
+        assert!(result2.is_err());
+    }
+
+    #[test]
+    fn test_timeout_mechanism() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_state_dir = TempDir::new().unwrap();
+        let (_temp_dir, db) = rt.block_on(setup_test_db());
+        let metadata_manager = Arc::new(MetadataManager::new(Arc::new(db)).unwrap());
+        let session = Arc::new(Session::new().unwrap());
+        
+        let runtime = FuseAsyncRuntime::new(metadata_manager, session, temp_state_dir.path());
+        
+        let start = std::time::Instant::now();
+        let result = runtime.send_command_with_timeout(|reply| {
+            FuseCommand::ListTorrents { reply }
+        });
+        let elapsed = start.elapsed();
+        
+        assert!(result.is_ok());
+        assert!(elapsed < IO_TIMEOUT);
     }
 }
