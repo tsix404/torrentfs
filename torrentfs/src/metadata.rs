@@ -114,6 +114,10 @@ impl MetadataManager {
     pub async fn update_resume_data(&self, info_hash: &[u8], resume_data: &[u8]) -> anyhow::Result<()> {
         self.repo.update_resume_data(info_hash, resume_data).await.map_err(|e| e.into())
     }
+
+    pub async fn update_status(&self, info_hash: &[u8], status: &str) -> anyhow::Result<()> {
+        self.repo.update_status(info_hash, status).await.map_err(|e| e.into())
+    }
 }
 
 #[cfg(test)]

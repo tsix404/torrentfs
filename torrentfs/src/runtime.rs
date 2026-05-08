@@ -337,6 +337,7 @@ impl TorrentRuntime {
             let info_hash_hex = hex::encode(&torrent_with_data.torrent.info_hash);
             let torrent_name = &torrent_with_data.torrent.name;
             let source_path = &torrent_with_data.torrent.source_path;
+            let db_status = &torrent_with_data.torrent.status;
             
             if self.session.find_torrent(&info_hash_hex) {
                 tracing::debug!(
@@ -366,10 +367,33 @@ impl TorrentRuntime {
                 torrent_with_data.resume_data.as_deref()
             ) {
                 Ok(()) => {
+                    let should_resume = db_status == "downloading" || db_status == "seeding";
+                    
+                    if should_resume {
+                        if let Err(e) = self.session.resume_torrent(&info_hash_hex) {
+                            tracing::warn!(
+                                info_hash = %info_hash_hex,
+                                name = %torrent_name,
+                                db_status = %db_status,
+                                error = %e,
+                                "Failed to resume torrent after restoration"
+                            );
+                        } else {
+                            tracing::info!(
+                                info_hash = %info_hash_hex,
+                                name = %torrent_name,
+                                db_status = %db_status,
+                                "Restored and resumed torrent"
+                            );
+                        }
+                    }
+                    
                     if torrent_with_data.resume_data.is_some() {
                         tracing::info!(
                             info_hash = %info_hash_hex,
                             name = %torrent_name,
+                            db_status = %db_status,
+                            resumed = should_resume,
                             "Restored torrent with resume_data"
                         );
                     } else {
@@ -377,6 +401,8 @@ impl TorrentRuntime {
                             info_hash = %info_hash_hex,
                             name = %torrent_name,
                             save_path = %save_path_str,
+                            db_status = %db_status,
+                            resumed = should_resume,
                             "Restored torrent from database"
                         );
                     }
@@ -546,6 +572,121 @@ mod tests {
         let runtime = TorrentRuntime::new(temp_dir.path()).await.unwrap();
         let result = runtime.graceful_shutdown().await;
         assert!(result.is_ok(), "graceful_shutdown should succeed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_restore_torrents_empty_db() {
+        let temp_dir = TempDir::new().unwrap();
+        let runtime = TorrentRuntime::new(temp_dir.path()).await.unwrap();
+        
+        let torrents = runtime.metadata_manager.list_torrents_with_data().await.unwrap();
+        assert!(torrents.is_empty(), "Should have no torrents in fresh db");
+        
+        let session_torrents = runtime.session.get_torrents();
+        assert!(session_torrents.is_empty(), "Should have no torrents in session");
+    }
+
+    #[tokio::test]
+    async fn test_restore_cache_index_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let runtime = TorrentRuntime::new(temp_dir.path()).await.unwrap();
+        
+        let cached = runtime.piece_cache.scan_cached_pieces().unwrap();
+        assert!(cached.is_empty(), "Should have no cached pieces in fresh state dir");
+    }
+
+    #[tokio::test]
+    async fn test_restore_torrents_with_data() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_dir = temp_dir.path().to_path_buf();
+        
+        let test_file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../test_data")
+            .read_dir()
+            .ok()
+            .and_then(|mut d| d.next())
+            .and_then(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().map(|e| e == "torrent").unwrap_or(false));
+        
+        let test_file = match test_file {
+            Some(f) => f,
+            None => {
+                eprintln!("Skipping test - no .torrent file found in test_data");
+                return;
+            }
+        };
+        
+        let torrent_data = std::fs::read(&test_file).expect("Failed to read test torrent");
+        
+        {
+            let runtime = TorrentRuntime::new(&state_dir).await.unwrap();
+            
+            let parsed = runtime.metadata_manager.process_torrent_data(&torrent_data, "test").await.unwrap();
+            runtime.metadata_manager.persist_to_db(&parsed).await.unwrap();
+            
+            let _info_hash_hex = hex::encode(&parsed.info_hash);
+            runtime.session.add_torrent_paused(&torrent_data, &state_dir.join("data").to_string_lossy()).unwrap();
+            
+            runtime.metadata_manager.update_status(&parsed.info_hash, "downloading").await.unwrap();
+        }
+        
+        {
+            let runtime = TorrentRuntime::new(&state_dir).await.unwrap();
+            
+            let torrents = runtime.metadata_manager.list_torrents_with_data().await.unwrap();
+            assert_eq!(torrents.len(), 1, "Should have restored 1 torrent");
+            
+            let restored = &torrents[0];
+            assert_eq!(restored.torrent.status, "downloading", "Status should be preserved");
+            
+            let session_torrents = runtime.session.get_torrents();
+            assert_eq!(session_torrents.len(), 1, "Torrent should be restored to session");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_status_persists_across_restart() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_dir = temp_dir.path().to_path_buf();
+        
+        let test_file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../test_data")
+            .read_dir()
+            .ok()
+            .and_then(|mut d| d.next())
+            .and_then(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().map(|e| e == "torrent").unwrap_or(false));
+        
+        let test_file = match test_file {
+            Some(f) => f,
+            None => {
+                eprintln!("Skipping test - no .torrent file found in test_data");
+                return;
+            }
+        };
+        
+        let torrent_data = std::fs::read(&test_file).expect("Failed to read test torrent");
+        let info_hash: Vec<u8>;
+        
+        {
+            let runtime = TorrentRuntime::new(&state_dir).await.unwrap();
+            
+            let parsed = runtime.metadata_manager.process_torrent_data(&torrent_data, "movies").await.unwrap();
+            info_hash = parsed.info_hash.clone();
+            runtime.metadata_manager.persist_to_db(&parsed).await.unwrap();
+            
+            runtime.metadata_manager.update_status(&info_hash, "seeding").await.unwrap();
+        }
+        
+        {
+            let runtime = TorrentRuntime::new(&state_dir).await.unwrap();
+            
+            let torrents = runtime.metadata_manager.list_torrents().await.unwrap();
+            let restored = torrents.iter().find(|t| t.info_hash == info_hash).expect("Torrent should exist");
+            assert_eq!(restored.status, "seeding", "Seeding status should persist across restart");
+        }
     }
 
     #[tokio::test]
