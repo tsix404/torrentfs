@@ -169,6 +169,20 @@ libtorrent_error_t libtorrent_save_resume_data(libtorrent_session_t* session, co
 // Pause a torrent (for graceful shutdown)
 libtorrent_error_t libtorrent_pause_torrent(libtorrent_session_t* session, const char* info_hash_hex);
 
+// Session configuration functions
+void libtorrent_set_download_rate_limit(libtorrent_session_t* session, int limit);
+void libtorrent_set_upload_rate_limit(libtorrent_session_t* session, int limit);
+int libtorrent_get_download_rate_limit(libtorrent_session_t* session);
+int libtorrent_get_upload_rate_limit(libtorrent_session_t* session);
+void libtorrent_set_max_connections(libtorrent_session_t* session, int limit);
+void libtorrent_set_max_uploads(libtorrent_session_t* session, int limit);
+int libtorrent_get_max_connections(libtorrent_session_t* session);
+int libtorrent_get_max_uploads(libtorrent_session_t* session);
+void libtorrent_set_active_downloads(libtorrent_session_t* session, int limit);
+void libtorrent_set_active_seeds(libtorrent_session_t* session, int limit);
+int libtorrent_get_active_downloads(libtorrent_session_t* session);
+int libtorrent_get_active_seeds(libtorrent_session_t* session);
+
 // Destroy a libtorrent session
 void libtorrent_destroy_session(libtorrent_session_t* session);
 

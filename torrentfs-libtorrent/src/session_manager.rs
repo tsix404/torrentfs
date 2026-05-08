@@ -154,6 +154,17 @@ impl SessionManager {
     pub fn with_session(session: Arc<Session>, config: SessionConfig) -> Result<Self> {
         session.set_alert_mask(config.alert_mask);
         
+        if let Some(limit) = config.download_rate_limit {
+            session.set_download_rate_limit(limit as i32);
+        }
+        if let Some(limit) = config.upload_rate_limit {
+            session.set_upload_rate_limit(limit as i32);
+        }
+        session.set_max_connections(config.max_connections as i32);
+        session.set_max_uploads(config.max_uploads as i32);
+        session.set_active_downloads(config.active_downloads as i32);
+        session.set_active_seeds(config.active_seeds as i32);
+        
         let (event_tx, _) = broadcast::channel(256);
         let (shutdown_tx, _) = broadcast::channel(1);
         
@@ -455,8 +466,20 @@ impl SessionManager {
     }
 
     pub async fn update_config(&mut self, config: SessionConfig) {
+        self.session.set_alert_mask(config.alert_mask);
+        
+        if let Some(limit) = config.download_rate_limit {
+            self.session.set_download_rate_limit(limit as i32);
+        }
+        if let Some(limit) = config.upload_rate_limit {
+            self.session.set_upload_rate_limit(limit as i32);
+        }
+        self.session.set_max_connections(config.max_connections as i32);
+        self.session.set_max_uploads(config.max_uploads as i32);
+        self.session.set_active_downloads(config.active_downloads as i32);
+        self.session.set_active_seeds(config.active_seeds as i32);
+        
         self.config = config;
-        self.session.set_alert_mask(self.config.alert_mask);
     }
 
     pub async fn get_torrent_count(&self) -> usize {
@@ -632,5 +655,25 @@ mod tests {
         
         assert!(manager.find_torrent(&info_hash));
         assert!(!manager.find_torrent("nonexistent_hash"));
+    }
+
+    #[tokio::test]
+    async fn test_configuration_applied_to_session() {
+        let mut config = SessionConfig::default();
+        config.download_rate_limit = Some(1024 * 1024);
+        config.upload_rate_limit = Some(512 * 1024);
+        config.max_connections = 50;
+        config.max_uploads = 2;
+        config.active_downloads = 3;
+        config.active_seeds = 2;
+        
+        let manager = SessionManager::new(config).unwrap();
+        
+        assert_eq!(manager.session.get_download_rate_limit(), 1024 * 1024);
+        assert_eq!(manager.session.get_upload_rate_limit(), 512 * 1024);
+        assert_eq!(manager.session.get_max_connections(), 50);
+        assert_eq!(manager.session.get_max_uploads(), 2);
+        assert_eq!(manager.session.get_active_downloads(), 3);
+        assert_eq!(manager.session.get_active_seeds(), 2);
     }
 }

@@ -243,6 +243,66 @@ impl Session {
         Ok(())
     }
 
+    pub fn set_download_rate_limit(&self, limit: i32) {
+        let guard = self.inner.lock().unwrap();
+        unsafe { libtorrent_sys::libtorrent_set_download_rate_limit(*guard, limit) };
+    }
+
+    pub fn set_upload_rate_limit(&self, limit: i32) {
+        let guard = self.inner.lock().unwrap();
+        unsafe { libtorrent_sys::libtorrent_set_upload_rate_limit(*guard, limit) };
+    }
+
+    pub fn get_download_rate_limit(&self) -> i32 {
+        let guard = self.inner.lock().unwrap();
+        unsafe { libtorrent_sys::libtorrent_get_download_rate_limit(*guard) }
+    }
+
+    pub fn get_upload_rate_limit(&self) -> i32 {
+        let guard = self.inner.lock().unwrap();
+        unsafe { libtorrent_sys::libtorrent_get_upload_rate_limit(*guard) }
+    }
+
+    pub fn set_max_connections(&self, limit: i32) {
+        let guard = self.inner.lock().unwrap();
+        unsafe { libtorrent_sys::libtorrent_set_max_connections(*guard, limit) };
+    }
+
+    pub fn set_max_uploads(&self, limit: i32) {
+        let guard = self.inner.lock().unwrap();
+        unsafe { libtorrent_sys::libtorrent_set_max_uploads(*guard, limit) };
+    }
+
+    pub fn get_max_connections(&self) -> i32 {
+        let guard = self.inner.lock().unwrap();
+        unsafe { libtorrent_sys::libtorrent_get_max_connections(*guard) }
+    }
+
+    pub fn get_max_uploads(&self) -> i32 {
+        let guard = self.inner.lock().unwrap();
+        unsafe { libtorrent_sys::libtorrent_get_max_uploads(*guard) }
+    }
+
+    pub fn set_active_downloads(&self, limit: i32) {
+        let guard = self.inner.lock().unwrap();
+        unsafe { libtorrent_sys::libtorrent_set_active_downloads(*guard, limit) };
+    }
+
+    pub fn set_active_seeds(&self, limit: i32) {
+        let guard = self.inner.lock().unwrap();
+        unsafe { libtorrent_sys::libtorrent_set_active_seeds(*guard, limit) };
+    }
+
+    pub fn get_active_downloads(&self) -> i32 {
+        let guard = self.inner.lock().unwrap();
+        unsafe { libtorrent_sys::libtorrent_get_active_downloads(*guard) }
+    }
+
+    pub fn get_active_seeds(&self) -> i32 {
+        let guard = self.inner.lock().unwrap();
+        unsafe { libtorrent_sys::libtorrent_get_active_seeds(*guard) }
+    }
+
     /// Reads a piece from the torrent.
     /// 
     /// # Blocking Behavior
