@@ -1113,4 +1113,53 @@ mod proptests {
             }
         }
     }
+
+    #[test]
+    fn test_build_safe_path_with_multilevel_source_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+        let path = build_safe_path(base, &["movies", "2024", "torrent"]).unwrap();
+        assert!(path.starts_with(base));
+        assert!(path.to_str().unwrap().contains("movies"));
+        assert!(path.to_str().unwrap().contains("2024"));
+        assert!(path.to_str().unwrap().contains("torrent"));
+    }
+
+    #[test]
+    fn test_build_safe_path_with_empty_source_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+        let path = build_safe_path(base, &["torrent"]).unwrap();
+        assert!(path.starts_with(base));
+        assert!(path.ends_with("torrent") || path.to_str().unwrap().ends_with("torrent"));
+    }
+
+    #[test]
+    fn test_build_safe_path_with_deeply_nested_source_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+        let path = build_safe_path(base, &["a", "b", "c", "d", "e", "torrent"]).unwrap();
+        assert!(path.starts_with(base));
+        assert!(path.to_str().unwrap().contains("a"));
+        assert!(path.to_str().unwrap().contains("b"));
+        assert!(path.to_str().unwrap().contains("c"));
+        assert!(path.to_str().unwrap().contains("d"));
+        assert!(path.to_str().unwrap().contains("e"));
+    }
+
+    #[test]
+    fn test_build_safe_path_source_path_traversal_blocked() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+        let result = build_safe_path(base, &["..", "etc", "torrent"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_safe_path_with_slash_in_component_blocked() {
+        let temp_dir = TempDir::new().unwrap();
+        let base = temp_dir.path();
+        let result = build_safe_path(base, &["movies/2024", "torrent"]);
+        assert!(result.is_err(), "Should reject single component with /");
+    }
 }
