@@ -223,11 +223,12 @@ impl TorrentFsFilesystem {
         (hasher.finish() & 0x0FFFFFFFFFFFFFFF) | 0x8000000000000000
     }
 
-    fn file_inode(&self, torrent_name: &str, file_path: &str) -> u64 {
+    fn file_inode(&self, source_path: &str, torrent_name: &str, file_path: &str) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         
         let mut hasher = DefaultHasher::new();
+        source_path.hash(&mut hasher);
         torrent_name.hash(&mut hasher);
         file_path.hash(&mut hasher);
         (hasher.finish() & 0x0FFFFFFFFFFFFFFF) | 0x9000000000000000
@@ -328,9 +329,10 @@ impl TorrentFsFilesystem {
         }
     }
 
-    fn get_file_info_for_read(&self, torrent_name: &str, file_path: &str) -> Result<FileInfoForRead, FuseError> {
+    fn get_file_info_for_read(&self, source_path: &str, torrent_name: &str, file_path: &str) -> Result<FileInfoForRead, FuseError> {
         if let Some(runtime) = &self.async_runtime {
             runtime.send_command_with_timeout(|reply| FuseCommand::GetFileInfoForInode {
+                source_path: source_path.to_string(),
                 torrent_name: torrent_name.to_string(),
                 file_path: file_path.to_string(),
                 reply,
@@ -352,7 +354,7 @@ impl TorrentFsFilesystem {
         }
     }
     
-    fn find_torrent_file_by_ino(&self, ino: u64) -> Option<(String, String)> {
+    fn find_torrent_file_by_ino(&self, ino: u64) -> Option<(String, String, String)> {
         if ino < 0x9000000000000000 || ino >= 0xA000000000000000 {
             return None;
         }
@@ -375,9 +377,9 @@ impl TorrentFsFilesystem {
                         match files_result {
                             Ok(files) => {
                                 for file in files {
-                                    let file_ino = self.file_inode(&torrent.name, &file.path);
+                                    let file_ino = self.file_inode(&torrent.source_path, &torrent.name, &file.path);
                                     if file_ino == ino {
-                                        return Some((torrent.name, file.path));
+                                        return Some((torrent.source_path, torrent.name, file.path));
                                     }
                                 }
                             }
@@ -599,7 +601,7 @@ impl Filesystem for TorrentFsFilesystem {
                                         if relative_path.is_empty() {
                                             let file_name = file.path.rsplit('/').next().unwrap_or(&file.path);
                                             if file_name == name_str {
-                                                let ino = self.file_inode(&torrent.name, &file.path);
+                                                let ino = self.file_inode(&torrent.source_path, &torrent.name, &file.path);
                                                 reply.entry(&TTL, &file_attr(ino, file.size as u64), 0);
                                                 return;
                                             }
@@ -609,7 +611,7 @@ impl Filesystem for TorrentFsFilesystem {
                                         let parts: Vec<&str> = relative_path.split('/').collect();
                                         
                                         if parts.len() == 1 && parts[0] == name_str {
-                                            let ino = self.file_inode(&torrent.name, &file.path);
+                                            let ino = self.file_inode(&torrent.source_path, &torrent.name, &file.path);
                                             reply.entry(&TTL, &file_attr(ino, file.size as u64), 0);
                                             return;
                                         } else if parts.len() > 1 {
@@ -686,7 +688,7 @@ impl Filesystem for TorrentFsFilesystem {
                                                 let parts: Vec<&str> = rest.split('/').collect();
                                                 
                                                 if parts.len() == 1 && parts[0] == name_str {
-                                                    let ino = self.file_inode(&torrent.name, &file.path);
+                                                    let ino = self.file_inode(&torrent.source_path, &torrent.name, &file.path);
                                                     reply.entry(&TTL, &file_attr(ino, file.size as u64), 0);
                                                     return;
                                                 } else if parts.len() > 1 {
@@ -847,7 +849,7 @@ impl Filesystem for TorrentFsFilesystem {
                         match self.get_torrent_files_safe(&torrent.name) {
                             Ok(files) => {
                                 for file in files {
-                                    let file_ino = self.file_inode(&torrent.name, &file.path);
+                                    let file_ino = self.file_inode(&torrent.source_path, &torrent.name, &file.path);
                                     if file_ino == ino {
                                         reply.attr(&TTL, &file_attr(ino, file.size as u64));
                                         return;
@@ -1099,7 +1101,7 @@ impl Filesystem for TorrentFsFilesystem {
                                             let file_name = file.path.rsplit('/').next().unwrap_or(&file.path);
                                             idx += 1;
                                             if idx > offset {
-                                                let file_ino = self.file_inode(&torrent.name, &file.path);
+                                                let file_ino = self.file_inode(&torrent.source_path, &torrent.name, &file.path);
                                                 if reply.add(file_ino, idx, FileType::RegularFile, file_name) {
                                                     break;
                                                 }
@@ -1112,7 +1114,7 @@ impl Filesystem for TorrentFsFilesystem {
                                         if parts.len() == 1 {
                                             idx += 1;
                                             if idx > offset {
-                                                let file_ino = self.file_inode(&torrent.name, &file.path);
+                                                let file_ino = self.file_inode(&torrent.source_path, &torrent.name, &file.path);
                                                 if reply.add(file_ino, idx, FileType::RegularFile, parts[0]) {
                                                     break;
                                                 }
@@ -1219,7 +1221,7 @@ impl Filesystem for TorrentFsFilesystem {
                                                 if parts.len() == 1 && !parts[0].is_empty() {
                                                     idx += 1;
                                                     if idx > offset {
-                                                        let file_ino = self.file_inode(&torrent.name, &file.path);
+                                                        let file_ino = self.file_inode(&torrent.source_path, &torrent.name, &file.path);
                                                         if reply.add(file_ino, idx, FileType::RegularFile, parts[0]) {
                                                             break;
                                                         }
@@ -1672,8 +1674,8 @@ impl Filesystem for TorrentFsFilesystem {
 
     fn open(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
         if ino >= 0x9000000000000000 && ino < 0xA000000000000000 {
-            if let Some((torrent_name, file_path)) = self.find_torrent_file_by_ino(ino) {
-                match self.get_file_info_for_read(&torrent_name, &file_path) {
+            if let Some((source_path, torrent_name, file_path)) = self.find_torrent_file_by_ino(ino) {
+                match self.get_file_info_for_read(&source_path, &torrent_name, &file_path) {
                     Ok(file_info) => {
                         let fh = self.allocate_fh();
                         self.open_torrent_files.insert(fh, OpenTorrentFile {
@@ -2051,7 +2053,7 @@ mod tests {
         let fs = TorrentFsFilesystem::new(PathBuf::from("/tmp/test"));
         
         let torrent_ino = fs.torrent_inode("series", "test_torrent");
-        let file_ino = fs.file_inode("test_torrent", "test_torrent/video.mp4");
+        let file_ino = fs.file_inode("", "test_torrent", "test_torrent/video.mp4");
         let data_dir_ino = fs.data_dir_inode("series");
         let torrent_file_dir_ino = fs.torrent_file_dir_inode("test_torrent", "test_torrent/docs");
         
@@ -2073,6 +2075,29 @@ mod tests {
         
         assert!(!(data_dir_ino >= 0xB000000000000000 && data_dir_ino < 0xC000000000000000),
             "data_dir_inode should NOT fall into torrent_file_dir range");
+    }
+
+    #[test]
+    fn test_file_inode_different_source_paths() {
+        let fs = TorrentFsFilesystem::new(PathBuf::from("/tmp/test"));
+        
+        let ino1 = fs.file_inode("a/b", "test_torrent", "test_torrent/video.mp4");
+        let ino2 = fs.file_inode("", "test_torrent", "test_torrent/video.mp4");
+        let ino3 = fs.file_inode("a/b", "other_torrent", "test_torrent/video.mp4");
+        
+        assert_ne!(ino1, ino2, "Files from same torrent but different source_path should have different inodes");
+        assert_ne!(ino1, ino3, "Files from different torrents should have different inodes");
+        assert_ne!(ino2, ino3, "Files from different torrents with different source_path should have different inodes");
+    }
+
+    #[test]
+    fn test_file_inode_same_source_path_same_result() {
+        let fs = TorrentFsFilesystem::new(PathBuf::from("/tmp/test"));
+        
+        let ino1 = fs.file_inode("a/b", "test_torrent", "test_torrent/video.mp4");
+        let ino2 = fs.file_inode("a/b", "test_torrent", "test_torrent/video.mp4");
+        
+        assert_eq!(ino1, ino2, "Same input should produce same inode");
     }
 
     #[test]
