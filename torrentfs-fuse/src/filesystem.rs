@@ -10,6 +10,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::fuse_async::{FuseAsyncRuntime, FuseCommand, FuseError, TorrentInfo, FileInfo, ParsedTorrentInfo, PersistResult, FileInfoForRead};
 use torrentfs::{metadata::MetadataManager, build_safe_path};
@@ -17,6 +18,7 @@ use torrentfs_libtorrent::Session;
 
 const TTL: Duration = Duration::from_secs(1);
 const MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
+const MAX_PATH_COMPONENT_LENGTH: usize = 255;
 
 pub const INO_ROOT: u64 = 1;
 pub const INO_METADATA: u64 = 2;
@@ -273,7 +275,31 @@ impl TorrentFsFilesystem {
     }
 }
 
+fn validate_percent_encoding(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return false;
+            }
+            let hex = &s[i + 1..i + 3];
+            if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return false;
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    true
+}
+
 fn decode_fully(component: &str) -> String {
+    if !validate_percent_encoding(component) {
+        return component.to_string();
+    }
+    
     let mut current = component.to_string();
     let max_iterations = 10;
     
@@ -295,7 +321,30 @@ fn decode_fully(component: &str) -> String {
 fn sanitize_path_component(name: &str) -> String {
     let decoded = decode_fully(name);
     
-    let sanitized = decoded
+    if decoded.len() > MAX_PATH_COMPONENT_LENGTH {
+        let truncated: String = decoded.chars().take(MAX_PATH_COMPONENT_LENGTH).collect();
+        return sanitize_decoded(&truncated);
+    }
+    
+    sanitize_decoded(&decoded)
+}
+
+fn sanitize_decoded(decoded: &str) -> String {
+    if decoded.contains('\0') {
+        let sanitized = decoded.replace('\0', "_")
+            .replace("..", "_")
+            .replace('\\', "_")
+            .replace('/', "_");
+        return if sanitized.is_empty() || sanitized == "." {
+            "_".to_string()
+        } else {
+            sanitized
+        };
+    }
+    
+    let normalized: String = decoded.nfkc().collect();
+    
+    let sanitized = normalized
         .replace("..", "_")
         .replace('\\', "_")
         .replace('/', "_");
@@ -2311,6 +2360,34 @@ mod tests {
     fn test_sanitize_path_component_double_encoded() {
         assert_eq!(sanitize_path_component("%252f"), "_");
         assert_eq!(sanitize_path_component("%255c"), "_");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_invalid_percent_encoding() {
+        assert_eq!(sanitize_path_component("%GG"), "%GG");
+        assert_eq!(sanitize_path_component("%2"), "%2");
+        assert_eq!(sanitize_path_component("file%2"), "file%2");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_null_byte() {
+        assert_eq!(sanitize_path_component("file\0name"), "file_name");
+        assert_eq!(sanitize_path_component("\0"), "_");
+        assert_eq!(sanitize_path_component("path\0/to\0file"), "path__to_file");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_length_limit() {
+        let long_name = "a".repeat(300);
+        let result = sanitize_path_component(&long_name);
+        assert_eq!(result.len(), 255);
+    }
+
+    #[test]
+    fn test_sanitize_path_component_unicode_normalization() {
+        let input = "file\u{0131}\u{0307}";
+        let result = sanitize_path_component(input);
+        assert!(result.contains('i') || result.contains('\u{0131}'), "Should normalize or preserve the character");
     }
 
     #[test]

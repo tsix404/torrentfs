@@ -2112,6 +2112,7 @@ dependencies = [
  "torrentfs-libtorrent",
  "tracing",
  "tracing-subscriber",
+ "unicode-normalization",
 ]
 
 [[package]]
