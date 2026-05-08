@@ -516,7 +516,7 @@ mod tests {
 
     #[test]
     fn test_channel_capacity() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = Arc::new(tokio::runtime::Runtime::new().unwrap());
         let temp_state_dir = TempDir::new().unwrap();
         let (_temp_dir, db) = rt.block_on(setup_test_db());
         let metadata_manager = Arc::new(MetadataManager::new(Arc::new(db)).unwrap());
@@ -525,9 +525,11 @@ mod tests {
         let runtime = FuseAsyncRuntime::new(metadata_manager, session, temp_state_dir.path());
         
         let mut handles = vec![];
-        for i in 0..10 {
+        for _ in 0..10 {
             let runtime = runtime.command_tx.clone();
+            let rt = Arc::clone(&rt);
             handles.push(std::thread::spawn(move || {
+                let _enter = rt.enter();
                 let (reply_tx, reply_rx) = oneshot::channel();
                 let command = FuseCommand::ListTorrents { reply: reply_tx };
                 runtime.blocking_send(command).unwrap();
