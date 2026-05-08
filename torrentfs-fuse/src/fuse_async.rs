@@ -11,6 +11,8 @@ use torrentfs_libtorrent::Session;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 const CHANNEL_BUFFER_SIZE: usize = 256;
+const MAX_COMMAND_RETRIES: u32 = 3;
+const RETRY_DELAY_MS: u64 = 500;
 
 #[derive(Debug)]
 pub enum FuseCommand {
@@ -114,6 +116,12 @@ impl std::fmt::Display for FuseError {
 
 impl std::error::Error for FuseError {}
 
+impl FuseError {
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, FuseError::Timeout(_) | FuseError::SessionError(_))
+    }
+}
+
 pub struct FuseAsyncRuntime {
     command_tx: mpsc::Sender<FuseCommand>,
     rt: tokio::runtime::Runtime,
@@ -173,24 +181,53 @@ impl FuseAsyncRuntime {
         }
     }
     
-    pub fn send_command_with_timeout<R, F>(&self, f: F) -> Result<R, FuseError>
+    pub fn send_command_with_timeout<R, F>(&self, mut f: F) -> Result<R, FuseError>
     where
-        F: FnOnce(oneshot::Sender<Result<R, FuseError>>) -> FuseCommand,
+        F: FnMut(oneshot::Sender<Result<R, FuseError>>) -> FuseCommand,
     {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let command = f(reply_tx);
+        let mut last_error = FuseError::Timeout("No attempts made".to_string());
         
-        self.command_tx
-            .blocking_send(command)
-            .map_err(|_| FuseError::ChannelClosed)?;
-        
-        self.rt.block_on(async {
-            match timeout(IO_TIMEOUT, reply_rx).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(_)) => Err(FuseError::ChannelClosed),
-                Err(_) => Err(FuseError::Timeout("Async operation timed out".to_string())),
+        for attempt in 0..MAX_COMMAND_RETRIES {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            let command = f(reply_tx);
+            
+            match self.command_tx.blocking_send(command) {
+                Ok(()) => {}
+                Err(_) => return Err(FuseError::ChannelClosed),
             }
-        })
+            
+            let result = self.rt.block_on(async {
+                match timeout(IO_TIMEOUT, reply_rx).await {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(_)) => Err(FuseError::ChannelClosed),
+                    Err(_) => Err(FuseError::Timeout("Async operation timed out".to_string())),
+                }
+            });
+            
+            match result {
+                Ok(value) => return Ok(value),
+                Err(e) => {
+                    if !e.is_retryable() {
+                        return Err(e);
+                    }
+                    
+                    last_error = e;
+                    
+                    if attempt + 1 < MAX_COMMAND_RETRIES {
+                        let delay = RETRY_DELAY_MS * (1 << attempt);
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            delay_ms = delay,
+                            error = %last_error,
+                            "FUSE command failed, retrying"
+                        );
+                        std::thread::sleep(Duration::from_millis(delay));
+                    }
+                }
+            }
+        }
+        
+        Err(last_error)
     }
     
     async fn run_command_loop(
@@ -456,5 +493,14 @@ mod tests {
         assert!(result.is_ok());
         let torrents = result.unwrap();
         assert!(torrents.is_empty());
+    }
+
+    #[test]
+    fn test_fuse_error_is_retryable() {
+        assert!(FuseError::Timeout("test".to_string()).is_retryable());
+        assert!(FuseError::SessionError("test".to_string()).is_retryable());
+        assert!(!FuseError::DatabaseError("test".to_string()).is_retryable());
+        assert!(!FuseError::TorrentParseError("test".to_string()).is_retryable());
+        assert!(!FuseError::ChannelClosed.is_retryable());
     }
 }

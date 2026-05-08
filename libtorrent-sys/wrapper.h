@@ -28,6 +28,12 @@ typedef struct {
     uint32_t last_piece;   // Last piece index containing this file
 } libtorrent_file_entry_t;
 
+// Tracker entry structure
+typedef struct {
+    char* url;              // Tracker URL
+    int tier;               // Tracker tier (0 for primary, higher for backup)
+} libtorrent_tracker_entry_t;
+
 // Torrent info structure
 typedef struct {
     char* name;
@@ -36,6 +42,11 @@ typedef struct {
     uint32_t piece_size;  // Number of bytes per piece
     uint32_t file_count;
     libtorrent_file_entry_t* files;  // Array of file entries
+    uint32_t tracker_count;
+    libtorrent_tracker_entry_t* trackers;  // Array of tracker entries
+    char* comment;         // Torrent comment (can be null)
+    char* created_by;      // Creator string (can be null)
+    uint64_t creation_date; // Unix timestamp, 0 if not present
     libtorrent_error_t error_code;
     char* error_message;
 } libtorrent_torrent_info_t;
