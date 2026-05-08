@@ -1,6 +1,8 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dashmap::DashMap;
 use tokio::sync::broadcast;
 use torrentfs_libtorrent::{Alert, AlertType, Session};
 
@@ -16,9 +18,10 @@ pub enum AlertLoopMessage {
 
 pub struct AlertLoop {
     session: Arc<Session>,
-    _piece_cache: Arc<PieceCache>,
+    piece_cache: Arc<PieceCache>,
     metadata_manager: Arc<MetadataManager>,
     shutdown_rx: broadcast::Receiver<AlertLoopMessage>,
+    downloaded_pieces: Arc<DashMap<String, HashSet<u32>>>,
 }
 
 unsafe impl Send for AlertLoop {}
@@ -32,9 +35,10 @@ impl AlertLoop {
     ) -> Self {
         Self {
             session,
-            _piece_cache: piece_cache,
+            piece_cache,
             metadata_manager,
             shutdown_rx,
+            downloaded_pieces: Arc::new(DashMap::new()),
         }
     }
 
@@ -123,15 +127,74 @@ impl AlertLoop {
         }
     }
 
+    pub fn get_downloaded_pieces(&self, info_hash: &str) -> Vec<u32> {
+        if let Some(pieces) = self.downloaded_pieces.get(info_hash) {
+            let mut result: Vec<u32> = pieces.iter().copied().collect();
+            result.sort();
+            result
+        } else {
+            Vec::new()
+        }
+    }
+    
     async fn handle_piece_finished(&self, alert: &Alert) {
         if let Some(info_hash) = &alert.info_hash {
+            let piece_index = alert.piece_index;
+            
             tracing::info!(
                 info_hash = %info_hash,
-                piece_index = alert.piece_index,
-                "Piece finished downloading"
+                piece_index = piece_index,
+                "Piece finished downloading, reading data"
             );
-            // Out of scope for TSI-138 (MVP-5 infrastructure only):
-            // MVP-5 will add: read piece data → write PieceCache → notify oneshot channels
+            
+            let info_hash_clone = info_hash.clone();
+            let session = Arc::clone(&self.session);
+            
+            match tokio::task::spawn_blocking(move || {
+                session.read_piece(&info_hash_clone, piece_index)
+            }).await {
+                Ok(Ok(data)) => {
+                    match self.piece_cache.write_piece(info_hash, piece_index, &data) {
+                        Ok(()) => {
+                            self.downloaded_pieces
+                                .entry(info_hash.clone())
+                                .or_insert_with(HashSet::new)
+                                .insert(piece_index);
+                            
+                            tracing::info!(
+                                info_hash = %info_hash,
+                                piece_index = piece_index,
+                                size = data.len(),
+                                "Piece cached successfully"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                info_hash = %info_hash,
+                                piece_index = piece_index,
+                                error = %e,
+                                "Failed to cache piece"
+                            );
+                        }
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        info_hash = %info_hash,
+                        piece_index = piece_index,
+                        error = %e,
+                        "Failed to read piece data"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        info_hash = %info_hash,
+                        piece_index = piece_index,
+                        error = %e,
+                        "Spawn blocking task failed"
+                    );
+                }
+            }
         } else {
             tracing::debug!(
                 piece_index = alert.piece_index,
