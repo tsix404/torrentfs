@@ -158,6 +158,10 @@ impl FuseError {
     }
 }
 
+/// Async runtime for FUSE operations
+/// 
+/// Bridges synchronous FUSE callbacks with async Tokio operations using
+/// MPSC channel for request forwarding and oneshot channels for responses.
 pub struct FuseAsyncRuntime {
     command_tx: mpsc::Sender<FuseCommand>,
     rt: tokio::runtime::Runtime,
@@ -220,7 +224,11 @@ impl FuseAsyncRuntime {
             download_coordinator: Some(download_coordinator),
         }
     }
+<<<<<<< HEAD
 
+=======
+    
+>>>>>>> origin/multica/TSI-403
     /// Sends a command through the MPSC channel and waits for response
     /// 
     /// Creates a oneshot channel for the response, sends the command via MPSC,

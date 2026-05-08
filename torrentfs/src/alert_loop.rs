@@ -214,6 +214,16 @@ impl AlertLoop {
                 "Torrent download completed"
             );
             
+            if let Ok(info_hash_bytes) = hex::decode(info_hash) {
+                if let Err(e) = self.metadata_manager.update_status(&info_hash_bytes, "seeding").await {
+                    tracing::warn!(
+                        info_hash = %info_hash,
+                        error = %e,
+                        "Failed to update torrent status to seeding"
+                    );
+                }
+            }
+            
             if !self.session.is_seeding(info_hash) {
                 match self.session.resume_torrent(info_hash) {
                     Ok(()) => {
