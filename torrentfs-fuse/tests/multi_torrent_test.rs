@@ -39,24 +39,79 @@ struct TorrentStats {
     bytes_read: usize,
 }
 
+fn setup_cached_torrent(mount_path: &PathBuf, cache_dir: &PathBuf, torrent_path: &PathBuf, torrent_idx: usize) -> (String, Vec<(String, usize)>) {
+    let torrent_data = std::fs::read(torrent_path).expect("read torrent");
+    let torrent_info = torrentfs_libtorrent::parse_torrent(&torrent_data).expect("parse torrent");
+    let info_hash = torrent_info.info_hash.clone();
+    let piece_cache = torrentfs::PieceCache::with_cache_dir(cache_dir.clone()).expect("create piece cache");
+    
+    let mut file_info: Vec<(String, usize)> = Vec::new();
+    for file in &torrent_info.files {
+        file_info.push((file.path.clone(), file.size as usize));
+    }
+    
+    let mut all_content = Vec::new();
+    for (_path, len) in &file_info {
+        let start = all_content.len();
+        for i in 0..*len {
+            all_content.push(((start + i) % 256) as u8);
+        }
+    }
+    
+    let piece_size = torrent_info.piece_size as usize;
+    let total_pieces = (all_content.len() + piece_size - 1) / piece_size;
+    
+    for piece_idx in 0..total_pieces {
+        let start = piece_idx * piece_size;
+        let end = std::cmp::min(start + piece_size, all_content.len());
+        let piece_data = &all_content[start..end];
+        piece_cache.write_piece(&info_hash, piece_idx as u32, piece_data).expect("write piece");
+    }
+    
+    let torrent_name = torrent_info.name.clone();
+    (torrent_name, file_info)
+}
+
 #[test]
 fn test_concurrent_read_multiple_torrents() {
     let mount_dir = TempDir::new().unwrap();
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
     let state_path = state_dir.path().to_path_buf();
-
+    let cache_dir = TempDir::new().unwrap();
+    
     let rt = tokio::runtime::Runtime::new().unwrap();
     let runtime = rt.block_on(TorrentRuntime::new(&state_path)).expect("TorrentRuntime::new() should succeed");
     let metadata_manager = Arc::new(
         MetadataManager::new(runtime.db.clone()).unwrap()
     );
     let session = Arc::new(Session::new().unwrap());
+    let piece_cache = Arc::new(torrentfs::PieceCache::with_cache_dir(cache_dir.path().to_path_buf()).unwrap());
+    
+    let torrent_files = all_torrent_files();
+    if torrent_files.len() < 3 {
+        eprintln!("Need at least 3 .torrent files for multi-torrent test, found {}, skipping", torrent_files.len());
+        return;
+    }
+    
+    let mut torrent_names = Vec::new();
+    for (idx, src) in torrent_files.iter().enumerate() {
+        let (name, _files) = setup_cached_torrent(&mount_path, &cache_dir.path().to_path_buf(), src, idx);
+        torrent_names.push(name);
+        
+        let torrent_data = std::fs::read(src).expect("read torrent");
+        session.add_torrent_paused(&torrent_data, "/tmp/torrentfs").expect("add torrent");
+    }
+    
+    let download_coordinator = Arc::new(
+        torrentfs::DownloadCoordinator::new(Arc::clone(&session), Arc::clone(&piece_cache))
+    );
 
-    let fs = TorrentFsFilesystem::new_with_async(
+    let fs = TorrentFsFilesystem::new_with_download_coordinator(
         state_path.clone(),
         metadata_manager,
         session,
+        download_coordinator,
     );
 
     let options = vec![
@@ -66,13 +121,6 @@ fn test_concurrent_read_multiple_torrents() {
     let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
 
     thread::sleep(Duration::from_millis(500));
-
-    let torrent_files = all_torrent_files();
-    if torrent_files.len() < 3 {
-        eprintln!("Need at least 3 .torrent files for multi-torrent test, found {}, skipping", torrent_files.len());
-        drop(guard);
-        return;
-    }
 
     for (idx, src) in torrent_files.iter().enumerate() {
         let dest = mount_path.join("metadata").join(format!("{}_{}.torrent", idx, src.file_name().unwrap().to_string_lossy()));
@@ -282,6 +330,7 @@ fn test_torrent_switching_stress() {
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
     let state_path = state_dir.path().to_path_buf();
+    let cache_dir = TempDir::new().unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let runtime = rt.block_on(TorrentRuntime::new(&state_path)).expect("TorrentRuntime::new() should succeed");
@@ -289,11 +338,30 @@ fn test_torrent_switching_stress() {
         MetadataManager::new(runtime.db.clone()).unwrap()
     );
     let session = Arc::new(Session::new().unwrap());
+    let piece_cache = Arc::new(torrentfs::PieceCache::with_cache_dir(cache_dir.path().to_path_buf()).unwrap());
 
-    let fs = TorrentFsFilesystem::new_with_async(
+    let torrent_files = all_torrent_files();
+    if torrent_files.len() < 3 {
+        eprintln!("Need at least 3 .torrent files for switching test, found {}, skipping", torrent_files.len());
+        return;
+    }
+
+    for (idx, src) in torrent_files.iter().enumerate() {
+        let (name, _files) = setup_cached_torrent(&mount_path, &cache_dir.path().to_path_buf(), src, idx);
+        
+        let torrent_data = std::fs::read(src).expect("read torrent");
+        session.add_torrent_paused(&torrent_data, "/tmp/torrentfs").expect("add torrent");
+    }
+
+    let download_coordinator = Arc::new(
+        torrentfs::DownloadCoordinator::new(Arc::clone(&session), Arc::clone(&piece_cache))
+    );
+
+    let fs = TorrentFsFilesystem::new_with_download_coordinator(
         state_path.clone(),
         metadata_manager,
         session,
+        download_coordinator,
     );
 
     let options = vec![
@@ -303,13 +371,6 @@ fn test_torrent_switching_stress() {
     let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
 
     thread::sleep(Duration::from_millis(500));
-
-    let torrent_files = all_torrent_files();
-    if torrent_files.len() < 3 {
-        eprintln!("Need at least 3 .torrent files for switching test, found {}, skipping", torrent_files.len());
-        drop(guard);
-        return;
-    }
 
     for (idx, src) in torrent_files.iter().enumerate() {
         let dest = mount_path.join("metadata").join(format!("switch_{}.torrent", idx));
@@ -406,6 +467,7 @@ fn test_no_resource_conflict_between_torrents() {
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
     let state_path = state_dir.path().to_path_buf();
+    let cache_dir = TempDir::new().unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let runtime = rt.block_on(TorrentRuntime::new(&state_path)).expect("TorrentRuntime::new() should succeed");
@@ -413,11 +475,30 @@ fn test_no_resource_conflict_between_torrents() {
         MetadataManager::new(runtime.db.clone()).unwrap()
     );
     let session = Arc::new(Session::new().unwrap());
+    let piece_cache = Arc::new(torrentfs::PieceCache::with_cache_dir(cache_dir.path().to_path_buf()).unwrap());
 
-    let fs = TorrentFsFilesystem::new_with_async(
+    let torrent_files = all_torrent_files();
+    if torrent_files.len() < 3 {
+        eprintln!("Need at least 3 .torrent files for conflict test, found {}, skipping", torrent_files.len());
+        return;
+    }
+
+    for (idx, src) in torrent_files.iter().enumerate() {
+        let (name, _files) = setup_cached_torrent(&mount_path, &cache_dir.path().to_path_buf(), src, idx);
+        
+        let torrent_data = std::fs::read(src).expect("read torrent");
+        session.add_torrent_paused(&torrent_data, "/tmp/torrentfs").expect("add torrent");
+    }
+
+    let download_coordinator = Arc::new(
+        torrentfs::DownloadCoordinator::new(Arc::clone(&session), Arc::clone(&piece_cache))
+    );
+
+    let fs = TorrentFsFilesystem::new_with_download_coordinator(
         state_path.clone(),
         metadata_manager,
         session,
+        download_coordinator,
     );
 
     let options = vec![
@@ -427,13 +508,6 @@ fn test_no_resource_conflict_between_torrents() {
     let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
 
     thread::sleep(Duration::from_millis(500));
-
-    let torrent_files = all_torrent_files();
-    if torrent_files.len() < 3 {
-        eprintln!("Need at least 3 .torrent files for conflict test, found {}, skipping", torrent_files.len());
-        drop(guard);
-        return;
-    }
 
     for (idx, src) in torrent_files.iter().enumerate() {
         let dest = mount_path.join("metadata").join(format!("conflict_{}.torrent", idx));
