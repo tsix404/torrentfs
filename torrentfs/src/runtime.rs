@@ -176,14 +176,17 @@ pub fn sanitize_path_component(component: &str) -> Result<String> {
 
     for part in path.components() {
         match part {
+            Component::CurDir => {
+                bail!("Path component contains current directory reference: '.' is not allowed")
+            }
+            Component::ParentDir => {
+                bail!("Path component contains directory traversal: '..' is not allowed")
+            }
             Component::RootDir => {
                 bail!("Path component contains absolute path: root directory is not allowed")
             }
             Component::Prefix(_) => {
                 bail!("Path component contains Windows prefix which is not allowed")
-            }
-            Component::CurDir => {
-                bail!("Path component contains current directory '.' which is not allowed")
             }
             _ => {}
         }
@@ -345,10 +348,14 @@ impl TorrentRuntime {
                 continue;
             }
             
-            let save_path = build_safe_path(
-                &self.state_dir.join("data"),
-                &[source_path.as_str(), torrent_name.as_str()]
-            )?;
+            let save_path = {
+                let mut path_parts: Vec<&str> = source_path.split('/').filter(|p| !p.is_empty()).collect();
+                path_parts.push(torrent_name.as_str());
+                build_safe_path(
+                    &self.state_dir.join("data"),
+                    &path_parts
+                )?
+            };
             
             let save_path_str = save_path.to_string_lossy().into_owned();
             
@@ -599,13 +606,15 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_path_component_edge_cases() {
+    fn test_sanitize_path_component_dots() {
+        assert!(sanitize_path_component(".").is_err());
+        assert!(sanitize_path_component("..").is_err());
         assert!(sanitize_path_component("..file").is_err());
         assert!(sanitize_path_component("file..").is_err());
         assert!(sanitize_path_component("...").is_err());
         assert!(sanitize_path_component("....").is_err());
         assert!(sanitize_path_component(".....").is_err());
-        assert!(sanitize_path_component(".").is_err());
+        assert!(sanitize_path_component("valid").is_ok());
     }
 
     #[test]
