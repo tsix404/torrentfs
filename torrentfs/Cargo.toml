@@ -21,6 +21,7 @@ percent-encoding.workspace = true
 unicode-normalization.workspace = true
 torrentfs-libtorrent = { path = "../torrentfs-libtorrent", version = "0.1.0" }
 dashmap.workspace = true
+sha1 = "0.11.0"
 
 [dev-dependencies]
 tokio.workspace = true
