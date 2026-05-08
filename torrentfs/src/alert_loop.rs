@@ -42,13 +42,6 @@ impl AlertLoop {
         }
     }
     
-    pub fn get_downloaded_pieces(&self, info_hash: &str) -> Vec<u32> {
-        self.downloaded_pieces
-            .get(info_hash)
-            .map(|entry| entry.iter().copied().collect())
-            .unwrap_or_default()
-    }
-
     pub async fn run(mut self) {
         tracing::info!("Alert loop started");
         
@@ -134,17 +127,28 @@ impl AlertLoop {
         }
     }
 
+    pub fn get_downloaded_pieces(&self, info_hash: &str) -> Vec<u32> {
+        if let Some(pieces) = self.downloaded_pieces.get(info_hash) {
+            let mut result: Vec<u32> = pieces.iter().copied().collect();
+            result.sort();
+            result
+        } else {
+            Vec::new()
+        }
+    }
+    
     async fn handle_piece_finished(&self, alert: &Alert) {
         if let Some(info_hash) = &alert.info_hash {
+            let piece_index = alert.piece_index;
+            
             tracing::info!(
                 info_hash = %info_hash,
-                piece_index = alert.piece_index,
-                "Piece finished downloading"
+                piece_index = piece_index,
+                "Piece finished downloading, reading data"
             );
             
             let info_hash_for_read = info_hash.clone();
             let info_hash_for_cache = info_hash.clone();
-            let piece_index = alert.piece_index;
             let session = Arc::clone(&self.session);
             let piece_cache = Arc::clone(&self.piece_cache);
             let downloaded_pieces = Arc::clone(&self.downloaded_pieces);
@@ -161,36 +165,36 @@ impl AlertLoop {
                                 .insert(piece_index);
                             
                             tracing::info!(
-                                info_hash = %info_hash_for_cache,
+                                info_hash = %info_hash,
                                 piece_index = piece_index,
-                                data_len = data.len(),
-                                "Piece data cached successfully"
+                                size = data.len(),
+                                "Piece cached successfully"
                             );
                         }
                         Err(e) => {
                             tracing::warn!(
-                                info_hash = %info_hash_for_cache,
+                                info_hash = %info_hash,
                                 piece_index = piece_index,
                                 error = %e,
-                                "Failed to write piece to cache"
+                                "Failed to cache piece"
                             );
                         }
                     }
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(
-                        info_hash = %info_hash_for_cache,
+                        info_hash = %info_hash,
                         piece_index = piece_index,
                         error = %e,
-                        "Failed to read piece data from session"
+                        "Failed to read piece data"
                     );
                 }
                 Err(e) => {
                     tracing::error!(
-                        info_hash = %info_hash_for_cache,
+                        info_hash = %info_hash,
                         piece_index = piece_index,
                         error = %e,
-                        "Piece read task failed"
+                        "Spawn blocking task failed"
                     );
                 }
             }
