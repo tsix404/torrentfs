@@ -345,9 +345,14 @@ impl TorrentRuntime {
                 continue;
             }
             
+            let mut path_parts: Vec<&str> = source_path
+                .split('/')
+                .filter(|p| !p.trim().is_empty())
+                .collect();
+            path_parts.push(torrent_name.as_str());
             let save_path = build_safe_path(
                 &self.state_dir.join("data"),
-                &[source_path.as_str(), torrent_name.as_str()]
+                &path_parts
             )?;
             
             let save_path_str = save_path.to_string_lossy().into_owned();
