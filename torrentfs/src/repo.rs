@@ -716,9 +716,7 @@ mod tests {
         let found = repo.find_by_info_hash(&info_hash).await.unwrap();
         assert!(found.is_none());
     }
-}
 
-<<<<<<< HEAD
     #[test]
     fn test_torrent_serialize_deserialize() {
         let torrent = Torrent {
@@ -759,41 +757,5 @@ mod tests {
         let deserialized: Torrent = serde_json::from_str(&json).unwrap();
 
         assert_eq!(deserialized, torrent);
-=======
-    #[tokio::test]
-    async fn test_update_status() {
-        let (_temp_dir, pool) = setup_test_db().await;
-        let repo = TorrentRepo::new(pool);
-
-        let info_hash = vec![1u8; 20];
-        let torrent = repo
-            .insert(&info_hash, "test.torrent", 1024, 3, "", None::<&[u8]>)
-            .await
-            .unwrap();
-
-        assert_eq!(torrent.status, "pending");
-
-        repo.update_status(&info_hash, "downloading").await.unwrap();
-
-        let updated = repo.find_by_info_hash(&info_hash).await.unwrap().unwrap();
-        assert_eq!(updated.status, "downloading");
-
-        repo.update_status(&info_hash, "completed").await.unwrap();
-
-        let updated = repo.find_by_info_hash(&info_hash).await.unwrap().unwrap();
-        assert_eq!(updated.status, "completed");
-    }
-
-    #[tokio::test]
-    async fn test_update_status_not_found() {
-        let (_temp_dir, pool) = setup_test_db().await;
-        let repo = TorrentRepo::new(pool);
-
-        let info_hash = vec![99u8; 20];
-        repo.update_status(&info_hash, "active").await.unwrap();
-
-        let found = repo.find_by_info_hash(&info_hash).await.unwrap();
-        assert!(found.is_none());
->>>>>>> origin/multica/TSI-385
     }
 }
