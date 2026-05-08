@@ -55,7 +55,11 @@ impl PieceCache {
     }
 
     pub fn has_piece(&self, info_hash: &str, piece_idx: u32) -> bool {
-        self.piece_path(info_hash, piece_idx).map(|p| p.exists()).unwrap_or(false)
+        let path = match self.piece_path(info_hash, piece_idx) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        path.exists() && path.metadata().map(|m| m.len() > 0).unwrap_or(false)
     }
 
     pub fn read_piece(&self, info_hash: &str, piece_idx: u32) -> Result<Vec<u8>> {
@@ -164,6 +168,23 @@ mod tests {
 
         cache.write_piece(info_hash, piece_idx, b"data").unwrap();
         assert!(cache.has_piece(info_hash, piece_idx));
+    }
+
+    #[test]
+    fn test_has_piece_zero_size() {
+        let (_temp_dir, cache) = setup();
+        let info_hash = "abc123def456abc123def456abc123def456abc1";
+        let piece_idx = 10u32;
+
+        assert!(!cache.has_piece(info_hash, piece_idx));
+
+        let piece_path = cache.piece_path(info_hash, piece_idx).unwrap();
+        let piece_dir = piece_path.parent().unwrap();
+        std::fs::create_dir_all(piece_dir).unwrap();
+        std::fs::write(&piece_path, b"").unwrap();
+
+        assert_eq!(piece_path.metadata().unwrap().len(), 0);
+        assert!(!cache.has_piece(info_hash, piece_idx));
     }
 
     #[test]
