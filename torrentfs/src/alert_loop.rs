@@ -136,10 +136,12 @@ impl AlertLoop {
 
     async fn handle_piece_finished(&self, alert: &Alert) {
         if let Some(info_hash) = &alert.info_hash {
+            let piece_index = alert.piece_index;
+            
             tracing::info!(
                 info_hash = %info_hash,
-                piece_index = alert.piece_index,
-                "Piece finished downloading"
+                piece_index = piece_index,
+                "Piece finished downloading, reading data"
             );
             
             let info_hash_for_read = info_hash.clone();
