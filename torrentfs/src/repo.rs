@@ -250,6 +250,17 @@ impl TorrentRepo {
         Ok(())
     }
 
+    pub async fn update_status(&self, info_hash: &[u8], status: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE torrents SET status = ? WHERE info_hash = ?",
+        )
+        .bind(status)
+        .bind(info_hash)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn list_all_with_data(&self) -> Result<Vec<TorrentWithData>> {
         let rows = sqlx::query_as::<_, (i64, Vec<u8>, String, i64, i64, String, String, Option<Vec<u8>>, Option<Vec<u8>>, String)>(
             "SELECT id, info_hash, name, total_size, file_count, status, source_path, torrent_data, resume_data, added_at
@@ -625,5 +636,41 @@ mod tests {
 
         let not_found = repo.find_by_name("nonexistent").await.unwrap();
         assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_update_status() {
+        let (_temp_dir, pool) = setup_test_db().await;
+        let repo = TorrentRepo::new(pool);
+
+        let info_hash = vec![1u8; 20];
+        let torrent = repo
+            .insert(&info_hash, "test.torrent", 1024, 3, "", None::<&[u8]>)
+            .await
+            .unwrap();
+
+        assert_eq!(torrent.status, "pending");
+
+        repo.update_status(&info_hash, "downloading").await.unwrap();
+
+        let updated = repo.find_by_info_hash(&info_hash).await.unwrap().unwrap();
+        assert_eq!(updated.status, "downloading");
+
+        repo.update_status(&info_hash, "completed").await.unwrap();
+
+        let updated = repo.find_by_info_hash(&info_hash).await.unwrap().unwrap();
+        assert_eq!(updated.status, "completed");
+    }
+
+    #[tokio::test]
+    async fn test_update_status_not_found() {
+        let (_temp_dir, pool) = setup_test_db().await;
+        let repo = TorrentRepo::new(pool);
+
+        let info_hash = vec![99u8; 20];
+        repo.update_status(&info_hash, "active").await.unwrap();
+
+        let found = repo.find_by_info_hash(&info_hash).await.unwrap();
+        assert!(found.is_none());
     }
 }
