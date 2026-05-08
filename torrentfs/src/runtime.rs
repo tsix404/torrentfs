@@ -1113,6 +1113,12 @@ mod proptests {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod build_safe_path_tests {
+    use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_build_safe_path_with_multilevel_source_path() {
