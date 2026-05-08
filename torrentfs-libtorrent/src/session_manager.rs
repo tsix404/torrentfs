@@ -176,19 +176,19 @@ impl SessionManager {
         let info_hash = info.info_hash.clone();
         let name = info.name.clone();
         
-        if paused {
-            self.session.add_torrent_paused(&torrent_data, save_path)?;
-        } else {
-            self.session.add_torrent_paused(&torrent_data, save_path)?;
+        self.session.add_torrent_paused(&torrent_data, save_path)?;
+        
+        if !paused {
             if !self.session.find_torrent(&info_hash) {
                 bail!("Failed to add torrent to session");
             }
+            self.session.resume_torrent(&info_hash)?;
         }
         
         let entry = TorrentEntry {
             info_hash: info_hash.clone(),
             name: name.clone(),
-            status: if paused { TorrentStatus::Paused } else { TorrentStatus::Pending },
+            status: if paused { TorrentStatus::Paused } else { TorrentStatus::Downloading },
             save_path: save_path.to_string(),
             torrent_data,
         };
