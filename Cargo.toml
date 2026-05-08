@@ -30,3 +30,4 @@ percent-encoding = "2.3"
 unicode-normalization = "0.1"
 dashmap = "5.5"
 notify = { version = "6.1", features = ["macos_fsevent"] }
+proptest = "1.4"
