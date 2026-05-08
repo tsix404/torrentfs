@@ -14,11 +14,12 @@ use percent_encoding::percent_decode;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::fuse_async::{FuseAsyncRuntime, FuseCommand, FuseError, TorrentInfo, FileInfo, ParsedTorrentInfo, PersistResult, FileInfoForRead};
-use torrentfs::{metadata::MetadataManager, build_safe_path, sanitize_path_component};
+use torrentfs::{metadata::MetadataManager, build_safe_path};
 use torrentfs_libtorrent::Session;
 
 const TTL: Duration = Duration::from_secs(1);
 const MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
+const MAX_PATH_COMPONENT_LENGTH: usize = 255;
 
 pub const INO_ROOT: u64 = 1;
 pub const INO_METADATA: u64 = 2;
@@ -328,6 +329,8 @@ fn sanitize_path_component(name: &str) -> Result<String> {
     
     if sanitized.is_empty() || sanitized == "." {
         Ok("_".to_string())
+    } else if sanitized.len() > MAX_PATH_COMPONENT_LENGTH {
+        Err(anyhow::anyhow!("path component exceeds maximum length of 255 bytes"))
     } else {
         Ok(sanitized)
     }
@@ -2375,5 +2378,42 @@ mod tests {
     #[test]
     fn test_sanitize_path_mixed() {
         assert_eq!(sanitize_path("valid/../escape\\path").unwrap(), "valid/_/escape_path");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_length_limit() {
+        let short_name = "a".repeat(100);
+        assert_eq!(sanitize_path_component(&short_name).unwrap(), short_name);
+        
+        let exact_limit = "b".repeat(255);
+        assert_eq!(sanitize_path_component(&exact_limit).unwrap().len(), 255);
+        
+        let too_long = "c".repeat(300);
+        assert!(sanitize_path_component(&too_long).is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_multibyte_utf8() {
+        let emoji = "😀";
+        let emoji_bytes = emoji.len();
+        assert_eq!(emoji_bytes, 4);
+        
+        let num_emojis = 64;
+        let emoji_string = emoji.repeat(num_emojis);
+        assert_eq!(emoji_string.len(), 256);
+        
+        assert!(sanitize_path_component(&emoji_string).is_err());
+        
+        let valid_emoji_string = emoji.repeat(63);
+        assert_eq!(valid_emoji_string.len(), 252);
+        assert!(sanitize_path_component(&valid_emoji_string).is_ok());
+        
+        let mixed = "a".repeat(252) + "😀";
+        assert_eq!(mixed.len(), 256);
+        assert!(sanitize_path_component(&mixed).is_err());
+        
+        let mixed_valid = "a".repeat(251) + "😀";
+        assert_eq!(mixed_valid.len(), 255);
+        assert!(sanitize_path_component(&mixed_valid).is_ok());
     }
 }
