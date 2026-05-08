@@ -16,6 +16,9 @@ pub enum TorrentFsError {
 
     #[error("Invalid info_hash: {0}")]
     InvalidInfoHash(String),
+
+    #[error("Libtorrent error: {0}")]
+    Libtorrent(#[from] torrentfs_libtorrent::error::LibtorrentError),
 }
 
 pub type Result<T> = std::result::Result<T, TorrentFsError>;
