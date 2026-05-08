@@ -62,6 +62,44 @@ libtorrent_torrent_info_t* libtorrent_parse_torrent(const uint8_t* data, size_t 
         // Get file count
         info->file_count = ti.files().num_files();
         
+        // Get trackers (announce-list)
+        std::vector<libtorrent::announce_entry> trackers = ti.trackers();
+        info->tracker_count = static_cast<uint32_t>(trackers.size());
+        if (info->tracker_count > 0) {
+            info->trackers = static_cast<libtorrent_tracker_entry_t*>(
+                malloc(info->tracker_count * sizeof(libtorrent_tracker_entry_t)));
+            if (!info->trackers) {
+                throw std::bad_alloc();
+            }
+            memset(info->trackers, 0, info->tracker_count * sizeof(libtorrent_tracker_entry_t));
+            
+            for (uint32_t i = 0; i < info->tracker_count; i++) {
+                info->trackers[i].url = strdup(trackers[i].url.c_str());
+                info->trackers[i].tier = trackers[i].tier;
+            }
+        } else {
+            info->trackers = nullptr;
+        }
+        
+        // Get comment (can be empty)
+        std::string comment = ti.comment();
+        if (!comment.empty()) {
+            info->comment = strdup(comment.c_str());
+        } else {
+            info->comment = nullptr;
+        }
+        
+        // Get creator (can be empty)
+        std::string creator = ti.creator();
+        if (!creator.empty()) {
+            info->created_by = strdup(creator.c_str());
+        } else {
+            info->created_by = nullptr;
+        }
+        
+        // Get creation date (0 if not present)
+        info->creation_date = ti.creation_date();
+        
         // Get file list
         if (info->file_count > 0) {
             const auto& fs = ti.files();
@@ -129,6 +167,20 @@ void libtorrent_free_torrent_info(libtorrent_torrent_info_t* info) {
         }
         free(info->files);
     }
+    
+    // Free tracker list
+    if (info->trackers) {
+        for (uint32_t i = 0; i < info->tracker_count; i++) {
+            if (info->trackers[i].url) {
+                free(info->trackers[i].url);
+            }
+        }
+        free(info->trackers);
+    }
+    
+    // Free comment and creator
+    if (info->comment) free(info->comment);
+    if (info->created_by) free(info->created_by);
     
     if (info->error_message) free(info->error_message);
     

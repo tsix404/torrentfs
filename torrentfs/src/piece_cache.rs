@@ -264,4 +264,41 @@ mod tests {
         let data = cache.read_piece(valid_hash, piece_idx).unwrap();
         assert_eq!(data, b"data");
     }
+
+    #[test]
+    fn test_atomic_write() {
+        let (_temp_dir, cache) = setup();
+        let info_hash = "abc123def456abc123def456abc123def456abc1";
+        let piece_idx = 0u32;
+        let data = b"test piece data";
+
+        cache.write_piece(info_hash, piece_idx, data).unwrap();
+
+        let temp_path = cache.cache_dir.join(info_hash).join("0.tmp");
+        assert!(!temp_path.exists(), "Temporary file should be removed after write");
+
+        let final_path = cache.cache_dir.join(info_hash).join("0.piece");
+        assert!(final_path.exists(), "Final piece file should exist");
+        assert_eq!(std::fs::read(&final_path).unwrap(), data);
+    }
+
+    #[test]
+    fn test_scan_cached_pieces() {
+        let (_temp_dir, cache) = setup();
+        let hash1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let hash2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        cache.write_piece(hash1, 0, b"data1").unwrap();
+        cache.write_piece(hash1, 2, b"data2").unwrap();
+        cache.write_piece(hash2, 1, b"data3").unwrap();
+
+        let result = cache.scan_cached_pieces().unwrap();
+        assert_eq!(result.len(), 2);
+
+        let hash1_result = result.iter().find(|(h, _)| h == hash1).unwrap();
+        assert_eq!(hash1_result.1, vec![0u32, 2]);
+
+        let hash2_result = result.iter().find(|(h, _)| h == hash2).unwrap();
+        assert_eq!(hash2_result.1, vec![1u32]);
+    }
 }
