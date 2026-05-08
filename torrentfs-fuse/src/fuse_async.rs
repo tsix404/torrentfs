@@ -152,19 +152,12 @@ impl std::fmt::Display for FuseError {
 
 impl std::error::Error for FuseError {}
 
-<<<<<<< HEAD
 impl FuseError {
     pub fn is_retryable(&self) -> bool {
         matches!(self, FuseError::Timeout(_) | FuseError::SessionError(_))
     }
 }
 
-=======
-/// Async runtime for FUSE operations
-/// 
-/// Bridges synchronous FUSE callbacks with async Tokio operations using
-/// MPSC channel for request forwarding and oneshot channels for responses.
->>>>>>> origin/multica/TSI-420
 pub struct FuseAsyncRuntime {
     command_tx: mpsc::Sender<FuseCommand>,
     rt: tokio::runtime::Runtime,
@@ -228,9 +221,6 @@ impl FuseAsyncRuntime {
         }
     }
     
-<<<<<<< HEAD
-    pub fn send_command_with_timeout<R, F>(&self, mut f: F) -> Result<R, FuseError>
-=======
     /// Sends a command through the MPSC channel and waits for response
     /// 
     /// Creates a oneshot channel for the response, sends the command via MPSC,
@@ -239,8 +229,7 @@ impl FuseAsyncRuntime {
     /// # Errors
     /// - `ChannelClosed`: MPSC sender dropped (runtime shutdown)
     /// - `Timeout`: Response not received within timeout period
-    pub fn send_command_with_timeout<R, F>(&self, f: F) -> Result<R, FuseError>
->>>>>>> origin/multica/TSI-420
+    pub fn send_command_with_timeout<R, F>(&self, mut f: F) -> Result<R, FuseError>
     where
         F: FnMut(oneshot::Sender<Result<R, FuseError>>) -> FuseCommand,
     {
