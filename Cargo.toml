@@ -31,3 +31,4 @@ unicode-normalization = "0.1"
 dashmap = "6.1.0"
 notify = { version = "6.1", features = ["macos_fsevent"] }
 proptest = "1.4"
+sysinfo = "0.30"
