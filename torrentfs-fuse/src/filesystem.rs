@@ -1567,7 +1567,7 @@ impl Filesystem for TorrentFsFilesystem {
             }
         };
         
-        let mut source_path_parts: Vec<String> = if path.contains('/') {
+        let source_path_parts: Vec<String> = if path.contains('/') {
             let parts: Vec<&str> = path.rsplitn(2, '/').collect();
             if parts.len() > 1 {
                 let mut sanitized_parts = Vec::new();

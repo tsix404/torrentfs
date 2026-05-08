@@ -106,9 +106,6 @@ pub fn sanitize_path_component(component: &str) -> Result<String> {
             Component::Prefix(_) => {
                 bail!("Path component contains Windows prefix which is not allowed")
             }
-            Component::CurDir => {
-                bail!("Path component contains current directory '.' which is not allowed")
-            }
             _ => {}
         }
     }
@@ -510,23 +507,15 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
-    fn test_sanitize_path_component_edge_cases() {
-=======
     fn test_sanitize_path_component_dots() {
         assert!(sanitize_path_component(".").is_err());
         assert!(sanitize_path_component("..").is_err());
->>>>>>> 2df1981 (fix: reject '.' and improve '..' handling in sanitize_path_component)
         assert!(sanitize_path_component("..file").is_err());
         assert!(sanitize_path_component("file..").is_err());
         assert!(sanitize_path_component("...").is_err());
         assert!(sanitize_path_component("....").is_err());
-<<<<<<< HEAD
         assert!(sanitize_path_component(".....").is_err());
-        assert!(sanitize_path_component(".").is_err());
-=======
         assert!(sanitize_path_component("valid").is_ok());
->>>>>>> 2df1981 (fix: reject '.' and improve '..' handling in sanitize_path_component)
     }
 
     #[test]

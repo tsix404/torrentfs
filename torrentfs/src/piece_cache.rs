@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::error::{Result, TorrentFsError};
+use crate::error::Result;
 
 pub struct PieceCache {
     cache_dir: PathBuf,
