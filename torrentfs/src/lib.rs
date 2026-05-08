@@ -5,6 +5,7 @@ pub mod error;
 pub mod metadata;
 pub mod piece_cache;
 pub mod repo;
+pub mod resume_saver;
 pub mod runtime;
 
 pub use alert_loop::{AlertLoop, AlertLoopMessage};
@@ -13,11 +14,21 @@ pub use download::DownloadCoordinator;
 pub use metadata::MetadataManager;
 pub use piece_cache::PieceCache;
 pub use repo::{TorrentRepo, TorrentWithData};
-pub use runtime::{TorrentRuntime, sanitize_path_component, build_safe_path};
+pub use resume_saver::{ResumeSaver, ResumeSaverConfig};
+pub use runtime::{TorrentRuntime, TorrentRuntimeConfig, sanitize_path_component, build_safe_path};
 
 pub async fn init(state_dir: &std::path::Path) -> anyhow::Result<TorrentRuntime> {
     let runtime = TorrentRuntime::new(state_dir).await?;
-    tracing::info!("TorrentFS core initialized with alert loop");
+    tracing::info!("TorrentFS core initialized with alert loop and resume saver");
+    Ok(runtime)
+}
+
+pub async fn init_with_config(
+    state_dir: &std::path::Path,
+    config: TorrentRuntimeConfig,
+) -> anyhow::Result<TorrentRuntime> {
+    let runtime = TorrentRuntime::with_config(state_dir, config).await?;
+    tracing::info!("TorrentFS core initialized with custom config");
     Ok(runtime)
 }
 
