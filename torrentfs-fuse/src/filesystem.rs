@@ -273,7 +273,7 @@ impl TorrentFsFilesystem {
     }
 }
 
-fn sanitize_path_component(name: &str) -> String {
+fn sanitize_path_component(name: &str) -> Result<String, &'static str> {
     let sanitized = name
         .replace("..", "_")
         .replace('\\', "_")
@@ -286,17 +286,17 @@ fn sanitize_path_component(name: &str) -> String {
     };
     
     if result.len() > MAX_PATH_COMPONENT_LENGTH {
-        result[..MAX_PATH_COMPONENT_LENGTH].to_string()
+        Err("path component exceeds maximum length of 255 bytes")
     } else {
-        result
+        Ok(result)
     }
 }
 
-fn sanitize_path(path: &str) -> String {
+fn sanitize_path(path: &str) -> Result<String, &'static str> {
     path.split('/')
         .map(|component| sanitize_path_component(component))
-        .collect::<Vec<_>>()
-        .join("/")
+        .collect::<Result<Vec<_>, _>>()
+        .map(|v| v.join("/"))
 }
 
 impl TorrentFsFilesystem {
@@ -1584,11 +1584,27 @@ impl Filesystem for TorrentFsFilesystem {
         let data = open_file.data.clone();
         
         let raw_name = path.rsplit('/').next().unwrap_or(&path).to_string();
-        let name = sanitize_path_component(&raw_name);
+        let name = match sanitize_path_component(&raw_name) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::error!("Invalid path component '{}': {}", raw_name, e);
+                self.metadata_entries.remove(&ino);
+                reply.error(EINVAL);
+                return;
+            }
+        };
         let source_path = if path.contains('/') {
             let parts: Vec<&str> = path.rsplitn(2, '/').collect();
             if parts.len() > 1 {
-                sanitize_path(parts[1])
+                match sanitize_path(parts[1]) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!("Invalid source path '{}': {}", parts[1], e);
+                        self.metadata_entries.remove(&ino);
+                        reply.error(EINVAL);
+                        return;
+                    }
+                }
             } else {
                 String::new()
             }
@@ -2244,68 +2260,91 @@ mod tests {
 
     #[test]
     fn test_sanitize_path_component_normal() {
-        assert_eq!(sanitize_path_component("file.txt"), "file.txt");
-        assert_eq!(sanitize_path_component("my-torrent"), "my-torrent");
+        assert_eq!(sanitize_path_component("file.txt").unwrap(), "file.txt");
+        assert_eq!(sanitize_path_component("my-torrent").unwrap(), "my-torrent");
     }
 
     #[test]
     fn test_sanitize_path_component_traversal() {
-        assert_eq!(sanitize_path_component(".."), "_");
-        assert_eq!(sanitize_path_component("../../../etc/passwd"), "______etc_passwd");
+        assert_eq!(sanitize_path_component("..").unwrap(), "_");
+        assert_eq!(sanitize_path_component("../../../etc/passwd").unwrap(), "______etc_passwd");
     }
 
     #[test]
     fn test_sanitize_path_component_backslash() {
-        assert_eq!(sanitize_path_component("..\\passwd"), "__passwd");
-        assert_eq!(sanitize_path_component("folder\\file"), "folder_file");
+        assert_eq!(sanitize_path_component("..\\passwd").unwrap(), "__passwd");
+        assert_eq!(sanitize_path_component("folder\\file").unwrap(), "folder_file");
     }
 
     #[test]
     fn test_sanitize_path_component_slash() {
-        assert_eq!(sanitize_path_component("path/to/file"), "path_to_file");
+        assert_eq!(sanitize_path_component("path/to/file").unwrap(), "path_to_file");
     }
 
     #[test]
     fn test_sanitize_path_component_empty() {
-        assert_eq!(sanitize_path_component(""), "_");
-        assert_eq!(sanitize_path_component("."), "_");
+        assert_eq!(sanitize_path_component("").unwrap(), "_");
+        assert_eq!(sanitize_path_component(".").unwrap(), "_");
     }
 
     #[test]
     fn test_sanitize_path_normal() {
-        assert_eq!(sanitize_path("media/video"), "media/video");
-        assert_eq!(sanitize_path("anime/series/2024"), "anime/series/2024");
+        assert_eq!(sanitize_path("media/video").unwrap(), "media/video");
+        assert_eq!(sanitize_path("anime/series/2024").unwrap(), "anime/series/2024");
     }
 
     #[test]
     fn test_sanitize_path_traversal() {
-        assert_eq!(sanitize_path("../etc/passwd"), "_/etc/passwd");
-        assert_eq!(sanitize_path("../../data"), "_/_/data");
-        assert_eq!(sanitize_path("normal/../../../escape"), "normal/_/_/_/escape");
+        assert_eq!(sanitize_path("../etc/passwd").unwrap(), "_/etc/passwd");
+        assert_eq!(sanitize_path("../../data").unwrap(), "_/_/data");
+        assert_eq!(sanitize_path("normal/../../../escape").unwrap(), "normal/_/_/_/escape");
     }
 
     #[test]
     fn test_sanitize_path_backslash() {
-        assert_eq!(sanitize_path("media\\video"), "media_video");
-        assert_eq!(sanitize_path("..\\windows\\system"), "__windows_system");
+        assert_eq!(sanitize_path("media\\video").unwrap(), "media_video");
+        assert_eq!(sanitize_path("..\\windows\\system").unwrap(), "__windows_system");
     }
 
     #[test]
     fn test_sanitize_path_mixed() {
-        assert_eq!(sanitize_path("valid/../escape\\path"), "valid/_/escape_path");
+        assert_eq!(sanitize_path("valid/../escape\\path").unwrap(), "valid/_/escape_path");
     }
 
     #[test]
     fn test_sanitize_path_component_length_limit() {
         let short_name = "a".repeat(100);
-        assert_eq!(sanitize_path_component(&short_name), short_name);
+        assert_eq!(sanitize_path_component(&short_name).unwrap(), short_name);
         
         let exact_limit = "b".repeat(255);
-        assert_eq!(sanitize_path_component(&exact_limit).len(), 255);
+        assert_eq!(sanitize_path_component(&exact_limit).unwrap().len(), 255);
         
         let too_long = "c".repeat(300);
-        let result = sanitize_path_component(&too_long);
-        assert_eq!(result.len(), 255);
-        assert!(result.chars().all(|c| c == 'c'));
+        assert!(sanitize_path_component(&too_long).is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_multibyte_utf8() {
+        let emoji = "😀";
+        let emoji_bytes = emoji.len();
+        assert_eq!(emoji_bytes, 4);
+        
+        let num_emojis = 64;
+        let emoji_string = emoji.repeat(num_emojis);
+        assert_eq!(emoji_string.len(), 256);
+        
+        assert!(sanitize_path_component(&emoji_string).is_err());
+        
+        let valid_emoji_string = emoji.repeat(63);
+        assert_eq!(valid_emoji_string.len(), 252);
+        assert!(sanitize_path_component(&valid_emoji_string).is_ok());
+        
+        let mixed = "a".repeat(252) + "😀";
+        assert_eq!(mixed.len(), 256);
+        assert!(sanitize_path_component(&mixed).is_err());
+        
+        let mixed_valid = "a".repeat(251) + "😀";
+        assert_eq!(mixed_valid.len(), 255);
+        assert!(sanitize_path_component(&mixed_valid).is_ok());
     }
 }
