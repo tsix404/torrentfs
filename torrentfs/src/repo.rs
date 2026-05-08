@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 use crate::error::Result;
@@ -8,7 +9,7 @@ pub enum InsertResult {
     AlreadyExists(Torrent),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Torrent {
     pub id: i64,
     pub info_hash: Vec<u8>,
@@ -625,5 +626,47 @@ mod tests {
 
         let not_found = repo.find_by_name("nonexistent").await.unwrap();
         assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn test_torrent_serialize_deserialize() {
+        let torrent = Torrent {
+            id: 1,
+            info_hash: vec![0xAA; 20],
+            name: "test.torrent".to_string(),
+            total_size: 1024,
+            file_count: 3,
+            status: "pending".to_string(),
+            source_path: "/downloads".to_string(),
+            torrent_data: Some(vec![0xDE, 0xAD]),
+            resume_data: None,
+            added_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        let json = serde_json::to_string(&torrent).unwrap();
+        let deserialized: Torrent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized, torrent);
+    }
+
+    #[test]
+    fn test_torrent_serialize_deserialize_minimal() {
+        let torrent = Torrent {
+            id: 0,
+            info_hash: vec![],
+            name: String::new(),
+            total_size: 0,
+            file_count: 0,
+            status: String::new(),
+            source_path: String::new(),
+            torrent_data: None,
+            resume_data: None,
+            added_at: String::new(),
+        };
+
+        let json = serde_json::to_string(&torrent).unwrap();
+        let deserialized: Torrent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized, torrent);
     }
 }
