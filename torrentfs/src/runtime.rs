@@ -148,7 +148,24 @@ pub fn sanitize_path_component(component: &str) -> Result<String> {
         }
     }
     
+    if is_windows_device_name(&normalized) {
+        bail!("Path component is a reserved Windows device name which is not allowed");
+    }
+    
     Ok(decoded_str.to_string())
+}
+
+fn is_windows_device_name(name: &str) -> bool {
+    let upper = name.to_uppercase();
+    let name_without_ext = upper.split('.').next().unwrap_or("");
+    
+    let reserved_names = [
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    
+    reserved_names.contains(&name_without_ext)
 }
 
 pub fn build_safe_path(base: &Path, parts: &[&str]) -> Result<PathBuf> {
@@ -725,5 +742,162 @@ mod tests {
         assert!(sanitize_path_component("\nfile").is_err());
         assert!(sanitize_path_component("file\r\n").is_err());
         assert!(sanitize_path_component("a\u{0000}b\u{0000}c").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_cross_platform_separators() {
+        assert!(sanitize_path_component("path/to/file").is_err());
+        assert!(sanitize_path_component("path\\to\\file").is_err());
+        assert!(sanitize_path_component("mixed/path\\separators").is_err());
+        assert!(sanitize_path_component("folder/subfolder\\file").is_err());
+        assert!(sanitize_path_component("/leading_slash").is_err());
+        assert!(sanitize_path_component("\\leading_backslash").is_err());
+        assert!(sanitize_path_component("trailing_slash/").is_err());
+        assert!(sanitize_path_component("trailing_backslash\\").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_unix_hidden_files() {
+        assert_eq!(sanitize_path_component(".hidden").unwrap(), ".hidden");
+        assert_eq!(sanitize_path_component(".gitignore").unwrap(), ".gitignore");
+        assert_eq!(sanitize_path_component(".config").unwrap(), ".config");
+        assert_eq!(sanitize_path_component(".ssh").unwrap(), ".ssh");
+        assert_eq!(sanitize_path_component(".bashrc").unwrap(), ".bashrc");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_spaces_and_dots() {
+        assert_eq!(sanitize_path_component(" file").unwrap(), " file");
+        assert_eq!(sanitize_path_component("file ").unwrap(), "file ");
+        assert_eq!(sanitize_path_component(" file ").unwrap(), " file ");
+        assert_eq!(sanitize_path_component("file name").unwrap(), "file name");
+        assert_eq!(sanitize_path_component(".file.").unwrap(), ".file.");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_unix_device_patterns() {
+        assert!(sanitize_path_component("/dev/null").is_err());
+        assert!(sanitize_path_component("/dev/zero").is_err());
+        assert!(sanitize_path_component("/dev/random").is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_sanitize_path_component_windows_drive_letters() {
+        assert!(sanitize_path_component("C:").is_err());
+        assert!(sanitize_path_component("D:").is_err());
+        assert!(sanitize_path_component("C:\\").is_err());
+        assert!(sanitize_path_component("D:\\path").is_err());
+        assert!(sanitize_path_component("C:/path").is_err());
+        assert!(sanitize_path_component("E:\\folder\\file").is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_sanitize_path_component_windows_unc_paths() {
+        assert!(sanitize_path_component("\\\\server\\share").is_err());
+        assert!(sanitize_path_component("\\\\server\\share\\path").is_err());
+        assert!(sanitize_path_component("//server/share").is_err());
+        assert!(sanitize_path_component("//server/share/path").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_windows_device_names_all_platforms() {
+        assert!(sanitize_path_component("CON").is_err());
+        assert!(sanitize_path_component("PRN").is_err());
+        assert!(sanitize_path_component("AUX").is_err());
+        assert!(sanitize_path_component("NUL").is_err());
+        assert!(sanitize_path_component("COM1").is_err());
+        assert!(sanitize_path_component("COM2").is_err());
+        assert!(sanitize_path_component("COM3").is_err());
+        assert!(sanitize_path_component("COM4").is_err());
+        assert!(sanitize_path_component("COM5").is_err());
+        assert!(sanitize_path_component("COM6").is_err());
+        assert!(sanitize_path_component("COM7").is_err());
+        assert!(sanitize_path_component("COM8").is_err());
+        assert!(sanitize_path_component("COM9").is_err());
+        assert!(sanitize_path_component("LPT1").is_err());
+        assert!(sanitize_path_component("LPT2").is_err());
+        assert!(sanitize_path_component("LPT3").is_err());
+        assert!(sanitize_path_component("LPT4").is_err());
+        assert!(sanitize_path_component("LPT5").is_err());
+        assert!(sanitize_path_component("LPT6").is_err());
+        assert!(sanitize_path_component("LPT7").is_err());
+        assert!(sanitize_path_component("LPT8").is_err());
+        assert!(sanitize_path_component("LPT9").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_windows_device_names_with_extensions_all_platforms() {
+        assert!(sanitize_path_component("CON.txt").is_err());
+        assert!(sanitize_path_component("PRN.log").is_err());
+        assert!(sanitize_path_component("AUX.dat").is_err());
+        assert!(sanitize_path_component("NUL.bin").is_err());
+        assert!(sanitize_path_component("COM1.txt").is_err());
+        assert!(sanitize_path_component("LPT1.out").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_windows_device_names_case_insensitive() {
+        assert!(sanitize_path_component("con").is_err());
+        assert!(sanitize_path_component("Con").is_err());
+        assert!(sanitize_path_component("CON").is_err());
+        assert!(sanitize_path_component("com1").is_err());
+        assert!(sanitize_path_component("Lpt1").is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_sanitize_path_component_windows_path_components_behavior() {
+        use std::path::Path;
+        
+        let path_with_backslash = Path::new("folder\\file");
+        let components: Vec<_> = path_with_backslash.components().collect();
+        assert!(components.len() > 1, "On Windows, backslash should be a separator");
+        
+        let path_with_slash = Path::new("folder/file");
+        let components: Vec<_> = path_with_slash.components().collect();
+        assert!(components.len() > 1, "On Windows, forward slash should be a separator");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn test_sanitize_path_component_unix_path_components_behavior() {
+        use std::path::Path;
+        
+        let path_with_backslash = Path::new("folder\\file");
+        let components: Vec<_> = path_with_backslash.components().collect();
+        assert_eq!(components.len(), 1, "On Unix, backslash is a regular character, not a separator");
+        
+        let path_with_slash = Path::new("folder/file");
+        let components: Vec<_> = path_with_slash.components().collect();
+        assert!(components.len() > 1, "On Unix, forward slash should be a separator");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn test_sanitize_path_component_unix_backslash_allowed_in_name() {
+        assert!(sanitize_path_component("file\\with\\backslashes").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_mixed_platform_separators() {
+        assert!(sanitize_path_component("a/b\\c").is_err());
+        assert!(sanitize_path_component("a\\b/c").is_err());
+        assert!(sanitize_path_component("/a\\b").is_err());
+        assert!(sanitize_path_component("\\a/b").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_path_components_parsing() {
+        use std::path::Path;
+        
+        let simple = Path::new("simple");
+        let components: Vec<_> = simple.components().collect();
+        assert_eq!(components.len(), 1);
+        
+        let with_slash = Path::new("has/slash");
+        let components: Vec<_> = with_slash.components().collect();
+        assert!(components.len() > 1);
     }
 }
