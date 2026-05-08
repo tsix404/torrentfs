@@ -228,4 +228,156 @@ mod tests {
         let result = manager.process_torrent_data(b"", "").await;
         assert!(result.is_err(), "Should reject empty data");
     }
+
+    #[tokio::test]
+    async fn test_nested_directory_structure() {
+        let test_file = test_torrent_dir().join("nested_dirs.torrent");
+        if !test_file.exists() {
+            eprintln!("Skipping: nested_dirs.torrent not found");
+            return;
+        }
+        let data = std::fs::read(&test_file).expect("Failed to read nested_dirs.torrent");
+
+        let (_temp_dir, db) = setup_temp_db().await;
+        let manager = MetadataManager::new(Arc::new(db)).unwrap();
+
+        let parsed = manager.process_torrent_data(&data, "").await.unwrap();
+        manager.persist_to_db(&parsed).await.unwrap();
+
+        let torrent = manager.repo.find_by_info_hash(&parsed.info_hash).await.unwrap().unwrap();
+        let db_files = manager.repo.get_files(torrent.id).await.unwrap();
+
+        let has_nested = db_files.iter().any(|f| f.path.contains('/'));
+        assert!(has_nested, "Should have files with nested paths containing '/'");
+
+        for file in &db_files {
+            assert!(!file.path.is_empty());
+            assert!(file.path.matches('/').count() <= 10, "Path depth should be reasonable");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_foreign_key_cascade_delete() {
+        let (_temp_dir, db) = setup_temp_db().await;
+        let manager = MetadataManager::new(Arc::new(db)).unwrap();
+
+        let files = vec![crate::repo::FileEntry {
+            id: 0,
+            torrent_id: 0,
+            path: "test/file.txt".to_string(),
+            size: 100,
+            first_piece: 0,
+            last_piece: 0,
+            offset: 0,
+        }];
+        let info_hash = vec![0xAA; 20];
+        manager.repo.insert_if_not_exists(
+            &info_hash,
+            "test_cascade",
+            100,
+            1,
+            "",
+            None,
+            files,
+        ).await.unwrap();
+
+        let torrent = manager.repo.find_by_info_hash(&info_hash).await.unwrap().unwrap();
+        let db_files = manager.repo.get_files(torrent.id).await.unwrap();
+        assert_eq!(db_files.len(), 1);
+
+        manager.repo.delete_torrent(&info_hash).await.unwrap();
+
+        let torrent_exists = manager.repo.find_by_info_hash(&info_hash).await.unwrap();
+        assert!(torrent_exists.is_none(), "Torrent should be deleted");
+
+        let db_files_after = manager.repo.get_files(torrent.id).await.unwrap();
+        assert!(db_files_after.is_empty(), "Files should be cascade deleted");
+    }
+
+    #[tokio::test]
+    async fn test_path_index_exists() {
+        let (_temp_dir, db) = setup_temp_db().await;
+        
+        let index_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_torrent_files_path'"
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        
+        assert_eq!(index_count, 1, "idx_torrent_files_path index should exist");
+    }
+
+    #[tokio::test]
+    async fn test_unique_constraint_torrent_files() {
+        let (_temp_dir, db) = setup_temp_db().await;
+        let manager = MetadataManager::new(Arc::new(db)).unwrap();
+
+        let files = vec![crate::repo::FileEntry {
+            id: 0,
+            torrent_id: 0,
+            path: "duplicate.txt".to_string(),
+            size: 100,
+            first_piece: 0,
+            last_piece: 0,
+            offset: 0,
+        }];
+        let info_hash = vec![0xBB; 20];
+        manager.repo.insert_if_not_exists(
+            &info_hash,
+            "unique_test",
+            100,
+            1,
+            "",
+            None,
+            files.clone(),
+        ).await.unwrap();
+
+        let duplicate_files = vec![
+            crate::repo::FileEntry {
+                id: 0,
+                torrent_id: 0,
+                path: "duplicate.txt".to_string(),
+                size: 200,
+                first_piece: 0,
+                last_piece: 0,
+                offset: 0,
+            },
+        ];
+        let result = manager.repo.insert_if_not_exists(
+            &vec![0xCC; 20],
+            "unique_test2",
+            200,
+            1,
+            "",
+            None,
+            duplicate_files,
+        ).await;
+        assert!(result.is_ok(), "Different torrents can have files with same path");
+    }
+
+    #[tokio::test]
+    async fn test_file_offset_and_piece_consistency() {
+        let test_file = first_torrent_file().expect("No .torrent file found");
+        let data = std::fs::read(&test_file).expect("Failed to read torrent");
+
+        let (_temp_dir, db) = setup_temp_db().await;
+        let manager = MetadataManager::new(Arc::new(db)).unwrap();
+
+        let parsed = manager.process_torrent_data(&data, "").await.unwrap();
+        manager.persist_to_db(&parsed).await.unwrap();
+
+        let torrent = manager.repo.find_by_info_hash(&parsed.info_hash).await.unwrap().unwrap();
+        let db_files = manager.repo.get_files(torrent.id).await.unwrap();
+
+        let mut prev_offset: i64 = -1;
+        for file in &db_files {
+            assert!(file.offset >= 0, "Offset should be non-negative");
+            assert!(file.offset > prev_offset, "Files should be ordered by offset");
+            assert!(file.size >= 0, "Size should be non-negative");
+            assert!(file.first_piece >= 0, "first_piece should be non-negative");
+            assert!(file.last_piece >= file.first_piece, "last_piece >= first_piece");
+            prev_offset = file.offset;
+        }
+    }
 }

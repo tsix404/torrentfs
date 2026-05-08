@@ -220,7 +220,15 @@ impl FuseAsyncRuntime {
             download_coordinator: Some(download_coordinator),
         }
     }
-    
+
+    /// Sends a command through the MPSC channel and waits for response
+    /// 
+    /// Creates a oneshot channel for the response, sends the command via MPSC,
+    /// and waits for up to IO_TIMEOUT (30 seconds) for the response.
+    /// 
+    /// # Errors
+    /// - `ChannelClosed`: MPSC sender dropped (runtime shutdown)
+    /// - `Timeout`: Response not received within timeout period
     pub fn send_command_with_timeout<R, F>(&self, mut f: F) -> Result<R, FuseError>
     where
         F: FnMut(oneshot::Sender<Result<R, FuseError>>) -> FuseCommand,
