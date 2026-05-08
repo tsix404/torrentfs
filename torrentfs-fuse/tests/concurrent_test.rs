@@ -1,3 +1,5 @@
+mod resource_monitor;
+
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
@@ -11,6 +13,7 @@ use torrentfs::metadata::MetadataManager;
 use torrentfs::TorrentRuntime;
 use torrentfs_fuse::TorrentFsFilesystem;
 use torrentfs_libtorrent::Session;
+use resource_monitor::{ResourceMonitor, print_resource_chart};
 
 fn test_torrent_dir() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -97,6 +100,9 @@ fn test_concurrent_random_read_no_deadlock() {
         panic!("No files found in torrent directory {:?}. Test requires files to test concurrent access.", torrent_dir);
     }
 
+    let mut resource_monitor = ResourceMonitor::new();
+    let monitor_handle = resource_monitor.start(Duration::from_secs(1));
+
     let num_threads = 10;
     let test_duration = Duration::from_secs(300);
     let start_time = Instant::now();
@@ -109,7 +115,7 @@ fn test_concurrent_random_read_no_deadlock() {
 
     for thread_id in 0..num_threads {
         let files = file_list.clone();
-        let torrent_dir = torrent_dir.clone();
+        let _torrent_dir = torrent_dir.clone();
         let ops = Arc::clone(&total_operations);
         let errs = Arc::clone(&total_errors);
         let bytes = Arc::clone(&total_bytes_read);
@@ -177,13 +183,14 @@ fn test_concurrent_random_read_no_deadlock() {
             let errs = total_errors.load(Ordering::Relaxed);
             let bytes = total_bytes_read.load(Ordering::Relaxed);
             let elapsed = stats_start.elapsed();
-
-            println!(
-                "[{:.1}s] Operations: {}, Errors: {}, Bytes: {:.2} MB",
+            let current_memory = resource_monitor.get_current_memory_mb();
+            
+            println!("[{:.1}s] Operations: {}, Errors: {}, Bytes: {:.2} MB, Memory: {:.1} MB", 
                 elapsed.as_secs_f64(),
                 ops,
                 errs,
-                bytes as f64 / 1_048_576.0
+                bytes as f64 / 1_048_576.0,
+                current_memory
             );
             last_report = Instant::now();
         }
@@ -193,6 +200,9 @@ fn test_concurrent_random_read_no_deadlock() {
     for handle in handles {
         let (_ops, _errs, _bytes) = handle.join().expect("Thread panicked");
     }
+
+    resource_monitor.stop();
+    monitor_handle.join().expect("Resource monitor thread should join");
 
     drop(guard);
 
@@ -205,23 +215,18 @@ fn test_concurrent_random_read_no_deadlock() {
     println!("Test duration: {:?}", actual_duration);
     println!("Total operations: {}", final_ops);
     println!("Total errors: {}", final_errs);
-    println!(
-        "Total bytes read: {:.2} MB",
-        final_bytes as f64 / 1_048_576.0
-    );
-    println!(
-        "Operations per second: {:.2}",
-        final_ops as f64 / actual_duration.as_secs_f64()
-    );
-    println!(
-        "Throughput: {:.2} MB/s",
-        (final_bytes as f64 / 1_048_576.0) / actual_duration.as_secs_f64()
-    );
+    println!("Total bytes read: {:.2} MB", final_bytes as f64 / 1_048_576.0);
+    println!("Operations per second: {:.2}", final_ops as f64 / actual_duration.as_secs_f64());
+    println!("Throughput: {:.2} MB/s", (final_bytes as f64 / 1_048_576.0) / actual_duration.as_secs_f64());
 
-    assert_eq!(
-        final_errs, 0,
-        "No errors should occur during concurrent access"
-    );
+    let resource_report = resource_monitor.generate_report();
+    resource_report.print_summary();
+    print_resource_chart(&resource_report, 80);
+
+    assert!(!resource_report.potential_memory_leak, 
+        "Memory leak detected: memory grew by {:.2} MB", resource_report.memory_growth_mb);
+    
+    assert_eq!(final_errs, 0, "No errors should occur during concurrent access");
 }
 
 #[test]
@@ -247,6 +252,9 @@ fn test_concurrent_metadata_operations() {
     let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
 
     thread::sleep(Duration::from_millis(500));
+
+    let mut resource_monitor = ResourceMonitor::new();
+    let monitor_handle = resource_monitor.start(Duration::from_secs(1));
 
     let num_threads = 10;
     let test_duration = Duration::from_secs(300);
@@ -332,12 +340,13 @@ fn test_concurrent_metadata_operations() {
             let ops = total_operations.load(Ordering::Relaxed);
             let errs = total_errors.load(Ordering::Relaxed);
             let elapsed = stats_start.elapsed();
-
-            println!(
-                "[{:.1}s] Operations: {}, Errors: {}",
+            let current_memory = resource_monitor.get_current_memory_mb();
+            
+            println!("[{:.1}s] Operations: {}, Errors: {}, Memory: {:.1} MB", 
                 elapsed.as_secs_f64(),
                 ops,
-                errs
+                errs,
+                current_memory
             );
             last_report = Instant::now();
         }
@@ -347,6 +356,9 @@ fn test_concurrent_metadata_operations() {
     for handle in handles {
         let (_ops, _errs, _meta, _readdir) = handle.join().expect("Thread panicked");
     }
+
+    resource_monitor.stop();
+    monitor_handle.join().expect("Resource monitor thread should join");
 
     drop(guard);
 
@@ -362,15 +374,16 @@ fn test_concurrent_metadata_operations() {
     println!("  Metadata ops: {}", final_meta);
     println!("  Readdir ops: {}", final_readdir);
     println!("Total errors: {}", final_errs);
-    println!(
-        "Operations per second: {:.2}",
-        final_ops as f64 / actual_duration.as_secs_f64()
-    );
+    println!("Operations per second: {:.2}", final_ops as f64 / actual_duration.as_secs_f64());
 
-    assert_eq!(
-        final_errs, 0,
-        "No errors should occur during concurrent metadata access"
-    );
+    let resource_report = resource_monitor.generate_report();
+    resource_report.print_summary();
+    print_resource_chart(&resource_report, 80);
+
+    assert!(!resource_report.potential_memory_leak, 
+        "Memory leak detected: memory grew by {:.2} MB", resource_report.memory_growth_mb);
+    
+    assert_eq!(final_errs, 0, "No errors should occur during concurrent metadata access");
 }
 
 #[test]
@@ -686,4 +699,31 @@ fn test_random_offset_reading() {
         "All random reads should match expected content"
     );
     assert!(success_rate > 99.0, "Success rate should be > 99%");
+}
+
+#[test]
+fn test_resource_monitoring_integration() {
+    let mut monitor = ResourceMonitor::new();
+    
+    let initial_memory = monitor.get_current_memory_mb();
+    println!("Initial memory: {:.2} MB", initial_memory);
+    
+    let handle = monitor.start(Duration::from_millis(100));
+    
+    let data: Vec<Vec<u8>> = (0..100).map(|i| vec![i as u8; 1024 * 1024]).collect();
+    
+    thread::sleep(Duration::from_millis(600));
+    
+    monitor.stop();
+    handle.join().expect("Monitor thread should join");
+    
+    let report = monitor.generate_report();
+    
+    assert!(report.samples.len() >= 3, "Should have at least 3 samples, got {}", report.samples.len());
+    assert!(report.test_duration >= Duration::from_millis(500), 
+        "Test duration should be at least 500ms, got {:?}", report.test_duration);
+    
+    report.print_summary();
+    
+    drop(data);
 }

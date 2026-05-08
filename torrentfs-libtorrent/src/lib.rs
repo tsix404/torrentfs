@@ -30,12 +30,16 @@
 pub mod alert;
 pub mod error;
 pub mod session;
+pub mod session_manager;
 pub mod torrent;
 pub mod validator;
 
 pub use alert::{Alert, AlertList, AlertType};
 pub use error::{LibtorrentError, LibtorrentErrorCode};
 pub use session::Session;
+pub use session_manager::{
+    SessionManager, SessionConfig, SessionEvent, TorrentStatus, TorrentProgress, PeerInfo,
+};
 pub use torrent::{
     parse_torrent, parse_torrent_cached, clear_parse_cache,
     list_files, list_trackers, FileEntry, TrackerEntry, TorrentInfo,

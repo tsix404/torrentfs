@@ -703,10 +703,13 @@ mod tests {
     fn test_sanitize_path_component_unicode_homoglyphs() {
         assert!(sanitize_path_component("\u{FF0E}\u{FF0E}").is_err());
         assert!(sanitize_path_component("\u{FE52}\u{FE52}").is_err());
+        assert!(sanitize_path_component("\u{2024}\u{2024}").is_err());
         assert!(sanitize_path_component("\u{FF0E}").is_err());
         assert!(sanitize_path_component("\u{FE52}").is_err());
+        assert!(sanitize_path_component("\u{2024}").is_err());
         assert!(sanitize_path_component("\u{FF0E}\u{FF0E}\u{FF0F}etc").is_err());
         assert!(sanitize_path_component("\u{FE52}\u{FE52}\\etc").is_err());
+        assert!(sanitize_path_component("file\u{2024}\u{2024}etc").is_err());
     }
 
     #[test]

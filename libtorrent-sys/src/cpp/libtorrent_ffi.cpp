@@ -815,6 +815,215 @@ libtorrent_error_t libtorrent_pause_torrent(libtorrent_session_t* session, const
     }
 }
 
+void libtorrent_set_download_rate_limit(libtorrent_session_t* session, int limit) {
+    if (!session) return;
+    
+    try {
+        libtorrent::settings_pack pack;
+        pack.set_int(libtorrent::settings_pack::download_rate_limit, limit);
+        session->session.apply_settings(pack);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_set_download_rate_limit: %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "libtorrent_set_download_rate_limit: unknown exception\n");
+    }
+}
+
+void libtorrent_set_upload_rate_limit(libtorrent_session_t* session, int limit) {
+    if (!session) return;
+    
+    try {
+        libtorrent::settings_pack pack;
+        pack.set_int(libtorrent::settings_pack::upload_rate_limit, limit);
+        session->session.apply_settings(pack);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_set_upload_rate_limit: %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "libtorrent_set_upload_rate_limit: unknown exception\n");
+    }
+}
+
+int libtorrent_get_download_rate_limit(libtorrent_session_t* session) {
+    if (!session) return 0;
+    
+    try {
+        auto settings = session->session.get_settings();
+        return settings.get_int(libtorrent::settings_pack::download_rate_limit);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_get_download_rate_limit: %s\n", e.what());
+        return 0;
+    } catch (...) {
+        fprintf(stderr, "libtorrent_get_download_rate_limit: unknown exception\n");
+        return 0;
+    }
+}
+
+int libtorrent_get_upload_rate_limit(libtorrent_session_t* session) {
+    if (!session) return 0;
+    
+    try {
+        auto settings = session->session.get_settings();
+        return settings.get_int(libtorrent::settings_pack::upload_rate_limit);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_get_upload_rate_limit: %s\n", e.what());
+        return 0;
+    } catch (...) {
+        fprintf(stderr, "libtorrent_get_upload_rate_limit: unknown exception\n");
+        return 0;
+    }
+}
+
+void libtorrent_set_max_connections(libtorrent_session_t* session, int limit) {
+    if (!session) return;
+    
+    try {
+        libtorrent::settings_pack pack;
+        pack.set_int(libtorrent::settings_pack::connections_limit, limit);
+        session->session.apply_settings(pack);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_set_max_connections: %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "libtorrent_set_max_connections: unknown exception\n");
+    }
+}
+
+void libtorrent_set_max_uploads(libtorrent_session_t* session, int limit) {
+    if (!session) return;
+    
+    try {
+        libtorrent::settings_pack pack;
+        pack.set_int(libtorrent::settings_pack::unchoke_slots_limit, limit);
+        session->session.apply_settings(pack);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_set_max_uploads: %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "libtorrent_set_max_uploads: unknown exception\n");
+    }
+}
+
+int libtorrent_get_max_connections(libtorrent_session_t* session) {
+    if (!session) return 0;
+    
+    try {
+        auto settings = session->session.get_settings();
+        return settings.get_int(libtorrent::settings_pack::connections_limit);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_get_max_connections: %s\n", e.what());
+        return 0;
+    } catch (...) {
+        fprintf(stderr, "libtorrent_get_max_connections: unknown exception\n");
+        return 0;
+    }
+}
+
+int libtorrent_get_max_uploads(libtorrent_session_t* session) {
+    if (!session) return 0;
+    
+    try {
+        auto settings = session->session.get_settings();
+        return settings.get_int(libtorrent::settings_pack::unchoke_slots_limit);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_get_max_uploads: %s\n", e.what());
+        return 0;
+    } catch (...) {
+        fprintf(stderr, "libtorrent_get_max_uploads: unknown exception\n");
+        return 0;
+    }
+}
+
+void libtorrent_set_active_downloads(libtorrent_session_t* session, int limit) {
+    if (!session) return;
+    
+    try {
+        libtorrent::settings_pack pack;
+        pack.set_int(libtorrent::settings_pack::active_downloads, limit);
+        session->session.apply_settings(pack);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_set_active_downloads: %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "libtorrent_set_active_downloads: unknown exception\n");
+    }
+}
+
+void libtorrent_set_active_seeds(libtorrent_session_t* session, int limit) {
+    if (!session) return;
+    
+    try {
+        libtorrent::settings_pack pack;
+        pack.set_int(libtorrent::settings_pack::active_seeds, limit);
+        session->session.apply_settings(pack);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_set_active_seeds: %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "libtorrent_set_active_seeds: unknown exception\n");
+    }
+}
+
+int libtorrent_get_active_downloads(libtorrent_session_t* session) {
+    if (!session) return 0;
+    
+    try {
+        auto settings = session->session.get_settings();
+        return settings.get_int(libtorrent::settings_pack::active_downloads);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_get_active_downloads: %s\n", e.what());
+        return 0;
+    } catch (...) {
+        fprintf(stderr, "libtorrent_get_active_downloads: unknown exception\n");
+        return 0;
+    }
+}
+
+int libtorrent_get_active_seeds(libtorrent_session_t* session) {
+    if (!session) return 0;
+    
+    try {
+        auto settings = session->session.get_settings();
+        return settings.get_int(libtorrent::settings_pack::active_seeds);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_get_active_seeds: %s\n", e.what());
+        return 0;
+    } catch (...) {
+        fprintf(stderr, "libtorrent_get_active_seeds: unknown exception\n");
+        return 0;
+    }
+}
+
+void libtorrent_set_listen_port(libtorrent_session_t* session, int port) {
+    if (!session) return;
+    
+    try {
+        libtorrent::settings_pack pack;
+        pack.set_str(libtorrent::settings_pack::listen_interfaces, 
+            std::string("0.0.0.0:") + std::to_string(port));
+        session->session.apply_settings(pack);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_set_listen_port: %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "libtorrent_set_listen_port: unknown exception\n");
+    }
+}
+
+int libtorrent_get_listen_port(libtorrent_session_t* session) {
+    if (!session) return 0;
+    
+    try {
+        auto settings = session->session.get_settings();
+        std::string listen_if = settings.get_str(libtorrent::settings_pack::listen_interfaces);
+        size_t pos = listen_if.rfind(':');
+        if (pos != std::string::npos) {
+            return std::stoi(listen_if.substr(pos + 1));
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_get_listen_port: %s\n", e.what());
+        return 0;
+    } catch (...) {
+        fprintf(stderr, "libtorrent_get_listen_port: unknown exception\n");
+        return 0;
+    }
+}
+
 void libtorrent_restore_signal_handlers() {
     // No-op on C++ side - signal handlers are managed in Rust
 }
