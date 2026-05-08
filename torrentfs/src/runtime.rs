@@ -57,6 +57,37 @@ fn decode_fully(component: &str) -> Result<String> {
     bail!("Too many levels of percent encoding (potential encoding loop)");
 }
 
+/// Sanitizes a path component to prevent directory traversal and other security issues.
+///
+/// # Security Measures
+///
+/// This function implements several security checks to prevent malicious path components:
+///
+/// - **Empty rejection**: Empty strings are rejected
+/// - **Length limit**: Components over 255 bytes are rejected (filesystem limit)
+/// - **Null byte rejection**: Null bytes (`\0`) are rejected (C string termination issues)
+/// - **Control character rejection**: All control characters are rejected for security:
+///   - C0 controls (U+0000 to U+001F): Includes newline, carriage return, tab, bell, escape, etc.
+///   - C1 controls (U+0080 to U+009F): Extended control characters
+///   - Rationale: Control characters can cause issues in shells, logs, terminals, and other
+///     contexts. They may enable injection attacks, corrupt log files, or cause unexpected
+///     behavior in path processing.
+/// - **Path traversal rejection**: The `..` sequence is rejected to prevent directory traversal
+/// - **Path separator rejection**: Both `/` and `\` are rejected to prevent path injection
+/// - **Current directory rejection**: The `.` component is rejected
+/// - **Unicode normalization**: NFKC normalization is applied to detect Unicode-based attacks
+///   (e.g., fullwidth characters that normalize to ASCII path separators)
+/// - **Percent encoding**: Fully decoded with iteration limit to prevent encoding loops
+///
+/// # References
+///
+/// - POSIX: Only alphanumerics, `.`, `-`, `_` are portable in filenames
+/// - Windows: Additional restrictions on `:`, `*`, `?`, `"`, `<`, `>`, `|`
+/// - RFC 3986: Percent encoding in URIs
+///
+/// # Errors
+///
+/// Returns an error if the component fails any security check.
 pub fn sanitize_path_component(component: &str) -> Result<String> {
     if component.is_empty() {
         bail!("Path component is empty");
@@ -74,6 +105,16 @@ pub fn sanitize_path_component(component: &str) -> Result<String> {
     
     if decoded_str.contains('\0') {
         bail!("Path component contains null byte which is not allowed");
+    }
+    
+    for c in decoded_str.chars() {
+        if c.is_control() {
+            bail!(
+                "Path component contains control character U+{:04X} which is not allowed \
+                 (control characters can cause issues in shells, logs, and other contexts)",
+                c as u32
+            );
+        }
     }
     
     let normalized: String = decoded_str.nfkc().collect();
@@ -601,5 +642,91 @@ mod tests {
         assert!(sanitize_path_component("\u{FE52}").is_err());
         assert!(sanitize_path_component("\u{FF0E}\u{FF0E}\u{FF0F}etc").is_err());
         assert!(sanitize_path_component("\u{FE52}\u{FE52}\\etc").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_control_characters_c0() {
+        assert!(sanitize_path_component("file\nname").is_err());
+        assert!(sanitize_path_component("file\rname").is_err());
+        assert!(sanitize_path_component("file\tname").is_err());
+        assert!(sanitize_path_component("\n").is_err());
+        assert!(sanitize_path_component("\r").is_err());
+        assert!(sanitize_path_component("\t").is_err());
+        assert!(sanitize_path_component("\u{0001}").is_err());
+        assert!(sanitize_path_component("\u{0002}").is_err());
+        assert!(sanitize_path_component("\u{0003}").is_err());
+        assert!(sanitize_path_component("\u{0004}").is_err());
+        assert!(sanitize_path_component("\u{0005}").is_err());
+        assert!(sanitize_path_component("\u{0006}").is_err());
+        assert!(sanitize_path_component("\u{0007}").is_err());
+        assert!(sanitize_path_component("\u{0008}").is_err());
+        assert!(sanitize_path_component("\u{000B}").is_err());
+        assert!(sanitize_path_component("\u{000C}").is_err());
+        assert!(sanitize_path_component("\u{000E}").is_err());
+        assert!(sanitize_path_component("\u{000F}").is_err());
+        assert!(sanitize_path_component("\u{0010}").is_err());
+        assert!(sanitize_path_component("\u{0011}").is_err());
+        assert!(sanitize_path_component("\u{0012}").is_err());
+        assert!(sanitize_path_component("\u{0013}").is_err());
+        assert!(sanitize_path_component("\u{0014}").is_err());
+        assert!(sanitize_path_component("\u{0015}").is_err());
+        assert!(sanitize_path_component("\u{0016}").is_err());
+        assert!(sanitize_path_component("\u{0017}").is_err());
+        assert!(sanitize_path_component("\u{0018}").is_err());
+        assert!(sanitize_path_component("\u{0019}").is_err());
+        assert!(sanitize_path_component("\u{001A}").is_err());
+        assert!(sanitize_path_component("\u{001B}").is_err());
+        assert!(sanitize_path_component("\u{001C}").is_err());
+        assert!(sanitize_path_component("\u{001D}").is_err());
+        assert!(sanitize_path_component("\u{001E}").is_err());
+        assert!(sanitize_path_component("\u{001F}").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_control_characters_c1() {
+        assert!(sanitize_path_component("\u{0080}").is_err());
+        assert!(sanitize_path_component("\u{0081}").is_err());
+        assert!(sanitize_path_component("\u{0082}").is_err());
+        assert!(sanitize_path_component("\u{0085}").is_err());
+        assert!(sanitize_path_component("\u{0088}").is_err());
+        assert!(sanitize_path_component("\u{008A}").is_err());
+        assert!(sanitize_path_component("\u{0090}").is_err());
+        assert!(sanitize_path_component("\u{009B}").is_err());
+        assert!(sanitize_path_component("\u{009F}").is_err());
+        assert!(sanitize_path_component("file\u{0080}name").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_safe_characters() {
+        assert!(sanitize_path_component("normal_file.txt").is_ok());
+        assert!(sanitize_path_component("file-name").is_ok());
+        assert!(sanitize_path_component("file_name").is_ok());
+        assert!(sanitize_path_component("file.name").is_ok());
+        assert!(sanitize_path_component("file name").is_ok());
+        assert!(sanitize_path_component("file123").is_ok());
+        assert!(sanitize_path_component("UPPERCASE").is_ok());
+        assert!(sanitize_path_component("MixedCase123").is_ok());
+        assert!(sanitize_path_component("日本語").is_ok());
+        assert!(sanitize_path_component("emoji🎉test").is_ok());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_encoded_control_characters() {
+        assert!(sanitize_path_component("%0A").is_err());
+        assert!(sanitize_path_component("%0D").is_err());
+        assert!(sanitize_path_component("%09").is_err());
+        assert!(sanitize_path_component("%00").is_err());
+        assert!(sanitize_path_component("%01").is_err());
+        assert!(sanitize_path_component("%1F").is_err());
+        assert!(sanitize_path_component("file%0Aname").is_err());
+        assert!(sanitize_path_component("file%0Dname").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_path_component_mixed_control_characters() {
+        assert!(sanitize_path_component("file\u{0001}name\u{0002}test").is_err());
+        assert!(sanitize_path_component("\nfile").is_err());
+        assert!(sanitize_path_component("file\r\n").is_err());
+        assert!(sanitize_path_component("a\u{0000}b\u{0000}c").is_err());
     }
 }
