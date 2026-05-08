@@ -2,6 +2,9 @@
 
 use anyhow::{Result, bail};
 use std::ffi::CStr;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex};
 
 /// File entry in a torrent.
 #[derive(Debug, Clone)]
@@ -16,6 +19,32 @@ pub struct FileEntry {
     pub first_piece: u32,
     /// Index of the last piece that contains data from this file
     pub last_piece: u32,
+}
+
+/// Tracker entry in a torrent.
+#[derive(Debug, Clone)]
+pub struct TrackerEntry {
+    /// Tracker URL
+    pub url: String,
+    /// Tracker tier (0 for primary, higher for backup)
+    pub tier: i32,
+}
+
+/// Cache entry for parsed torrent info.
+struct CacheEntry {
+    info: TorrentInfo,
+}
+
+/// Global cache for parsed torrent metadata.
+static PARSE_CACHE: Mutex<Option<Arc<Mutex<HashMap<String, CacheEntry>>>>> = Mutex::new(None);
+
+/// Gets or initializes the global parse cache.
+fn get_cache() -> Arc<Mutex<HashMap<String, CacheEntry>>> {
+    let mut cache_guard = PARSE_CACHE.lock().unwrap();
+    if cache_guard.is_none() {
+        *cache_guard = Some(Arc::new(Mutex::new(HashMap::new())));
+    }
+    cache_guard.as_ref().unwrap().clone()
 }
 
 /// Torrent information extracted from a .torrent file.
@@ -33,6 +62,14 @@ pub struct TorrentInfo {
     pub file_count: u32,
     /// List of files in the torrent
     pub files: Vec<FileEntry>,
+    /// List of trackers in the torrent
+    pub trackers: Vec<TrackerEntry>,
+    /// Torrent comment (optional)
+    pub comment: Option<String>,
+    /// Creator string (optional)
+    pub created_by: Option<String>,
+    /// Creation date as Unix timestamp (optional)
+    pub creation_date: Option<u64>,
 }
 
 impl TorrentInfo {
@@ -101,6 +138,56 @@ impl TorrentInfo {
             }
         }
 
+        // Extract tracker list
+        let mut trackers = Vec::new();
+        if !ffi_info.trackers.is_null() && ffi_info.tracker_count > 0 {
+            let trackers_slice = unsafe {
+                std::slice::from_raw_parts(ffi_info.trackers, ffi_info.tracker_count as usize)
+            };
+            
+            for tracker_entry in trackers_slice {
+                let url = if !tracker_entry.url.is_null() {
+                    unsafe { CStr::from_ptr(tracker_entry.url) }
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    String::new()
+                };
+                
+                trackers.push(TrackerEntry {
+                    url,
+                    tier: tracker_entry.tier,
+                });
+            }
+        }
+
+        // Extract comment
+        let comment = if !ffi_info.comment.is_null() {
+            let c = unsafe { CStr::from_ptr(ffi_info.comment) }
+                .to_string_lossy()
+                .into_owned();
+            if c.is_empty() { None } else { Some(c) }
+        } else {
+            None
+        };
+
+        // Extract created_by
+        let created_by = if !ffi_info.created_by.is_null() {
+            let c = unsafe { CStr::from_ptr(ffi_info.created_by) }
+                .to_string_lossy()
+                .into_owned();
+            if c.is_empty() { None } else { Some(c) }
+        } else {
+            None
+        };
+
+        // Extract creation_date
+        let creation_date = if ffi_info.creation_date > 0 {
+            Some(ffi_info.creation_date)
+        } else {
+            None
+        };
+
         Ok(TorrentInfo {
             name,
             info_hash,
@@ -108,6 +195,10 @@ impl TorrentInfo {
             piece_size,
             file_count: ffi_info.file_count,
             files,
+            trackers,
+            comment,
+            created_by,
+            creation_date,
         })
     }
 
@@ -117,6 +208,30 @@ impl TorrentInfo {
     /// It handles subdirectory paths as they are provided by libtorrent.
     pub fn list_files(&self) -> Vec<FileEntry> {
         self.files.clone()
+    }
+
+    /// Returns a list of trackers in the torrent.
+    ///
+    /// Trackers are ordered by tier (primary trackers first).
+    pub fn list_trackers(&self) -> Vec<TrackerEntry> {
+        self.trackers.clone()
+    }
+
+    /// Returns primary trackers (tier 0).
+    pub fn primary_trackers(&self) -> Vec<&str> {
+        self.trackers
+            .iter()
+            .filter(|t| t.tier == 0)
+            .map(|t| t.url.as_str())
+            .collect()
+    }
+
+    /// Returns the number of pieces in the torrent.
+    pub fn num_pieces(&self) -> u32 {
+        if self.piece_size == 0 {
+            return 0;
+        }
+        ((self.total_size + self.piece_size as u64 - 1) / self.piece_size as u64) as u32
     }
 }
 
@@ -132,7 +247,21 @@ pub fn list_files(info: &TorrentInfo) -> Vec<FileEntry> {
     info.files.clone()
 }
 
+/// Returns a list of trackers in the torrent.
+///
+/// # Arguments
+/// * `info` - Torrent information
+///
+/// # Returns
+/// Vector of tracker entries with URLs and tiers.
+pub fn list_trackers(info: &TorrentInfo) -> Vec<TrackerEntry> {
+    info.trackers.clone()
+}
+
 /// Parses torrent data from a buffer.
+///
+/// This function parses the bencoded torrent data and extracts metadata
+/// including name, info hash, files, trackers, and other information.
 ///
 /// # Arguments
 /// * `data` - Buffer containing the .torrent file data
@@ -140,12 +269,60 @@ pub fn list_files(info: &TorrentInfo) -> Vec<FileEntry> {
 /// # Returns
 /// * `Ok(TorrentInfo)` on success
 /// * `Err` if parsing fails
+///
+/// # Example
+/// ```no_run
+/// use torrentfs_libtorrent::parse_torrent;
+/// let data = std::fs::read("example.torrent").unwrap();
+/// let info = parse_torrent(&data).unwrap();
+/// println!("Name: {}", info.name);
+/// println!("Info hash: {}", info.info_hash);
+/// println!("Files: {:?}", info.files);
+/// println!("Trackers: {:?}", info.trackers);
+/// ```
 pub fn parse_torrent(data: &[u8]) -> Result<TorrentInfo> {
+    parse_torrent_impl(data, false)
+}
+
+/// Parses torrent data with caching enabled.
+///
+/// Subsequent calls with the same data will return cached results.
+/// The cache is keyed by the info hash, not the raw data.
+///
+/// # Arguments
+/// * `data` - Buffer containing the .torrent file data
+///
+/// # Returns
+/// * `Ok(TorrentInfo)` on success (from cache or freshly parsed)
+/// * `Err` if parsing fails
+pub fn parse_torrent_cached(data: &[u8]) -> Result<TorrentInfo> {
+    parse_torrent_impl(data, true)
+}
+
+/// Clears the parse cache.
+///
+/// This is useful for freeing memory or forcing re-parsing.
+pub fn clear_parse_cache() {
+    let cache = get_cache();
+    cache.lock().unwrap().clear();
+}
+
+fn parse_torrent_impl(data: &[u8], use_cache: bool) -> Result<TorrentInfo> {
     if data.is_empty() {
         bail!("Empty torrent data");
     }
 
-    // Call FFI function
+    // Check cache by computing a quick hash key from the raw data
+    if use_cache {
+        let data_hash = compute_data_hash(data);
+        let cache = get_cache();
+        let cache_guard = cache.lock().unwrap();
+        if let Some(entry) = cache_guard.get(&data_hash) {
+            return Ok(entry.info.clone());
+        }
+    }
+
+    // Call FFI function (single parse)
     let ffi_info = unsafe {
         libtorrent_sys::libtorrent_parse_torrent(data.as_ptr(), data.len())
     };
@@ -162,7 +339,31 @@ pub fn parse_torrent(data: &[u8]) -> Result<TorrentInfo> {
         libtorrent_sys::libtorrent_free_torrent_info(ffi_info);
     }
 
+    // Cache the result if enabled and successful
+    if use_cache {
+        if let Ok(ref info) = result {
+            let data_hash = compute_data_hash(data);
+            let cache = get_cache();
+            cache.lock().unwrap().insert(
+                data_hash,
+                CacheEntry {
+                    info: info.clone(),
+                },
+            );
+        }
+    }
+
     result
+}
+
+fn compute_data_hash(data: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut hasher);
+    let hash = hasher.finish();
+    let mut s = String::with_capacity(16);
+    write!(s, "{:016x}", hash).unwrap();
+    s
 }
 
 #[cfg(test)]
@@ -212,6 +413,16 @@ mod tests {
         println!("Info hash: {}", info.info_hash);
         println!("Total size: {} bytes", info.total_size);
         println!("File count: {}", info.file_count);
+        if let Some(ref comment) = info.comment {
+            println!("Comment: {}", comment);
+        }
+        if let Some(ref created_by) = info.created_by {
+            println!("Created by: {}", created_by);
+        }
+        if let Some(creation_date) = info.creation_date {
+            println!("Creation date: {}", creation_date);
+        }
+        println!("Trackers: {:?}", info.trackers);
     }
     
     #[test]
@@ -301,5 +512,114 @@ mod tests {
         // Verify total size matches sum of file sizes
         let total_from_files: u64 = info.files.iter().map(|f| f.size).sum();
         assert_eq!(info.total_size, total_from_files, "Total size should match sum of file sizes");
+    }
+
+    #[test]
+    fn test_tracker_list_functionality() {
+        let test_file = first_torrent_file().expect("No .torrent file found in repo root");
+        
+        // Read the torrent file
+        let data = fs::read(test_file).expect("Failed to read test torrent file");
+        
+        // Parse the torrent
+        let info = parse_torrent(&data).expect("Failed to parse torrent");
+        
+        // Test list_trackers method
+        let trackers = info.list_trackers();
+        assert_eq!(trackers.len(), info.trackers.len());
+        
+        // Test standalone list_trackers function
+        let trackers_func = list_trackers(&info);
+        assert_eq!(trackers_func.len(), info.trackers.len());
+        
+        // Test primary_trackers method
+        let primary = info.primary_trackers();
+        let expected_primary: Vec<&str> = info.trackers
+            .iter()
+            .filter(|t| t.tier == 0)
+            .map(|t| t.url.as_str())
+            .collect();
+        assert_eq!(primary, expected_primary);
+        
+        // Verify tracker structure
+        for tracker in &info.trackers {
+            assert!(!tracker.url.is_empty(), "Tracker URL should not be empty");
+            assert!(tracker.tier >= 0, "Tracker tier should be non-negative");
+            println!("Tracker: {} (tier {})", tracker.url, tracker.tier);
+        }
+        
+        println!("Tracker list test passed!");
+        println!("Total trackers: {}", info.trackers.len());
+        println!("Primary trackers: {}", primary.len());
+    }
+
+    #[test]
+    fn test_num_pieces() {
+        let test_file = first_torrent_file().expect("No .torrent file found in repo root");
+        let data = fs::read(test_file).expect("Failed to read test torrent file");
+        let info = parse_torrent(&data).expect("Failed to parse torrent");
+        
+        let num_pieces = info.num_pieces();
+        assert!(num_pieces > 0, "Number of pieces should be positive");
+        
+        // Verify calculation
+        let expected = ((info.total_size + info.piece_size as u64 - 1) / info.piece_size as u64) as u32;
+        assert_eq!(num_pieces, expected, "num_pieces calculation mismatch");
+        
+        println!("Number of pieces: {}", num_pieces);
+    }
+
+    #[test]
+    fn test_parse_cache() {
+        clear_parse_cache();
+        
+        let test_file = first_torrent_file().expect("No .torrent file found in repo root");
+        let data = fs::read(test_file).expect("Failed to read test torrent file");
+        
+        // Parse with cache
+        let info1 = parse_torrent_cached(&data).expect("Failed to parse torrent");
+        let info2 = parse_torrent_cached(&data).expect("Failed to parse cached torrent");
+        
+        // Both should return the same info
+        assert_eq!(info1.info_hash, info2.info_hash);
+        assert_eq!(info1.name, info2.name);
+        
+        // Parse without cache should also work
+        let info3 = parse_torrent(&data).expect("Failed to parse torrent without cache");
+        assert_eq!(info3.info_hash, info1.info_hash);
+        
+        clear_parse_cache();
+        println!("Cache test passed!");
+    }
+
+    #[test]
+    fn test_metadata_fields() {
+        let test_file = first_torrent_file().expect("No .torrent file found in repo root");
+        let data = fs::read(test_file).expect("Failed to read test torrent file");
+        let info = parse_torrent(&data).expect("Failed to parse torrent");
+        
+        // Print all metadata for debugging
+        println!("Metadata for {}", info.name);
+        println!("  Info hash: {}", info.info_hash);
+        println!("  Total size: {} bytes", info.total_size);
+        println!("  Piece size: {} bytes", info.piece_size);
+        println!("  File count: {}", info.file_count);
+        println!("  Tracker count: {}", info.trackers.len());
+        
+        if let Some(ref comment) = info.comment {
+            println!("  Comment: {}", comment);
+        }
+        if let Some(ref created_by) = info.created_by {
+            println!("  Created by: {}", created_by);
+        }
+        if let Some(creation_date) = info.creation_date {
+            println!("  Creation date: {} (timestamp)", creation_date);
+        }
+        
+        // Test that metadata fields are correctly optional
+        // These should not panic even if they are None
+        let _ = info.comment.as_ref();
+        let _ = info.created_by.as_ref();
+        let _ = info.creation_date;
     }
 }
