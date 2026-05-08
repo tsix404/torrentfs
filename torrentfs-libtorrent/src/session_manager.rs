@@ -154,6 +154,8 @@ impl SessionManager {
     pub fn with_session(session: Arc<Session>, config: SessionConfig) -> Result<Self> {
         session.set_alert_mask(config.alert_mask);
         
+        session.set_listen_port(config.listen_port as i32);
+        
         if let Some(limit) = config.download_rate_limit {
             session.set_download_rate_limit(limit as i32);
         }
@@ -468,6 +470,8 @@ impl SessionManager {
     pub async fn update_config(&mut self, config: SessionConfig) {
         self.session.set_alert_mask(config.alert_mask);
         
+        self.session.set_listen_port(config.listen_port as i32);
+        
         if let Some(limit) = config.download_rate_limit {
             self.session.set_download_rate_limit(limit as i32);
         }
@@ -660,6 +664,7 @@ mod tests {
     #[tokio::test]
     async fn test_configuration_applied_to_session() {
         let mut config = SessionConfig::default();
+        config.listen_port = 6889;
         config.download_rate_limit = Some(1024 * 1024);
         config.upload_rate_limit = Some(512 * 1024);
         config.max_connections = 50;
@@ -669,6 +674,7 @@ mod tests {
         
         let manager = SessionManager::new(config).unwrap();
         
+        assert_eq!(manager.session.get_listen_port(), 6889);
         assert_eq!(manager.session.get_download_rate_limit(), 1024 * 1024);
         assert_eq!(manager.session.get_upload_rate_limit(), 512 * 1024);
         assert_eq!(manager.session.get_max_connections(), 50);

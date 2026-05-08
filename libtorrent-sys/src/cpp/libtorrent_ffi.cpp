@@ -989,6 +989,41 @@ int libtorrent_get_active_seeds(libtorrent_session_t* session) {
     }
 }
 
+void libtorrent_set_listen_port(libtorrent_session_t* session, int port) {
+    if (!session) return;
+    
+    try {
+        libtorrent::settings_pack pack;
+        pack.set_str(libtorrent::settings_pack::listen_interfaces, 
+            std::string("0.0.0.0:") + std::to_string(port));
+        session->session.apply_settings(pack);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_set_listen_port: %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "libtorrent_set_listen_port: unknown exception\n");
+    }
+}
+
+int libtorrent_get_listen_port(libtorrent_session_t* session) {
+    if (!session) return 0;
+    
+    try {
+        auto settings = session->session.get_settings();
+        std::string listen_if = settings.get_str(libtorrent::settings_pack::listen_interfaces);
+        size_t pos = listen_if.rfind(':');
+        if (pos != std::string::npos) {
+            return std::stoi(listen_if.substr(pos + 1));
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "libtorrent_get_listen_port: %s\n", e.what());
+        return 0;
+    } catch (...) {
+        fprintf(stderr, "libtorrent_get_listen_port: unknown exception\n");
+        return 0;
+    }
+}
+
 void libtorrent_restore_signal_handlers() {
     // No-op on C++ side - signal handlers are managed in Rust
 }

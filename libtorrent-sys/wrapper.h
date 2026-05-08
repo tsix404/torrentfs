@@ -183,7 +183,9 @@ void libtorrent_set_active_seeds(libtorrent_session_t* session, int limit);
 int libtorrent_get_active_downloads(libtorrent_session_t* session);
 int libtorrent_get_active_seeds(libtorrent_session_t* session);
 
-// Destroy a libtorrent session
+void libtorrent_set_listen_port(libtorrent_session_t* session, int port);
+int libtorrent_get_listen_port(libtorrent_session_t* session);
+
 void libtorrent_destroy_session(libtorrent_session_t* session);
 
 #ifdef __cplusplus

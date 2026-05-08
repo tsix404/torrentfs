@@ -303,6 +303,16 @@ impl Session {
         unsafe { libtorrent_sys::libtorrent_get_active_seeds(*guard) }
     }
 
+    pub fn set_listen_port(&self, port: i32) {
+        let guard = self.inner.lock().unwrap();
+        unsafe { libtorrent_sys::libtorrent_set_listen_port(*guard, port) };
+    }
+
+    pub fn get_listen_port(&self) -> i32 {
+        let guard = self.inner.lock().unwrap();
+        unsafe { libtorrent_sys::libtorrent_get_listen_port(*guard) }
+    }
+
     /// Reads a piece from the torrent.
     /// 
     /// # Blocking Behavior
