@@ -1,5 +1,5 @@
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -379,15 +379,43 @@ fn test_random_offset_reading() {
     let mount_path = mount_dir.path().to_owned();
     let state_dir = TempDir::new().unwrap();
     let state_path = state_dir.path().to_path_buf();
+    let cache_dir = TempDir::new().unwrap();
+    let piece_cache = torrentfs::PieceCache::with_cache_dir(cache_dir.path().to_path_buf()).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let runtime = rt
         .block_on(TorrentRuntime::new(&state_path))
         .expect("TorrentRuntime::new() should succeed");
     let metadata_manager = Arc::new(MetadataManager::new(runtime.db.clone()).unwrap());
-    let session = Arc::new(Session::new().unwrap());
+    let session = Arc::clone(&runtime.session);
+    let piece_cache = Arc::new(piece_cache);
 
-    let fs = TorrentFsFilesystem::new_with_async(state_path.clone(), metadata_manager, session);
+    let src = first_torrent_file().expect("No .torrent files found in test_data directory. Test requires .torrent files to test random offset reading.");
+    let torrent_data = fs::read(&src).expect("Failed to read torrent file");
+    let torrent_info = torrentfs_libtorrent::parse_torrent(&torrent_data).expect("Failed to parse torrent");
+    let info_hash = torrent_info.info_hash.clone();
+    
+    let all_content: Vec<u8> = (0..1700u16).map(|i| (i % 256) as u8).collect();
+    let piece_size = torrent_info.piece_size as usize;
+    
+    for piece_idx in 0..=((all_content.len() - 1) / piece_size) {
+        let start = piece_idx * piece_size;
+        let end = std::cmp::min(start + piece_size, all_content.len());
+        piece_cache.write_piece(&info_hash, piece_idx as u32, &all_content[start..end]).expect("Failed to write piece to cache");
+    }
+    
+    session.add_torrent_paused(&torrent_data, "/tmp/torrentfs").expect("Failed to add torrent");
+
+    let download_coordinator = Arc::new(
+        torrentfs::DownloadCoordinator::new(Arc::clone(&session), Arc::clone(&piece_cache))
+    );
+
+    let fs = TorrentFsFilesystem::new_with_download_coordinator(
+        state_path.clone(),
+        metadata_manager,
+        session,
+        download_coordinator,
+    );
 
     let options = vec![
         fuser::MountOption::FSName("torrentfs".to_string()),
@@ -396,8 +424,6 @@ fn test_random_offset_reading() {
     let guard = fuser::spawn_mount2(fs, &mount_path, &options).unwrap();
 
     thread::sleep(Duration::from_millis(500));
-
-    let src = first_torrent_file().expect("No .torrent files found in test_data directory. Test requires .torrent files to test random offset reading.");
 
     let dest = mount_path.join("metadata").join(src.file_name().unwrap());
     fs::copy(&src, &dest).expect("Failed to copy .torrent file");
@@ -426,18 +452,25 @@ fn test_random_offset_reading() {
     }
 
     let torrent_dir = data_entries[0].path();
-    let file_list: Vec<_> = fs::read_dir(&torrent_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let path = e.path();
-            if path.is_file() {
-                fs::metadata(&path).ok().map(|m| (path, m.len()))
-            } else {
-                None
+    
+    fn collect_files(dir: &std::path::Path) -> Vec<(std::path::PathBuf, u64)> {
+        let mut files = Vec::new();
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Ok(metadata) = fs::metadata(&path) {
+                        files.push((path, metadata.len()));
+                    }
+                } else if path.is_dir() {
+                    files.extend(collect_files(&path));
+                }
             }
-        })
-        .collect();
+        }
+        files
+    }
+    
+    let file_list = collect_files(&torrent_dir);
 
     if file_list.is_empty() {
         panic!("No files found in torrent directory {:?}. Test requires files to test random offset reading.", torrent_dir);
@@ -459,7 +492,10 @@ fn test_random_offset_reading() {
         });
 
     let num_threads = 10;
-    let test_duration = Duration::from_secs(300);
+    let test_duration = Duration::from_secs(std::env::var("TORRENTFS_TEST_DURATION_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(300));
     let min_read_size = 1024usize;
     let max_read_size = 1024 * 1024usize;
 
@@ -495,8 +531,12 @@ fn test_random_offset_reading() {
                     continue;
                 }
 
-                let read_size =
-                    rng.gen_range(min_read_size..=max_read_size.min(*file_size as usize));
+                let file_size_usize = *file_size as usize;
+                let read_size = if file_size_usize < min_read_size {
+                    file_size_usize
+                } else {
+                    rng.gen_range(min_read_size..=max_read_size.min(file_size_usize))
+                };
                 let max_offset = file_size.saturating_sub(read_size as u64);
                 let offset = if max_offset > 0 {
                     rng.gen_range(0..=max_offset)
