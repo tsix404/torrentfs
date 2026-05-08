@@ -1,0 +1,13 @@
+{
+  "project_id": "df1dd28f-edda-4a43-b03f-010d9516b658",
+  "project_title": "torrentfs",
+  "resources": [
+    {
+      "id": "184b520c-1f60-4d46-b7b7-f699237f3dc1",
+      "resource_type": "github_repo",
+      "resource_ref": {
+        "url": "https://github.com/tsix404/torrentfs.git"
+      }
+    }
+  ]
+}
