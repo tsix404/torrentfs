@@ -401,6 +401,87 @@ impl Database {
             println!("Migration v5 already applied.");
         }
         
+        let v6_applied: Option<i64> = sqlx::query_scalar(
+            "SELECT version FROM _sqlx_migrations WHERE version = 6 AND success = true"
+        )
+        .fetch_optional(self.pool())
+        .await
+        .context("Failed to check migration v6 status")?;
+        
+        if v6_applied.is_none() {
+            println!("Applying migration v6: adding closure table for directory structure (C方案)...");
+            
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS torrent_directories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    torrent_id INTEGER NOT NULL,
+                    parent_id INTEGER,
+                    name TEXT NOT NULL,
+                    FOREIGN KEY (torrent_id) REFERENCES torrents(id) ON DELETE CASCADE,
+                    FOREIGN KEY (parent_id) REFERENCES torrent_directories(id) ON DELETE CASCADE
+                )"
+            )
+            .execute(self.pool())
+            .await
+            .context("Failed to create torrent_directories table")?;
+            
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS torrent_path_closure (
+                    ancestor_id INTEGER NOT NULL,
+                    descendant_id INTEGER NOT NULL,
+                    depth INTEGER NOT NULL,
+                    PRIMARY KEY (ancestor_id, descendant_id),
+                    FOREIGN KEY (ancestor_id) REFERENCES torrent_directories(id) ON DELETE CASCADE,
+                    FOREIGN KEY (descendant_id) REFERENCES torrent_directories(id) ON DELETE CASCADE
+                )"
+            )
+            .execute(self.pool())
+            .await
+            .context("Failed to create torrent_path_closure table")?;
+            
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_torrent_directories_torrent_id ON torrent_directories(torrent_id)")
+                .execute(self.pool())
+                .await
+                .context("Failed to create idx_torrent_directories_torrent_id")?;
+            
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_torrent_path_closure_descendant ON torrent_path_closure(descendant_id)")
+                .execute(self.pool())
+                .await
+                .context("Failed to create idx_torrent_path_closure_descendant")?;
+            
+            let add_directory_id = sqlx::query(
+                "ALTER TABLE torrent_files ADD COLUMN directory_id INTEGER REFERENCES torrent_directories(id) ON DELETE SET NULL"
+            )
+            .execute(self.pool())
+            .await;
+            
+            match &add_directory_id {
+                Ok(_) => println!("Added directory_id column to torrent_files"),
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if err_str.contains("duplicate column name") {
+                        println!("directory_id column already exists, skipping");
+                    } else {
+                        return Err(add_directory_id.unwrap_err())
+                            .context("Failed to add directory_id column");
+                    }
+                }
+            }
+            
+            sqlx::query(
+                "INSERT OR IGNORE INTO _sqlx_migrations (version, description, success, checksum, execution_time)
+                 VALUES (6, 'add_closure_table_for_directories', true, ?, 0)"
+            )
+            .bind(vec![0u8; 32])
+            .execute(self.pool())
+            .await
+            .context("Failed to record migration v6")?;
+            
+            println!("Migration v6 applied successfully.");
+        } else {
+            println!("Migration v6 already applied.");
+        }
+        
         Ok(())
     }
 }

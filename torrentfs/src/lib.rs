@@ -13,7 +13,7 @@ pub use database::Database;
 pub use download::DownloadCoordinator;
 pub use metadata::MetadataManager;
 pub use piece_cache::PieceCache;
-pub use repo::{TorrentRepo, TorrentWithData};
+pub use repo::{TorrentRepo, TorrentWithData, Directory};
 pub use resume_saver::{ResumeSaver, ResumeSaverConfig};
 pub use runtime::{TorrentRuntime, TorrentRuntimeConfig, sanitize_path_component, build_safe_path};
 

@@ -39,6 +39,15 @@ pub struct FileEntry {
     pub first_piece: i64,
     pub last_piece: i64,
     pub offset: i64,
+    pub directory_id: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Directory {
+    pub id: i64,
+    pub torrent_id: i64,
+    pub parent_id: Option<i64>,
+    pub name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -210,7 +219,7 @@ impl TorrentRepo {
     pub async fn insert_files(&self, torrent_id: i64, files: Vec<FileEntry>) -> Result<()> {
         for file in files {
             sqlx::query(
-                "INSERT INTO torrent_files (torrent_id, path, size, first_piece, last_piece, offset) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO torrent_files (torrent_id, path, size, first_piece, last_piece, offset, directory_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(torrent_id)
             .bind(&file.path)
@@ -218,6 +227,7 @@ impl TorrentRepo {
             .bind(file.first_piece)
             .bind(file.last_piece)
             .bind(file.offset)
+            .bind(file.directory_id)
             .execute(&self.pool)
             .await?;
         }
@@ -243,8 +253,8 @@ impl TorrentRepo {
     }
 
     pub async fn get_files(&self, torrent_id: i64) -> Result<Vec<FileEntry>> {
-        let rows = sqlx::query_as::<_, (i64, i64, String, i64, i64, i64, i64)>(
-            "SELECT id, torrent_id, path, size, first_piece, last_piece, offset FROM torrent_files WHERE torrent_id = ? ORDER BY id",
+        let rows = sqlx::query_as::<_, (i64, i64, String, i64, i64, i64, i64, Option<i64>)>(
+            "SELECT id, torrent_id, path, size, first_piece, last_piece, offset, directory_id FROM torrent_files WHERE torrent_id = ? ORDER BY id",
         )
         .bind(torrent_id)
         .fetch_all(&self.pool)
@@ -260,8 +270,156 @@ impl TorrentRepo {
                 first_piece: r.4,
                 last_piece: r.5,
                 offset: r.6,
+                directory_id: r.7,
             })
             .collect())
+    }
+    
+    pub async fn insert_directory(&self, torrent_id: i64, parent_id: Option<i64>, name: &str) -> Result<Directory> {
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO torrent_directories (torrent_id, parent_id, name) VALUES (?, ?, ?) RETURNING id",
+        )
+        .bind(torrent_id)
+        .bind(parent_id)
+        .bind(name)
+        .fetch_one(&self.pool)
+        .await?;
+        
+        sqlx::query(
+            "INSERT INTO torrent_path_closure (ancestor_id, descendant_id, depth) VALUES (?, ?, 0)",
+        )
+        .bind(id)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        
+        if let Some(pid) = parent_id {
+            sqlx::query(
+                r#"
+                INSERT INTO torrent_path_closure (ancestor_id, descendant_id, depth)
+                SELECT ancestor_id, ?, depth + 1
+                FROM torrent_path_closure
+                WHERE descendant_id = ?
+                "#,
+            )
+            .bind(id)
+            .bind(pid)
+            .execute(&self.pool)
+            .await?;
+        }
+        
+        Ok(Directory {
+            id,
+            torrent_id,
+            parent_id,
+            name: name.to_string(),
+        })
+    }
+    
+    pub async fn get_directories_by_torrent_id(&self, torrent_id: i64) -> Result<Vec<Directory>> {
+        let rows = sqlx::query_as::<_, (i64, i64, Option<i64>, String)>(
+            "SELECT id, torrent_id, parent_id, name FROM torrent_directories WHERE torrent_id = ?",
+        )
+        .bind(torrent_id)
+        .fetch_all(&self.pool)
+        .await?;
+        
+        Ok(rows.into_iter().map(|r| Directory {
+            id: r.0,
+            torrent_id: r.1,
+            parent_id: r.2,
+            name: r.3,
+        }).collect())
+    }
+    
+    pub async fn get_directory_children(&self, directory_id: i64) -> Result<Vec<Directory>> {
+        let rows = sqlx::query_as::<_, (i64, i64, Option<i64>, String)>(
+            r#"
+            SELECT d.id, d.torrent_id, d.parent_id, d.name
+            FROM torrent_directories d
+            INNER JOIN torrent_path_closure c ON d.id = c.descendant_id
+            WHERE c.ancestor_id = ? AND c.depth = 1
+            "#,
+        )
+        .bind(directory_id)
+        .fetch_all(&self.pool)
+        .await?;
+        
+        Ok(rows.into_iter().map(|r| Directory {
+            id: r.0,
+            torrent_id: r.1,
+            parent_id: r.2,
+            name: r.3,
+        }).collect())
+    }
+    
+    pub async fn get_files_in_directory(&self, directory_id: i64) -> Result<Vec<FileEntry>> {
+        let rows = sqlx::query_as::<_, (i64, i64, String, i64, i64, i64, i64, Option<i64>)>(
+            "SELECT id, torrent_id, path, size, first_piece, last_piece, offset, directory_id FROM torrent_files WHERE directory_id = ?",
+        )
+        .bind(directory_id)
+        .fetch_all(&self.pool)
+        .await?;
+        
+        Ok(rows.into_iter().map(|r| FileEntry {
+            id: r.0,
+            torrent_id: r.1,
+            path: r.2,
+            size: r.3,
+            first_piece: r.4,
+            last_piece: r.5,
+            offset: r.6,
+            directory_id: r.7,
+        }).collect())
+    }
+    
+    pub async fn get_all_descendants(&self, directory_id: i64) -> Result<Vec<Directory>> {
+        let rows = sqlx::query_as::<_, (i64, i64, Option<i64>, String)>(
+            r#"
+            SELECT d.id, d.torrent_id, d.parent_id, d.name
+            FROM torrent_directories d
+            INNER JOIN torrent_path_closure c ON d.id = c.descendant_id
+            WHERE c.ancestor_id = ?
+            "#,
+        )
+        .bind(directory_id)
+        .fetch_all(&self.pool)
+        .await?;
+        
+        Ok(rows.into_iter().map(|r| Directory {
+            id: r.0,
+            torrent_id: r.1,
+            parent_id: r.2,
+            name: r.3,
+        }).collect())
+    }
+    
+    pub async fn get_directory_depth(&self, directory_id: i64) -> Result<i64> {
+        let depth: i64 = sqlx::query_scalar(
+            "SELECT MAX(depth) FROM torrent_path_closure WHERE descendant_id = ?",
+        )
+        .bind(directory_id)
+        .fetch_one(&self.pool)
+        .await?;
+        
+        Ok(depth)
+    }
+    
+    pub async fn get_directory_path(&self, directory_id: i64) -> Result<String> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            r#"
+            SELECT d.name
+            FROM torrent_directories d
+            INNER JOIN torrent_path_closure c ON d.id = c.ancestor_id
+            WHERE c.descendant_id = ?
+            ORDER BY c.depth DESC
+            "#,
+        )
+        .bind(directory_id)
+        .fetch_all(&self.pool)
+        .await?;
+        
+        Ok(rows.join("/"))
     }
 
     pub async fn update_resume_data(&self, info_hash: &[u8], resume_data: &[u8]) -> Result<()> {
@@ -371,8 +529,37 @@ mod tests {
                 first_piece INTEGER NOT NULL DEFAULT 0,
                 last_piece INTEGER NOT NULL DEFAULT 0,
                 offset INTEGER NOT NULL DEFAULT 0,
+                directory_id INTEGER,
                 FOREIGN KEY (torrent_id) REFERENCES torrents(id) ON DELETE CASCADE,
                 UNIQUE(torrent_id, path)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE torrent_directories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                torrent_id INTEGER NOT NULL,
+                parent_id INTEGER,
+                name TEXT NOT NULL,
+                FOREIGN KEY (torrent_id) REFERENCES torrents(id) ON DELETE CASCADE,
+                FOREIGN KEY (parent_id) REFERENCES torrent_directories(id) ON DELETE CASCADE
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE torrent_path_closure (
+                ancestor_id INTEGER NOT NULL,
+                descendant_id INTEGER NOT NULL,
+                depth INTEGER NOT NULL,
+                PRIMARY KEY (ancestor_id, descendant_id),
+                FOREIGN KEY (ancestor_id) REFERENCES torrent_directories(id) ON DELETE CASCADE,
+                FOREIGN KEY (descendant_id) REFERENCES torrent_directories(id) ON DELETE CASCADE
             )",
         )
         .execute(&pool)
@@ -461,6 +648,7 @@ mod tests {
                 first_piece: 0,
                 last_piece: 0,
                 offset: 0,
+                directory_id: None,
             },
             FileEntry {
                 id: 0,
@@ -470,6 +658,7 @@ mod tests {
                 first_piece: 0,
                 last_piece: 0,
                 offset: 1024,
+                directory_id: None,
             },
         ];
 
@@ -572,6 +761,7 @@ mod tests {
                 first_piece: 0,
                 last_piece: 0,
                 offset: 0,
+                directory_id: None,
             },
             FileEntry {
                 id: 0,
@@ -581,6 +771,7 @@ mod tests {
                 first_piece: 0,
                 last_piece: 0,
                 offset: 50,
+                directory_id: None,
             },
         ];
 
@@ -607,6 +798,7 @@ mod tests {
                 first_piece: 0,
                 last_piece: 1,
                 offset: 0,
+                directory_id: None,
             },
             FileEntry {
                 id: 0,
@@ -616,6 +808,7 @@ mod tests {
                 first_piece: 1,
                 last_piece: 3,
                 offset: 1024,
+                directory_id: None,
             },
             FileEntry {
                 id: 0,
@@ -625,6 +818,7 @@ mod tests {
                 first_piece: 4,
                 last_piece: 4,
                 offset: 3072,
+                directory_id: None,
             },
         ];
 
@@ -790,6 +984,7 @@ mod tests {
                 first_piece: 0,
                 last_piece: 0,
                 offset: 0,
+                directory_id: None,
             },
             FileEntry {
                 id: 0,
@@ -799,6 +994,7 @@ mod tests {
                 first_piece: 0,
                 last_piece: 0,
                 offset: 1024,
+                directory_id: None,
             },
         ];
 
@@ -852,5 +1048,85 @@ mod tests {
 
         let not_found = repo.find_by_name_and_source_path("nonexistent", "").await.unwrap();
         assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_directory_closure_table() {
+        let (_temp_dir, pool) = setup_test_db().await;
+        let repo = TorrentRepo::new(pool);
+
+        let torrent = repo
+            .insert(&vec![1u8; 20], "test.torrent", 4096, 3, "", None::<&[u8]>)
+            .await
+            .unwrap();
+
+        let root_id = repo.insert_directory(torrent.id, None, "root").await.unwrap();
+        assert!(root_id.parent_id.is_none());
+
+        let child1_id = repo.insert_directory(torrent.id, Some(root_id.id), "child1").await.unwrap();
+        assert_eq!(child1_id.parent_id, Some(root_id.id));
+
+        let child2_id = repo.insert_directory(torrent.id, Some(root_id.id), "child2").await.unwrap();
+        let grandchild_id = repo.insert_directory(torrent.id, Some(child1_id.id), "grandchild").await.unwrap();
+
+        let root_children = repo.get_directory_children(root_id.id).await.unwrap();
+        assert_eq!(root_children.len(), 2);
+
+        let depth = repo.get_directory_depth(grandchild_id.id).await.unwrap();
+        assert_eq!(depth, 2);
+
+        let all_descendants = repo.get_all_descendants(root_id.id).await.unwrap();
+        assert_eq!(all_descendants.len(), 4);
+
+        let path = repo.get_directory_path(grandchild_id.id).await.unwrap();
+        assert_eq!(path, "root/child1/grandchild");
+
+        let dirs = repo.get_directories_by_torrent_id(torrent.id).await.unwrap();
+        assert_eq!(dirs.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_files_with_directory() {
+        let (_temp_dir, pool) = setup_test_db().await;
+        let repo = TorrentRepo::new(pool);
+
+        let torrent = repo
+            .insert(&vec![1u8; 20], "test.torrent", 2048, 2, "", None::<&[u8]>)
+            .await
+            .unwrap();
+
+        let dir = repo.insert_directory(torrent.id, None, "videos").await.unwrap();
+
+        let files = vec![
+            FileEntry {
+                id: 0,
+                torrent_id: torrent.id,
+                path: "videos/movie.mp4".to_string(),
+                size: 1024,
+                first_piece: 0,
+                last_piece: 0,
+                offset: 0,
+                directory_id: Some(dir.id),
+            },
+            FileEntry {
+                id: 0,
+                torrent_id: torrent.id,
+                path: "readme.txt".to_string(),
+                size: 1024,
+                first_piece: 0,
+                last_piece: 0,
+                offset: 1024,
+                directory_id: None,
+            },
+        ];
+
+        repo.insert_files(torrent.id, files).await.unwrap();
+
+        let dir_files = repo.get_files_in_directory(dir.id).await.unwrap();
+        assert_eq!(dir_files.len(), 1);
+        assert_eq!(dir_files[0].path, "videos/movie.mp4");
+
+        let all_files = repo.get_files(torrent.id).await.unwrap();
+        assert_eq!(all_files.len(), 2);
     }
 }

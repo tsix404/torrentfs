@@ -73,6 +73,7 @@ impl MetadataManager {
                 first_piece: f.first_piece,
                 last_piece: f.last_piece,
                 offset: f.offset,
+                directory_id: None,
             }
         }).collect();
 
@@ -273,6 +274,7 @@ mod tests {
             first_piece: 0,
             last_piece: 0,
             offset: 0,
+            directory_id: None,
         }];
         let info_hash = vec![0xAA; 20];
         manager.repo.insert_if_not_exists(
@@ -325,6 +327,7 @@ mod tests {
             first_piece: 0,
             last_piece: 0,
             offset: 0,
+            directory_id: None,
         }];
         let info_hash = vec![0xBB; 20];
         manager.repo.insert_if_not_exists(
@@ -346,6 +349,7 @@ mod tests {
                 first_piece: 0,
                 last_piece: 0,
                 offset: 0,
+                directory_id: None,
             },
         ];
         let result = manager.repo.insert_if_not_exists(
