@@ -50,7 +50,7 @@ impl std::fmt::Display for AlertType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ResourceReport {
     pub samples: Vec<ResourceSample>,
     pub alerts: Vec<ResourceThresholdAlert>,

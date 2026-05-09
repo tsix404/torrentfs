@@ -1,0 +1,122 @@
+name: Stability Tests
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      test_duration_secs:
+        description: 'Test duration in seconds'
+        required: false
+        default: '3600'
+      num_threads:
+        description: 'Number of test threads'
+        required: false
+        default: '20'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  stability-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libtorrent-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build test binary
+        run: cargo test --package torrentfs-fuse --test stability_test --no-run --verbose
+
+      - name: Run FD leak test
+        run: cargo test --package torrentfs-fuse --test stability_test test_file_descriptor_leak_detection --verbose -- --nocapture
+
+      - name: Run crash recovery test
+        run: cargo test --package torrentfs-fuse --test stability_test test_crash_recovery_simulation --verbose -- --nocapture
+
+      - name: Run performance benchmark test
+        run: cargo test --package torrentfs-fuse --test stability_test test_performance_benchmark --verbose -- --nocapture
+
+      - name: Run repeated mount/unmount test
+        run: cargo test --package torrentfs-fuse --test stability_test test_repeated_mount_unmount --verbose -- --nocapture
+
+      - name: Run endurance test
+        env:
+          TORRENTFS_STABILITY_DURATION_SECS: ${{ github.event.inputs.test_duration_secs || '3600' }}
+          TORRENTFS_STABILITY_THREADS: ${{ github.event.inputs.num_threads || '20' }}
+        run: cargo test --package torrentfs-fuse --test stability_test test_long_running_endurance --verbose -- --nocapture
+
+      - name: Run high concurrency stress test
+        run: cargo test --package torrentfs-fuse --test stability_test test_stress_high_concurrency --verbose -- --nocapture
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stability-test-results
+          path: |
+            target/debug/stability_test.log
+          retention-days: 30
+
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libtorrent-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run benchmarks
+        run: cargo bench --package torrentfs-fuse --verbose || true
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: target/criterion/
+          retention-days: 30

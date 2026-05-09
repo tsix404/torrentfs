@@ -224,11 +224,7 @@ impl FuseAsyncRuntime {
             download_coordinator: Some(download_coordinator),
         }
     }
-<<<<<<< HEAD
 
-=======
-    
->>>>>>> origin/multica/TSI-403
     /// Sends a command through the MPSC channel and waits for response
     /// 
     /// Creates a oneshot channel for the response, sends the command via MPSC,

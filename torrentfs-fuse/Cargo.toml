@@ -31,3 +31,8 @@ serial_test = "3"
 sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "sqlite"] }
 rand = "0.8"
 sysinfo.workspace = true
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "filesystem_bench"
+harness = false
