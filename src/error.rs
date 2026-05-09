@@ -1,0 +1,51 @@
+use std::ffi::CStr;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum TorrentError {
+    #[error("Invalid torrent file: {0}")]
+    InvalidFile(String),
+    
+    #[error("Failed to parse torrent: {0}")]
+    ParseError(String),
+    
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
+    
+    #[error("Null pointer encountered")]
+    NullPointer,
+    
+    #[error("Unknown error: code {code}, message: {message}")]
+    Unknown { code: i32, message: String },
+}
+
+pub type TorrentResult<T> = Result<T, TorrentError>;
+
+pub(crate) unsafe fn error_from_c(error: *const libtorrent_sys::lt_error_t) -> TorrentError {
+    if error.is_null() {
+        return TorrentError::Unknown {
+            code: -1,
+            message: "Unknown error".to_string(),
+        };
+    }
+    
+    let error_ref = &*error;
+    let message = if error_ref.message.is_null() {
+        "Unknown error".to_string()
+    } else {
+        CStr::from_ptr(error_ref.message)
+            .to_string_lossy()
+            .into_owned()
+    };
+    
+    if message.contains("bdecode") || message.contains("parse") || message.contains("invalid") {
+        TorrentError::ParseError(message)
+    } else if message.contains("file") || message.contains("path") || message.contains("not found") {
+        TorrentError::InvalidFile(message)
+    } else {
+        TorrentError::Unknown {
+            code: error_ref.code,
+            message,
+        }
+    }
+}
