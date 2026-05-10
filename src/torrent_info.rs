@@ -51,6 +51,27 @@ impl TorrentInfo {
         }
     }
 
+    pub fn from_bytes(data: Vec<u8>) -> TorrentResult<Self> {
+        let mut error = libtorrent_sys::lt_error_t {
+            message: ptr::null(),
+            code: 0,
+        };
+
+        let inner = unsafe {
+            libtorrent_sys::lt_torrent_info_create_from_buffer(
+                data.as_ptr(),
+                data.len(),
+                &mut error,
+            )
+        };
+
+        if inner.is_null() {
+            Err(unsafe { error_from_c(&error) })
+        } else {
+            Ok(TorrentInfo { inner })
+        }
+    }
+
     pub fn name(&self) -> String {
         unsafe {
             let name_ptr = libtorrent_sys::lt_torrent_info_name(self.inner);

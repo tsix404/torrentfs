@@ -2,6 +2,7 @@
 #define LIBTORRENT_WRAPPER_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -31,6 +32,7 @@ typedef struct {
 } lt_error_t;
 
 lt_torrent_info_t lt_torrent_info_create(const char* filepath, lt_error_t* error);
+lt_torrent_info_t lt_torrent_info_create_from_buffer(const uint8_t* data, size_t size, lt_error_t* error);
 void lt_torrent_info_destroy(lt_torrent_info_t info);
 
 lt_torrent_metadata_t* lt_torrent_info_get_metadata(lt_torrent_info_t info);
