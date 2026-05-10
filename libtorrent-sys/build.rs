@@ -2,50 +2,36 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
-
-    println!("cargo:rerun-if-changed=wrapper/libtorrent_wrapper.h");
-    println!("cargo:rerun-if-changed=wrapper/libtorrent_wrapper.cpp");
-
-    let libtorrent_cflags = pkg_config::Config::new()
-        .probe("libtorrent-rasterbar")
-        .expect("Could not find libtorrent-rasterbar");
-
-    let openssl_cflags = pkg_config::Config::new()
-        .probe("openssl")
-        .expect("Could not find openssl");
-
-    let mut cpp_build = cc::Build::new();
-    cpp_build
-        .cpp(true)
-        .file("wrapper/libtorrent_wrapper.cpp")
-        .include("wrapper")
-        .flag("-std=c++17")
-        .flag("-fexceptions");
-
-    for include_path in libtorrent_cflags.include_paths.iter() {
-        cpp_build.include(include_path);
+    println!("cargo:rerun-if-changed=wrapper.h");
+    println!("cargo:rerun-if-changed=src/cpp/libtorrent_ffi.cpp");
+    
+    // Compile C++ code
+    let mut build = cc::Build::new();
+    build.cpp(true)
+          .file("src/cpp/libtorrent_ffi.cpp")
+          .include("/usr/include")
+          .flag("-std=c++14")
+          .flag("-fPIC");
+    
+    // Try to find libtorrent includes
+    if let Ok(include_path) = env::var("LIBTORRENT_INCLUDE_PATH") {
+        build.include(include_path);
     }
-
-    for include_path in openssl_cflags.include_paths.iter() {
-        cpp_build.include(include_path);
-    }
-
-    cpp_build.compile("libtorrent_wrapper");
-
-    for lib in libtorrent_cflags.libs.iter() {
-        println!("cargo:rustc-link-lib={}", lib);
-    }
-
-    for lib in openssl_cflags.libs.iter() {
-        println!("cargo:rustc-link-lib={}", lib);
-    }
-
+    
+    build.compile("libtorrent_ffi");
+    
+    // Link with libtorrent-rasterbar
+    println!("cargo:rustc-link-lib=torrent-rasterbar");
+    println!("cargo:rustc-link-lib=stdc++");
+    
+    // Generate Rust bindings
     let bindings = bindgen::Builder::default()
-        .header("wrapper/libtorrent_wrapper.h")
+        .header("wrapper.h")
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("Unable to generate bindings");
 
+    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     bindings
         .write_to_file(out_path.join("bindings.rs"))
         .expect("Couldn't write bindings!");

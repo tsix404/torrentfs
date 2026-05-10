@@ -1,0 +1,25 @@
+[package]
+name = "torrentfs-cli"
+version = "0.1.0"
+authors = ["Multica Team"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "CLI tool for parsing torrent metadata"
+repository = ""
+publish = false
+
+[[bin]]
+name = "torrentfs-cli"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+dirs.workspace = true
+tokio.workspace = true
+torrentfs = { path = "../torrentfs", version = "0.1.0" }
+torrentfs-libtorrent = { path = "../torrentfs-libtorrent", version = "0.1.0" }
+
+[dev-dependencies]
+sqlx.workspace = true
+tempfile = "3.10"

@@ -1,0 +1,30 @@
+[package]
+name = "torrentfs"
+version = "0.1.0"
+authors = ["Multica Team"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Core service for TorrentFS"
+repository = ""
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+serde.workspace = true
+sqlx.workspace = true
+dirs.workspace = true
+hex = "0.4"
+percent-encoding.workspace = true
+unicode-normalization.workspace = true
+torrentfs-libtorrent = { path = "../torrentfs-libtorrent", version = "0.1.0" }
+dashmap.workspace = true
+sha1 = "0.11.0"
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile = "3.10"
+serde_json = "1.0"
+proptest.workspace = true

@@ -1,0 +1,391 @@
+use anyhow::{Context, Result};
+use std::sync::Arc;
+
+use crate::database::Database;
+use crate::repo::TorrentRepo;
+
+pub struct MetadataManager {
+    pub repo: TorrentRepo,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedTorrent {
+    pub torrent_name: String,
+    pub info_hash: Vec<u8>,
+    pub total_size: i64,
+    pub file_count: i64,
+    pub files: Vec<FileEntry>,
+    pub source_path: String,
+    pub torrent_data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileEntry {
+    pub path: String,
+    pub size: i64,
+    pub first_piece: i64,
+    pub last_piece: i64,
+    pub offset: i64,
+}
+
+impl MetadataManager {
+    pub fn new(db: Arc<Database>) -> Result<Self> {
+        let repo = TorrentRepo::new(db.pool().clone());
+        Ok(Self { repo })
+    }
+
+    pub async fn process_torrent_data(&self, data: &[u8], source_path: &str) -> Result<ParsedTorrent> {
+        torrentfs_libtorrent::TorrentValidator::validate(data)
+            .context("Torrent file validation failed")?;
+
+        let info = torrentfs_libtorrent::parse_torrent(data)
+            .context("Failed to parse torrent data")?;
+
+        let info_hash = hex::decode(&info.info_hash)
+            .context("Failed to decode info hash hex")?;
+
+        let files: Vec<FileEntry> = info.files.iter().map(|f| FileEntry {
+            path: f.path.clone(),
+            size: f.size as i64,
+            first_piece: f.first_piece as i64,
+            last_piece: f.last_piece as i64,
+            offset: f.offset as i64,
+        }).collect();
+
+        Ok(ParsedTorrent {
+            torrent_name: info.name,
+            info_hash,
+            total_size: info.total_size as i64,
+            file_count: info.file_count as i64,
+            files,
+            source_path: source_path.to_string(),
+            torrent_data: data.to_vec(),
+        })
+    }
+
+    pub async fn persist_to_db(&self, parsed: &ParsedTorrent) -> Result<()> {
+        let repo_files: Vec<crate::repo::FileEntry> = parsed.files.iter().map(|f| {
+            crate::repo::FileEntry {
+                id: 0,
+                torrent_id: 0,
+                path: f.path.clone(),
+                size: f.size,
+                first_piece: f.first_piece,
+                last_piece: f.last_piece,
+                offset: f.offset,
+                directory_id: None,
+            }
+        }).collect();
+
+        self.repo.insert_if_not_exists(
+            &parsed.info_hash,
+            &parsed.torrent_name,
+            parsed.total_size,
+            parsed.file_count,
+            &parsed.source_path,
+            Some(parsed.torrent_data.as_slice()),
+            repo_files,
+        ).await?;
+
+        tracing::info!(
+            "Persisted torrent '{}' ({} files, {} bytes) to DB",
+            parsed.torrent_name, parsed.file_count, parsed.total_size
+        );
+
+        Ok(())
+    }
+
+    pub async fn list_torrents(&self) -> anyhow::Result<Vec<crate::repo::Torrent>> {
+        self.repo.list_all().await.map_err(|e| e.into())
+    }
+
+    pub async fn get_torrent_files(&self, torrent_name: &str) -> anyhow::Result<Vec<crate::repo::FileEntry>> {
+        let torrent = self.repo
+            .find_by_name(torrent_name)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Torrent '{}' not found", torrent_name))?;
+        
+        self.repo.get_files(torrent.id).await.map_err(|e| e.into())
+    }
+
+    pub async fn list_torrents_with_data(&self) -> anyhow::Result<Vec<crate::repo::TorrentWithData>> {
+        self.repo.list_all_with_data().await.map_err(|e| e.into())
+    }
+
+    pub async fn update_resume_data(&self, info_hash: &[u8], resume_data: &[u8]) -> anyhow::Result<()> {
+        self.repo.update_resume_data(info_hash, resume_data).await.map_err(|e| e.into())
+    }
+
+    pub async fn update_status(&self, info_hash: &[u8], status: &str) -> anyhow::Result<()> {
+        self.repo.update_status(info_hash, status).await.map_err(|e| e.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqliteConnectOptions;
+    use sqlx::SqlitePool;
+    use std::path::Path;
+    use std::str::FromStr;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    fn test_torrent_dir() -> std::path::PathBuf {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir.join("../test_data")
+    }
+
+    fn first_torrent_file() -> Option<std::path::PathBuf> {
+        let dir = test_torrent_dir();
+        std::fs::read_dir(&dir).ok()?.filter_map(|e| {
+            let e = e.ok()?;
+            if e.file_name().to_string_lossy().ends_with(".torrent") {
+                Some(e.path())
+            } else {
+                None
+            }
+        }).next()
+    }
+
+    async fn setup_temp_db() -> (TempDir, Database) {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let options = SqliteConnectOptions::from_str(&db_path.to_string_lossy())
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        let db = Database::with_pool(pool);
+        db.migrate().await.unwrap();
+        (temp_dir, db)
+    }
+
+    #[tokio::test]
+    async fn test_parse_valid_torrent() {
+        let test_file = first_torrent_file().expect("No .torrent file found in repo root");
+        let data = std::fs::read(&test_file).expect("Failed to read test torrent file");
+
+        let (_temp_dir, db) = setup_temp_db().await;
+        let manager = MetadataManager::new(Arc::new(db)).unwrap();
+
+        let parsed = manager.process_torrent_data(&data, "").await.unwrap();
+        assert!(!parsed.torrent_name.is_empty());
+        assert_eq!(parsed.info_hash.len(), 20);
+        assert!(parsed.total_size > 0);
+        assert!(parsed.file_count > 0);
+    }
+
+    #[tokio::test]
+    async fn test_process_and_persist() {
+        let test_file = first_torrent_file().expect("No .torrent file found in repo root");
+        let data = std::fs::read(&test_file).expect("Failed to read test torrent file");
+
+        let (_temp_dir, db) = setup_temp_db().await;
+        let manager = MetadataManager::new(Arc::new(db)).unwrap();
+
+        let parsed = manager.process_torrent_data(&data, "").await.unwrap();
+        manager.persist_to_db(&parsed).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_persist_includes_piece_range() {
+        let test_file = first_torrent_file().expect("No .torrent file found in repo root");
+        let data = std::fs::read(&test_file).expect("Failed to read test torrent file");
+
+        let (_temp_dir, db) = setup_temp_db().await;
+        let manager = MetadataManager::new(Arc::new(db)).unwrap();
+
+        let parsed = manager.process_torrent_data(&data, "").await.unwrap();
+        manager.persist_to_db(&parsed).await.unwrap();
+
+        // Re-read from DB and verify piece ranges
+        let torrent = manager.repo.find_by_info_hash(&parsed.info_hash).await.unwrap().unwrap();
+        let db_files = manager.repo.get_files(torrent.id).await.unwrap();
+
+        assert_eq!(db_files.len() as i64, parsed.file_count);
+
+        for (i, db_file) in db_files.iter().enumerate() {
+            let parsed_file = &parsed.files[i];
+            assert_eq!(db_file.path, parsed_file.path);
+            assert_eq!(db_file.size, parsed_file.size);
+            assert_eq!(db_file.first_piece, parsed_file.first_piece);
+            assert_eq!(db_file.last_piece, parsed_file.last_piece);
+            assert!(db_file.first_piece >= 0);
+            assert!(db_file.last_piece >= db_file.first_piece,
+                "File {}: last_piece {} < first_piece {}", i, db_file.last_piece, db_file.first_piece);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validation_rejects_invalid_torrent() {
+        let (_temp_dir, db) = setup_temp_db().await;
+        let manager = MetadataManager::new(Arc::new(db)).unwrap();
+
+        let result = manager.process_torrent_data(b"invalid data", "").await;
+        assert!(result.is_err(), "Should reject invalid torrent data");
+    }
+
+    #[tokio::test]
+    async fn test_validation_rejects_empty_data() {
+        let (_temp_dir, db) = setup_temp_db().await;
+        let manager = MetadataManager::new(Arc::new(db)).unwrap();
+
+        let result = manager.process_torrent_data(b"", "").await;
+        assert!(result.is_err(), "Should reject empty data");
+    }
+
+    #[tokio::test]
+    async fn test_nested_directory_structure() {
+        let test_file = test_torrent_dir().join("nested_dirs.torrent");
+        if !test_file.exists() {
+            eprintln!("Skipping: nested_dirs.torrent not found");
+            return;
+        }
+        let data = std::fs::read(&test_file).expect("Failed to read nested_dirs.torrent");
+
+        let (_temp_dir, db) = setup_temp_db().await;
+        let manager = MetadataManager::new(Arc::new(db)).unwrap();
+
+        let parsed = manager.process_torrent_data(&data, "").await.unwrap();
+        manager.persist_to_db(&parsed).await.unwrap();
+
+        let torrent = manager.repo.find_by_info_hash(&parsed.info_hash).await.unwrap().unwrap();
+        let db_files = manager.repo.get_files(torrent.id).await.unwrap();
+
+        let has_nested = db_files.iter().any(|f| f.path.contains('/'));
+        assert!(has_nested, "Should have files with nested paths containing '/'");
+
+        for file in &db_files {
+            assert!(!file.path.is_empty());
+            assert!(file.path.matches('/').count() <= 10, "Path depth should be reasonable");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_foreign_key_cascade_delete() {
+        let (_temp_dir, db) = setup_temp_db().await;
+        let manager = MetadataManager::new(Arc::new(db)).unwrap();
+
+        let files = vec![crate::repo::FileEntry {
+            id: 0,
+            torrent_id: 0,
+            path: "test/file.txt".to_string(),
+            size: 100,
+            first_piece: 0,
+            last_piece: 0,
+            offset: 0,
+            directory_id: None,
+        }];
+        let info_hash = vec![0xAA; 20];
+        manager.repo.insert_if_not_exists(
+            &info_hash,
+            "test_cascade",
+            100,
+            1,
+            "",
+            None,
+            files,
+        ).await.unwrap();
+
+        let torrent = manager.repo.find_by_info_hash(&info_hash).await.unwrap().unwrap();
+        let db_files = manager.repo.get_files(torrent.id).await.unwrap();
+        assert_eq!(db_files.len(), 1);
+
+        manager.repo.delete_torrent(&info_hash).await.unwrap();
+
+        let torrent_exists = manager.repo.find_by_info_hash(&info_hash).await.unwrap();
+        assert!(torrent_exists.is_none(), "Torrent should be deleted");
+
+        let db_files_after = manager.repo.get_files(torrent.id).await.unwrap();
+        assert!(db_files_after.is_empty(), "Files should be cascade deleted");
+    }
+
+    #[tokio::test]
+    async fn test_path_index_exists() {
+        let (_temp_dir, db) = setup_temp_db().await;
+        
+        let index_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_torrent_files_path'"
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        
+        assert_eq!(index_count, 1, "idx_torrent_files_path index should exist");
+    }
+
+    #[tokio::test]
+    async fn test_unique_constraint_torrent_files() {
+        let (_temp_dir, db) = setup_temp_db().await;
+        let manager = MetadataManager::new(Arc::new(db)).unwrap();
+
+        let files = vec![crate::repo::FileEntry {
+            id: 0,
+            torrent_id: 0,
+            path: "duplicate.txt".to_string(),
+            size: 100,
+            first_piece: 0,
+            last_piece: 0,
+            offset: 0,
+            directory_id: None,
+        }];
+        let info_hash = vec![0xBB; 20];
+        manager.repo.insert_if_not_exists(
+            &info_hash,
+            "unique_test",
+            100,
+            1,
+            "",
+            None,
+            files.clone(),
+        ).await.unwrap();
+
+        let duplicate_files = vec![
+            crate::repo::FileEntry {
+                id: 0,
+                torrent_id: 0,
+                path: "duplicate.txt".to_string(),
+                size: 200,
+                first_piece: 0,
+                last_piece: 0,
+                offset: 0,
+                directory_id: None,
+            },
+        ];
+        let result = manager.repo.insert_if_not_exists(
+            &vec![0xCC; 20],
+            "unique_test2",
+            200,
+            1,
+            "",
+            None,
+            duplicate_files,
+        ).await;
+        assert!(result.is_ok(), "Different torrents can have files with same path");
+    }
+
+    #[tokio::test]
+    async fn test_file_offset_and_piece_consistency() {
+        let test_file = first_torrent_file().expect("No .torrent file found");
+        let data = std::fs::read(&test_file).expect("Failed to read torrent");
+
+        let (_temp_dir, db) = setup_temp_db().await;
+        let manager = MetadataManager::new(Arc::new(db)).unwrap();
+
+        let parsed = manager.process_torrent_data(&data, "").await.unwrap();
+        manager.persist_to_db(&parsed).await.unwrap();
+
+        let torrent = manager.repo.find_by_info_hash(&parsed.info_hash).await.unwrap().unwrap();
+        let db_files = manager.repo.get_files(torrent.id).await.unwrap();
+
+        let mut prev_offset: i64 = -1;
+        for file in &db_files {
+            assert!(file.offset >= 0, "Offset should be non-negative");
+            assert!(file.offset > prev_offset, "Files should be ordered by offset");
+            assert!(file.size >= 0, "Size should be non-negative");
+            assert!(file.first_piece >= 0, "first_piece should be non-negative");
+            assert!(file.last_piece >= file.first_piece, "last_piece >= first_piece");
+            prev_offset = file.offset;
+        }
+    }
+}
