@@ -3,22 +3,27 @@ use fuser::{
     FileAttr, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyEntry, ReplyOpen,
     ReplyDirectory, Request, ReplyWrite, ReplyCreate,
 };
-use libc::{EACCES, EEXIST, EISDIR, ENOENT, ENOTDIR};
+use libc::{EACCES, EEXIST, EFBIG, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
-use tracing::{info, warn, Level};
+use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
+mod db;
 mod error;
 mod torrent_info;
+
+use db::{Database, DbError, FileEntry, InsertTorrentResult};
 use torrent_info::TorrentInfo;
 
 const ROOT_INO: u64 = 1;
 const METADATA_INO: u64 = 2;
 const DATA_INO: u64 = 3;
+const MAX_TORRENT_SIZE: usize = 10 * 1024 * 1024;
 
 static NEXT_INO: AtomicU64 = AtomicU64::new(4);
 static NEXT_FH: AtomicU64 = AtomicU64::new(1);
@@ -35,12 +40,16 @@ enum InodeData {
 struct Args {
     #[arg(help = "Mount point path")]
     mountpoint: PathBuf,
+    #[arg(long, help = "Database path")]
+    db: Option<PathBuf>,
 }
 
 struct TorrentFs {
     creation_time: Duration,
     inodes: HashMap<u64, InodeData>,
     open_files: HashMap<u64, u64>,
+    db: Option<Arc<Mutex<Database>>>,
+    processing_torrents: Arc<Mutex<HashMap<String, ()>>>,
 }
 
 impl TorrentFs {
@@ -59,7 +68,94 @@ impl TorrentFs {
             ),
             inodes,
             open_files: HashMap::new(),
+            db: None,
+            processing_torrents: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    fn new_with_db(db: Database) -> Self {
+        let mut fs = Self::new();
+        fs.db = Some(Arc::new(Mutex::new(db)));
+        fs
+    }
+
+    fn extract_source_path(&self, parent: u64) -> String {
+        if parent == METADATA_INO {
+            return String::new();
+        }
+        
+        let full_path = self.get_full_path(parent);
+        if full_path.starts_with("metadata/") {
+            full_path["metadata/".len()..].to_string()
+        } else {
+            full_path
+        }
+    }
+
+    fn process_torrent(&self, data: &[u8], source_path: &str, filename: &str) -> Result<(), i32> {
+        let info = TorrentInfo::from_bytes(data.to_vec())
+            .map_err(|e| {
+                warn!("Failed to parse torrent {}: {:?}", filename, e);
+                EINVAL
+            })?;
+
+        let metadata = info.metadata().map_err(|e| {
+            error!("Failed to get torrent metadata {}: {:?}", filename, e);
+            EIO
+        })?;
+
+        let info_hash_hex = hex::encode(metadata.info_hash);
+
+        let db = match &self.db {
+            Some(db) => db,
+            None => {
+                info!("Parsed torrent {} (no DB configured, skipping insert)", metadata.name);
+                return Ok(());
+            }
+        };
+
+        let mut db_guard = db.lock().map_err(|_| {
+            error!("Database lock poisoned");
+            EIO
+        })?;
+
+        let result = db_guard.insert_torrent(
+            source_path,
+            &metadata.name,
+            metadata.total_size as i64,
+            &info_hash_hex,
+        ).map_err(|e| {
+            error!("Failed to insert torrent {}: {:?}", filename, e);
+            EIO
+        })?;
+
+        match result {
+            InsertTorrentResult::Inserted(torrent_id) => {
+                let files: Vec<FileEntry> = metadata.files.iter().map(|f| FileEntry {
+                    path: f.path.clone(),
+                    size: f.size as i64,
+                }).collect();
+
+                db_guard.insert_files(torrent_id, &files).map_err(|e| {
+                    error!("Failed to insert files for {}: {:?}", filename, e);
+                    EIO
+                })?;
+
+                info!(
+                    "Persisted torrent '{}' ({} files, {} bytes) from {}",
+                    metadata.name, metadata.num_files, metadata.total_size, 
+                    if source_path.is_empty() { "root" } else { source_path }
+                );
+            }
+            InsertTorrentResult::Duplicate(existing_id) => {
+                info!(
+                    "Torrent '{}' already exists (id={}), duplicate recorded",
+                    metadata.name, existing_id
+                );
+            }
+        }
+
+        Ok(())
     }
 
     fn attr_for_dir(&self, ino: u64, writable: bool) -> FileAttr {
@@ -302,17 +398,43 @@ impl Filesystem for TorrentFs {
         reply: fuser::ReplyEmpty,
     ) {
         if let Some(ino) = self.open_files.remove(&fh) {
-            if let Some(InodeData::File { data, name, .. }) = self.inodes.get(&ino) {
+            if let Some(InodeData::File { data, name, parent }) = self.inodes.get(&ino).cloned() {
                 if name.ends_with(".torrent") && !data.is_empty() {
-                    match TorrentInfo::from_bytes(data.clone()) {
-                        Ok(info) => {
-                            info!("Parsed torrent file: {} ({} bytes, {} files)", 
-                                  info.name(), info.total_size(), info.num_files());
+                    if data.len() > MAX_TORRENT_SIZE {
+                        warn!("Torrent file {} exceeds size limit ({} bytes)", name, data.len());
+                        self.inodes.remove(&ino);
+                        reply.error(EFBIG);
+                        return;
+                    }
+
+                    let source_path = self.extract_source_path(parent);
+                    
+                    {
+                        let mut processing = self.processing_torrents.lock().unwrap();
+                        if processing.contains_key(&source_path) {
+                            warn!("Torrent {} already being processed, skipping", source_path);
+                            reply.ok();
+                            return;
+                        }
+                        processing.insert(source_path.clone(), ());
+                    }
+
+                    match self.process_torrent(&data, &source_path, &name) {
+                        Ok(()) => {
+                            info!("Successfully processed torrent: {}", name);
                         }
                         Err(e) => {
-                            warn!("Failed to parse torrent file {}: {:?}", name, e);
+                            error!("Failed to process torrent {}: {}", name, e);
+                            self.inodes.remove(&ino);
+                            let mut processing = self.processing_torrents.lock().unwrap();
+                            processing.remove(&source_path);
+                            reply.error(e);
+                            return;
                         }
                     }
+
+                    let mut processing = self.processing_torrents.lock().unwrap();
+                    processing.remove(&source_path);
                 }
             }
         }
@@ -566,9 +688,40 @@ fn main() {
             .expect("Failed to create mountpoint");
     }
 
+    let fs = if let Some(db_path) = &args.db {
+        match Database::open(db_path) {
+            Ok(db) => {
+                info!("Database opened at {:?}", db_path);
+                TorrentFs::new_with_db(db)
+            }
+            Err(e) => {
+                error!("Failed to open database: {:?}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        let db_path = args.mountpoint.join(".torrentfs/metadata.db");
+        if let Some(parent) = db_path.parent() {
+            if !parent.exists() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    warn!("Failed to create database directory: {:?}", e);
+                }
+            }
+        }
+        match Database::open(&db_path) {
+            Ok(db) => {
+                info!("Database opened at {:?}", db_path);
+                TorrentFs::new_with_db(db)
+            }
+            Err(e) => {
+                warn!("Failed to open database at {:?}: {:?}, running without persistence", db_path, e);
+                TorrentFs::new()
+            }
+        }
+    };
+
     info!("Mounting torrentfs at {:?}", args.mountpoint);
 
-    let fs = TorrentFs::new();
     let options = vec![
         MountOption::FSName("torrentfs".to_string()),
         MountOption::AllowOther,
