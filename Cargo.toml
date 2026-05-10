@@ -1,0 +1,15 @@
+[package]
+name = "torrentfs"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = ["libtorrent-sys"]
+
+[dependencies]
+libtorrent-sys = { path = "libtorrent-sys" }
+thiserror = "1.0"
+tempfile = "3.10"
+
+[dev-dependencies]
+tempfile = "3.10"
