@@ -2,6 +2,8 @@
 #include <libtorrent/torrent_info.hpp>
 #include <libtorrent/file_storage.hpp>
 #include <libtorrent/sha1_hash.hpp>
+#include <libtorrent/bdecode.hpp>
+#include <libtorrent/span.hpp>
 #include <cstring>
 #include <cstdlib>
 #include <string>
@@ -31,6 +33,39 @@ lt_torrent_info_t lt_torrent_info_create(const char* filepath, lt_error_t* error
     try {
         auto ti = new lt::torrent_info(filepath);
         return static_cast<lt_torrent_info_t>(ti);
+    } catch (const lt::system_error& e) {
+        if (error) {
+            error->code = e.code().value();
+            static thread_local std::string err_msg;
+            err_msg = e.what();
+            error->message = err_msg.c_str();
+        }
+        return nullptr;
+    } catch (const std::exception& e) {
+        if (error) {
+            error->code = -1;
+            static thread_local std::string err_msg;
+            err_msg = e.what();
+            error->message = err_msg.c_str();
+        }
+        return nullptr;
+    }
+}
+
+lt_torrent_info_t lt_torrent_info_create_from_buffer(const uint8_t* data, size_t size, lt_error_t* error) {
+    try {
+        lt::error_code ec;
+        lt::torrent_info ti(reinterpret_cast<const char*>(data), static_cast<int>(size), ec);
+        if (ec) {
+            if (error) {
+                error->code = ec.value();
+                static thread_local std::string err_msg;
+                err_msg = ec.message();
+                error->message = err_msg.c_str();
+            }
+            return nullptr;
+        }
+        return static_cast<lt_torrent_info_t>(new lt::torrent_info(std::move(ti)));
     } catch (const lt::system_error& e) {
         if (error) {
             error->code = e.code().value();
