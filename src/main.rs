@@ -734,12 +734,22 @@ impl TorrentFs {
             }
             
             if let Some(sm) = &self.seeding_manager {
-                let sm_guard = sm.lock().map_err(|_| EIO)?;
-                if !sm_guard.is_seeding(&info_hash) {
-                    if let Err(e) = sm_guard.add_seed(&info) {
-                        warn!("Failed to add seed for {}: {:?}", info_hash, e);
-                    } else {
-                        info!("Auto-seeding enabled for {}", info_hash);
+                let total_pieces = metadata.num_pieces as i32;
+                let can_seed = if let Some(cache) = &self.piece_cache {
+                    let cache_guard = cache.lock().map_err(|_| EIO)?;
+                    cache_guard.has_all_pieces(&info_hash, total_pieces)
+                } else {
+                    false
+                };
+                
+                if can_seed {
+                    let sm_guard = sm.lock().map_err(|_| EIO)?;
+                    if !sm_guard.is_seeding(&info_hash) {
+                        if let Err(e) = sm_guard.add_seed(&info) {
+                            warn!("Failed to add seed for {}: {:?}", info_hash, e);
+                        } else {
+                            info!("Auto-seeding enabled for {} (all {} pieces cached)", info_hash, total_pieces);
+                        }
                     }
                 }
             }

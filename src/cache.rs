@@ -327,6 +327,19 @@ impl PieceCache {
         *self.current_size.lock().unwrap()
     }
     
+    pub fn has_all_pieces(&self, info_hash: &str, total_pieces: i32) -> bool {
+        if total_pieces <= 0 {
+            return false;
+        }
+        
+        let entries = self.entries.lock().unwrap();
+        let cached_count = entries.iter()
+            .filter(|(_, e)| e.info_hash == info_hash)
+            .count();
+        
+        cached_count == total_pieces as usize
+    }
+    
     pub fn clear_cache(&self) -> TorrentResult<()> {
         let mut entries = self.entries.lock()
             .map_err(|_| TorrentError::Unknown { code: -1, message: "Lock poisoned".to_string() })?;
