@@ -267,7 +267,6 @@ impl TorrentFs {
                     offset_counter += 1;
                 } else {
                     let child_ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
-                    let data_inode = DataInode::SourcePathDir { path: prefix.clone() };
                     entries.push((child_ino, offset_counter, fuser::FileType::Directory, prefix));
                     offset_counter += 1;
                 }
@@ -631,7 +630,7 @@ impl Filesystem for TorrentFs {
                     if ino >= DATA_TORRENT_INO_BASE && ino < DATA_DIR_INO_BASE {
                         if let Ok(db) = self.get_db() {
                             if let Ok(db_guard) = db.lock() {
-                                if let Ok(Some(torrent)) = db_guard.get_torrent_by_info_hash(&torrent_id.to_string()) {
+                                if db_guard.get_torrent_by_id(torrent_id).ok().flatten().is_some() {
                                     reply.attr(&Duration::from_secs(1), &self.attr_for_dir(ino, false));
                                     return;
                                 }
