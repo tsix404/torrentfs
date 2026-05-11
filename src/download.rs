@@ -343,17 +343,22 @@ impl DownloadManager {
                 if cache.has_piece(&piece_key) {
                     let piece_path = cache.piece_path(&piece_key);
                     if let Ok(data) = std::fs::read(&piece_path) {
-                        let _ = cache.record_access(&piece_key);
+                        if let Err(e) = cache.record_access(&piece_key) {
+                            tracing::warn!("Failed to record cache access for {}: {:?}", piece_key, e);
+                        }
                         data
                     } else {
                         drop(cache);
                         let data = handle_guard.read_piece(&session, piece_idx)?;
                         let mut cache = self.cache_manager.lock()
                             .map_err(|_| TorrentError::Unknown { code: -1, message: "Cache lock poisoned".to_string() })?;
-                        if let Err(e) = std::fs::write(cache.piece_path(&piece_key), &data) {
-                            tracing::warn!("Failed to cache piece: {:?}", e);
+                        let piece_path = cache.piece_path(&piece_key);
+                        if let Err(e) = std::fs::write(&piece_path, &data) {
+                            tracing::warn!("Failed to write cache piece {}: {:?}", piece_key, e);
                         }
-                        let _ = cache.add_piece(&piece_key, data.len() as u64);
+                        if let Err(e) = cache.add_piece(&piece_key, data.len() as u64) {
+                            tracing::warn!("Failed to add piece {} to cache metadata: {:?}", piece_key, e);
+                        }
                         data
                     }
                 } else {
@@ -361,10 +366,13 @@ impl DownloadManager {
                     let data = handle_guard.read_piece(&session, piece_idx)?;
                     let mut cache = self.cache_manager.lock()
                         .map_err(|_| TorrentError::Unknown { code: -1, message: "Cache lock poisoned".to_string() })?;
-                    if let Err(e) = std::fs::write(cache.piece_path(&piece_key), &data) {
-                        tracing::warn!("Failed to cache piece: {:?}", e);
+                    let piece_path = cache.piece_path(&piece_key);
+                    if let Err(e) = std::fs::write(&piece_path, &data) {
+                        tracing::warn!("Failed to write cache piece {}: {:?}", piece_key, e);
                     }
-                    let _ = cache.add_piece(&piece_key, data.len() as u64);
+                    if let Err(e) = cache.add_piece(&piece_key, data.len() as u64) {
+                        tracing::warn!("Failed to add piece {} to cache metadata: {:?}", piece_key, e);
+                    }
                     data
                 }
             };
