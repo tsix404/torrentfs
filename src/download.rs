@@ -292,6 +292,25 @@ impl DownloadManager {
         Ok(handle)
     }
     
+    pub fn get_file_piece_info(&mut self, info: &crate::TorrentInfo, file_index: i32) -> TorrentResult<FilePieceInfo> {
+        let handle = self.get_or_create_handle(info)?;
+        let handle_guard = handle.lock()
+            .map_err(|_| TorrentError::Unknown { code: -1, message: "Handle lock poisoned".to_string() })?;
+        
+        handle_guard.get_file_piece_info(file_index)
+    }
+    
+    pub fn read_piece(&mut self, info: &crate::TorrentInfo, piece_index: i32) -> TorrentResult<Vec<u8>> {
+        let handle = self.get_or_create_handle(info)?;
+        let handle_guard = handle.lock()
+            .map_err(|_| TorrentError::Unknown { code: -1, message: "Handle lock poisoned".to_string() })?;
+        
+        let session = self.session.lock()
+            .map_err(|_| TorrentError::Unknown { code: -1, message: "Session lock poisoned".to_string() })?;
+        
+        handle_guard.read_piece(&session, piece_index)
+    }
+    
     pub fn read_file_range(
         &mut self,
         info: &crate::TorrentInfo,

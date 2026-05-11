@@ -17,10 +17,14 @@ mod db;
 mod error;
 mod torrent_info;
 mod download;
+mod cache;
+mod seeding;
 
 use db::{Database, FileEntry, InsertTorrentResult, TorrentFile};
 use torrent_info::TorrentInfo;
 use download::DownloadManager;
+use cache::PieceCache;
+use seeding::SeedingManager;
 
 const ROOT_INO: u64 = 1;
 const METADATA_INO: u64 = 2;
@@ -68,6 +72,8 @@ struct TorrentFs {
     processing_torrents: Arc<Mutex<HashMap<String, ()>>>,
     download_manager: Option<Arc<Mutex<DownloadManager>>>,
     torrent_data_cache: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    piece_cache: Option<Arc<Mutex<PieceCache>>>,
+    seeding_manager: Option<Arc<Mutex<SeedingManager>>>,
 }
 
 impl TorrentFs {
@@ -89,6 +95,10 @@ impl TorrentFs {
         
         let download_manager = DownloadManager::new(cache_path.as_path()).ok();
         
+        let piece_cache = PieceCache::new(&cache_path, 1024 * 1024 * 1024).ok();
+        
+        let seeding_manager = SeedingManager::new(&cache_path).ok();
+        
         Self {
             creation_time: Duration::from_secs(
                 std::time::SystemTime::now()
@@ -103,6 +113,8 @@ impl TorrentFs {
             processing_torrents: Arc::new(Mutex::new(HashMap::new())),
             download_manager: download_manager.map(|dm| Arc::new(Mutex::new(dm))),
             torrent_data_cache: Arc::new(Mutex::new(HashMap::new())),
+            piece_cache: piece_cache.map(|pc| Arc::new(Mutex::new(pc))),
+            seeding_manager: seeding_manager.map(|sm| Arc::new(Mutex::new(sm))),
         }
     }
 
@@ -632,27 +644,109 @@ impl TorrentFs {
         
         if let Some(dm) = &self.download_manager {
             let torrent_data = self.get_torrent_raw_data(&source_path)?;
-            let info = TorrentInfo::from_bytes(torrent_data).map_err(|e| {
+            let info = TorrentInfo::from_bytes(torrent_data.clone()).map_err(|e| {
                 error!("Failed to parse torrent info for download: {:?}", e);
                 EIO
             })?;
+            
+            let metadata = info.metadata().map_err(|e| {
+                error!("Failed to get metadata: {:?}", e);
+                EIO
+            })?;
+            let piece_length = metadata.piece_length as u64;
             
             let mut dm_guard = dm.lock().map_err(|_| {
                 error!("Download manager lock poisoned");
                 EIO
             })?;
             
-            match dm_guard.read_file_range(&info, file_index, offset as u64, size as u32) {
-                Ok(data) => {
-                    info!("Successfully read {} bytes from torrent file (torrent_id={}, file_id={})",
-                          data.len(), torrent_id, file_id);
-                    Ok(data)
-                }
-                Err(e) => {
-                    error!("Failed to read from BitTorrent network: {:?}", e);
-                    Err(EIO)
+            let piece_info = dm_guard.get_file_piece_info(&info, file_index).map_err(|e| {
+                error!("Failed to get file piece info: {:?}", e);
+                EIO
+            })?;
+            
+            let file_start_offset = piece_info.file_offset as u64;
+            let absolute_offset = file_start_offset + offset as u64;
+            
+            let start_piece = (absolute_offset / piece_length) as i32;
+            let end_offset = absolute_offset + size as u64;
+            let end_piece = ((end_offset + piece_length - 1) / piece_length) as i32;
+            
+            let mut result = Vec::with_capacity(size);
+            let mut bytes_read = 0usize;
+            
+            for piece_idx in start_piece..=end_piece {
+                let piece_data = if let Some(cache) = &self.piece_cache {
+                    let cache_guard = cache.lock().map_err(|_| EIO)?;
+                    match cache_guard.read_piece(&info_hash, piece_idx) {
+                        Ok(Some(data)) => {
+                            info!("Cache hit for piece {} of {}", piece_idx, info_hash);
+                            data
+                        }
+                        Ok(None) => {
+                            drop(cache_guard);
+                            
+                            let piece_data = dm_guard.read_piece(&info, piece_idx).map_err(|e| {
+                                error!("Failed to read piece {}: {:?}", piece_idx, e);
+                                EIO
+                            })?;
+                            
+                            let cache_guard = cache.lock().map_err(|_| EIO)?;
+                            if let Err(e) = cache_guard.write_piece(&info_hash, piece_idx, &piece_data) {
+                                warn!("Failed to cache piece {}: {:?}", piece_idx, e);
+                            }
+                            
+                            piece_data
+                        }
+                        Err(e) => {
+                            warn!("Cache read error for piece {}: {:?}", piece_idx, e);
+                            dm_guard.read_piece(&info, piece_idx).map_err(|e| {
+                                error!("Failed to read piece {}: {:?}", piece_idx, e);
+                                EIO
+                            })?
+                        }
+                    }
+                } else {
+                    dm_guard.read_piece(&info, piece_idx).map_err(|e| {
+                        error!("Failed to read piece {}: {:?}", piece_idx, e);
+                        EIO
+                    })?
+                };
+                
+                let piece_start = (piece_idx as u64) * piece_length;
+                let piece_end = piece_start + piece_data.len() as u64;
+                
+                let read_start = std::cmp::max(absolute_offset, piece_start);
+                let read_end = std::cmp::min(end_offset, piece_end);
+                
+                if read_start < read_end {
+                    let local_start = (read_start - piece_start) as usize;
+                    let local_end = (read_end - piece_start) as usize;
+                    
+                    let chunk = &piece_data[local_start..local_end];
+                    result.extend_from_slice(chunk);
+                    bytes_read += chunk.len();
+                    
+                    if bytes_read >= size {
+                        break;
+                    }
                 }
             }
+            
+            if let Some(sm) = &self.seeding_manager {
+                let sm_guard = sm.lock().map_err(|_| EIO)?;
+                if !sm_guard.is_seeding(&info_hash) {
+                    if let Err(e) = sm_guard.add_seed(&info) {
+                        warn!("Failed to add seed for {}: {:?}", info_hash, e);
+                    } else {
+                        info!("Auto-seeding enabled for {}", info_hash);
+                    }
+                }
+            }
+            
+            info!("Successfully read {} bytes from torrent file (torrent_id={}, file_id={})",
+                  result.len(), torrent_id, file_id);
+            Ok(result)
         } else {
             error!("Download manager not available");
             Err(EIO)
