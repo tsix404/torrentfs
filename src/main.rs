@@ -17,10 +17,12 @@ mod db;
 mod error;
 mod torrent_info;
 mod download;
+mod cache;
 
 use db::{Database, FileEntry, InsertTorrentResult, TorrentFile};
 use torrent_info::TorrentInfo;
 use download::DownloadManager;
+use cache::CacheManager;
 
 const ROOT_INO: u64 = 1;
 const METADATA_INO: u64 = 2;
@@ -68,6 +70,7 @@ struct TorrentFs {
     processing_torrents: Arc<Mutex<HashMap<String, ()>>>,
     download_manager: Option<Arc<Mutex<DownloadManager>>>,
     torrent_data_cache: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    cache_manager: Option<Arc<Mutex<CacheManager>>>,
 }
 
 impl TorrentFs {
@@ -89,6 +92,8 @@ impl TorrentFs {
         
         let download_manager = DownloadManager::new(cache_path.as_path()).ok();
         
+        let cache_manager = CacheManager::new(&cache_path, 1024 * 1024 * 1024).ok();
+        
         Self {
             creation_time: Duration::from_secs(
                 std::time::SystemTime::now()
@@ -103,6 +108,7 @@ impl TorrentFs {
             processing_torrents: Arc::new(Mutex::new(HashMap::new())),
             download_manager: download_manager.map(|dm| Arc::new(Mutex::new(dm))),
             torrent_data_cache: Arc::new(Mutex::new(HashMap::new())),
+            cache_manager: cache_manager.map(|cm| Arc::new(Mutex::new(cm))),
         }
     }
 
