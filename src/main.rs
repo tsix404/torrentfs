@@ -16,9 +16,11 @@ use tracing_subscriber::FmtSubscriber;
 mod db;
 mod error;
 mod torrent_info;
+mod download;
 
-use db::{Database, FileEntry, InsertTorrentResult};
+use db::{Database, FileEntry, InsertTorrentResult, TorrentFile};
 use torrent_info::TorrentInfo;
+use download::DownloadManager;
 
 const ROOT_INO: u64 = 1;
 const METADATA_INO: u64 = 2;
@@ -53,6 +55,8 @@ struct Args {
     mountpoint: PathBuf,
     #[arg(long, help = "Database path")]
     db: Option<PathBuf>,
+    #[arg(long, help = "Cache directory for downloaded pieces")]
+    cache: Option<PathBuf>,
 }
 
 struct TorrentFs {
@@ -62,14 +66,28 @@ struct TorrentFs {
     open_files: HashMap<u64, u64>,
     db: Option<Arc<Mutex<Database>>>,
     processing_torrents: Arc<Mutex<HashMap<String, ()>>>,
+    download_manager: Option<Arc<Mutex<DownloadManager>>>,
+    torrent_data_cache: Arc<Mutex<HashMap<String, Vec<u8>>>>,
 }
 
 impl TorrentFs {
     fn new() -> Self {
+        Self::new_with_cache_path(PathBuf::from("/tmp/torrentfs-cache"))
+    }
+    
+    fn new_with_cache_path(cache_path: PathBuf) -> Self {
         let mut inodes = HashMap::new();
         inodes.insert(ROOT_INO, InodeData::Directory { parent: 0, name: String::new() });
         inodes.insert(METADATA_INO, InodeData::Directory { parent: ROOT_INO, name: "metadata".to_string() });
         inodes.insert(DATA_INO, InodeData::Directory { parent: ROOT_INO, name: "data".to_string() });
+        
+        if !cache_path.exists() {
+            if let Err(e) = std::fs::create_dir_all(&cache_path) {
+                warn!("Failed to create cache directory {:?}: {:?}", cache_path, e);
+            }
+        }
+        
+        let download_manager = DownloadManager::new(cache_path.as_path()).ok();
         
         Self {
             creation_time: Duration::from_secs(
@@ -83,11 +101,17 @@ impl TorrentFs {
             open_files: HashMap::new(),
             db: None,
             processing_torrents: Arc::new(Mutex::new(HashMap::new())),
+            download_manager: download_manager.map(|dm| Arc::new(Mutex::new(dm))),
+            torrent_data_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     fn new_with_db(db: Database) -> Self {
-        let mut fs = Self::new();
+        Self::new()
+    }
+    
+    fn new_with_db_and_cache(db: Database, cache_path: PathBuf) -> Self {
+        let mut fs = Self::new_with_cache_path(cache_path);
         fs.db = Some(Arc::new(Mutex::new(db)));
         fs
     }
@@ -552,6 +576,124 @@ impl TorrentFs {
         }
         None
     }
+
+    fn read_torrent_file_data(&self, torrent_id: i64, file_id: i64, offset: usize, size: usize) -> Result<Vec<u8>, i32> {
+        let db = self.get_db()?;
+        let db_guard = db.lock().map_err(|_| {
+            error!("Database lock poisoned");
+            EIO
+        })?;
+        
+        let torrent = db_guard.get_torrent_by_id(torrent_id)
+            .map_err(|e| {
+                error!("Failed to get torrent by id: {:?}", e);
+                EIO
+            })?
+            .ok_or_else(|| {
+                error!("Torrent not found: {}", torrent_id);
+                ENOENT
+            })?;
+        
+        let files = db_guard.get_files_by_torrent_id(torrent_id)
+            .map_err(|e| {
+                error!("Failed to get files for torrent: {:?}", e);
+                EIO
+            })?;
+        
+        let file = files.iter().find(|f| f.id == file_id)
+            .ok_or_else(|| {
+                error!("File not found: {}", file_id);
+                ENOENT
+            })?;
+        
+        let file_index = files.iter().position(|f| f.id == file_id)
+            .ok_or_else(|| {
+                error!("File index not found for file_id: {}", file_id);
+                EIO
+            })? as i32;
+        
+        drop(db_guard);
+        
+        let source_path = torrent.source_path.clone();
+        let info_hash = torrent.info_hash.clone();
+        
+        let cache_key = format!("{}:{}", info_hash, file_id);
+        {
+            let cache = self.torrent_data_cache.lock().map_err(|_| EIO)?;
+            if let Some(cached) = cache.get(&cache_key) {
+                let end = std::cmp::min(offset + size, cached.len());
+                if offset < cached.len() {
+                    return Ok(cached[offset..end].to_vec());
+                } else {
+                    return Ok(Vec::new());
+                }
+            }
+        }
+        
+        if let Some(dm) = &self.download_manager {
+            let torrent_data = self.get_torrent_raw_data(&source_path)?;
+            let info = TorrentInfo::from_bytes(torrent_data).map_err(|e| {
+                error!("Failed to parse torrent info for download: {:?}", e);
+                EIO
+            })?;
+            
+            let mut dm_guard = dm.lock().map_err(|_| {
+                error!("Download manager lock poisoned");
+                EIO
+            })?;
+            
+            match dm_guard.read_file_range(&info, file_index, offset as u64, size as u32) {
+                Ok(data) => {
+                    info!("Successfully read {} bytes from torrent file (torrent_id={}, file_id={})",
+                          data.len(), torrent_id, file_id);
+                    Ok(data)
+                }
+                Err(e) => {
+                    error!("Failed to read from BitTorrent network: {:?}", e);
+                    Err(EIO)
+                }
+            }
+        } else {
+            error!("Download manager not available");
+            Err(EIO)
+        }
+    }
+    
+    fn get_torrent_raw_data(&self, source_path: &str) -> Result<Vec<u8>, i32> {
+        let db = self.get_db()?;
+        let db_guard = db.lock().map_err(|_| {
+            error!("Database lock poisoned");
+            EIO
+        })?;
+        
+        let torrent = db_guard.get_torrent_by_source_path(source_path)
+            .map_err(|e| {
+                error!("Failed to get torrent: {:?}", e);
+                EIO
+            })?
+            .ok_or_else(|| {
+                error!("Torrent not found for source_path: {}", source_path);
+                ENOENT
+            })?;
+        
+        let metadata_dir_ino = METADATA_INO;
+        for (ino, data) in &self.inodes {
+            if let InodeData::File { name, data: file_data, .. } = data {
+                if name.ends_with(".torrent") && !file_data.is_empty() {
+                    if let Ok(info) = TorrentInfo::from_bytes(file_data.clone()) {
+                        if let Ok(metadata) = info.metadata() {
+                            if hex::encode(metadata.info_hash) == torrent.info_hash {
+                                return Ok(file_data.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = metadata_dir_ino;
+        }
+        
+        Err(ENOENT)
+    }
 }
 
 impl Filesystem for TorrentFs {
@@ -832,9 +974,16 @@ impl Filesystem for TorrentFs {
                         
                         let end = std::cmp::min(offset + read_size, actual_size);
                         let result_size = end - offset;
-                        let placeholder_data = vec![0u8; result_size];
                         
-                        reply.data(&placeholder_data);
+                        match self.read_torrent_file_data(*torrent_id, *file_id, offset, result_size) {
+                            Ok(data) => {
+                                reply.data(&data);
+                            }
+                            Err(e) => {
+                                warn!("Failed to read torrent file data: {:?}", e);
+                                reply.error(EIO);
+                            }
+                        }
                     } else {
                         reply.error(ENOENT);
                     }
@@ -1078,11 +1227,21 @@ fn main() {
             .expect("Failed to create mountpoint");
     }
 
+    let cache_path = args.cache.clone().unwrap_or_else(|| {
+        args.mountpoint.join(".torrentfs/cache")
+    });
+    
+    if !cache_path.exists() {
+        if let Err(e) = std::fs::create_dir_all(&cache_path) {
+            warn!("Failed to create cache directory {:?}: {:?}", cache_path, e);
+        }
+    }
+
     let fs = if let Some(db_path) = &args.db {
         match Database::open(db_path) {
             Ok(db) => {
                 info!("Database opened at {:?}", db_path);
-                TorrentFs::new_with_db(db)
+                TorrentFs::new_with_db_and_cache(db, cache_path)
             }
             Err(e) => {
                 error!("Failed to open database: {:?}", e);
@@ -1101,11 +1260,11 @@ fn main() {
         match Database::open(&db_path) {
             Ok(db) => {
                 info!("Database opened at {:?}", db_path);
-                TorrentFs::new_with_db(db)
+                TorrentFs::new_with_db_and_cache(db, cache_path)
             }
             Err(e) => {
                 warn!("Failed to open database at {:?}: {:?}, running without persistence", db_path, e);
-                TorrentFs::new()
+                TorrentFs::new_with_cache_path(cache_path)
             }
         }
     };

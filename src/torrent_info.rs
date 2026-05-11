@@ -5,7 +5,7 @@ use std::ptr;
 use crate::error::{TorrentError, TorrentResult, error_from_c};
 
 pub struct TorrentInfo {
-    inner: libtorrent_sys::lt_torrent_info_t,
+    pub(crate) inner: libtorrent_sys::lt_torrent_info_t,
 }
 
 #[derive(Debug, Clone)]

@@ -10,13 +10,19 @@ pub enum TorrentError {
     ParseError(String),
     
     #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
+    IoError(String),
     
     #[error("Null pointer encountered")]
     NullPointer,
     
     #[error("Unknown error: code {code}, message: {message}")]
     Unknown { code: i32, message: String },
+}
+
+impl From<std::io::Error> for TorrentError {
+    fn from(err: std::io::Error) -> Self {
+        TorrentError::IoError(err.to_string())
+    }
 }
 
 pub type TorrentResult<T> = Result<T, TorrentError>;

@@ -4,10 +4,20 @@
 #include <libtorrent/sha1_hash.hpp>
 #include <libtorrent/bdecode.hpp>
 #include <libtorrent/span.hpp>
+#include <libtorrent/session.hpp>
+#include <libtorrent/add_torrent_params.hpp>
+#include <libtorrent/torrent_handle.hpp>
+#include <libtorrent/torrent_status.hpp>
+#include <libtorrent/alert_types.hpp>
+#include <libtorrent/torrent_flags.hpp>
 #include <cstring>
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <memory>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
 
 struct lt_error {
     std::string message;
@@ -29,9 +39,14 @@ struct lt_torrent_metadata {
     lt::sha1_hash info_hash;
 };
 
+struct lt_session_wrapper {
+    lt::session* session;
+    std::mutex mutex;
+};
+
 lt_torrent_info_t lt_torrent_info_create(const char* filepath, lt_error_t* error) {
     try {
-        auto ti = new lt::torrent_info(filepath);
+        auto ti = new lt::torrent_info(std::string(filepath));
         return static_cast<lt_torrent_info_t>(ti);
     } catch (const lt::system_error& e) {
         if (error) {
@@ -142,7 +157,7 @@ int lt_torrent_info_get_files(lt_torrent_info_t info, lt_file_entry_t** files, u
         auto idx = static_cast<int>(i);
         paths.emplace_back(fs.file_path(i));
         out[idx].path = paths.back().c_str();
-        out[idx].size = fs.file_size(i);
+        out[idx].size = static_cast<uint64_t>(fs.file_size(i));
     }
 
     *files = out;
@@ -177,7 +192,7 @@ lt_torrent_metadata_t* lt_torrent_info_get_metadata(lt_torrent_info_t info) {
 
     const lt::file_storage& fs = ti->files();
     for (lt::file_index_t i(0); i < fs.end_file(); ++i) {
-        meta->files.push_back({fs.file_path(i), fs.file_size(i)});
+        meta->files.push_back({fs.file_path(i), static_cast<uint64_t>(fs.file_size(i))});
     }
 
     auto h = ti->info_hashes().get_best();
@@ -191,4 +206,227 @@ void lt_torrent_metadata_destroy(lt_torrent_metadata_t* metadata) {
         auto* meta = reinterpret_cast<lt_torrent_metadata*>(metadata);
         delete meta;
     }
+}
+
+lt_session_t lt_session_create(const char* listen_interface, lt_error_t* error) {
+    try {
+        lt::settings_pack settings;
+        if (listen_interface && strlen(listen_interface) > 0) {
+            settings.set_str(lt::settings_pack::listen_interfaces, listen_interface);
+        }
+        settings.set_int(lt::settings_pack::alert_mask, 
+            lt::alert_category::error | lt::alert_category::status);
+        auto wrapper = new lt_session_wrapper();
+        wrapper->session = new lt::session(settings);
+        return static_cast<lt_session_t>(wrapper);
+    } catch (const std::exception& e) {
+        if (error) {
+            error->code = -1;
+            static thread_local std::string err_msg;
+            err_msg = e.what();
+            error->message = err_msg.c_str();
+        }
+        return nullptr;
+    }
+}
+
+void lt_session_destroy(lt_session_t session) {
+    if (session) {
+        auto wrapper = static_cast<lt_session_wrapper*>(session);
+        delete wrapper->session;
+        delete wrapper;
+    }
+}
+
+lt_torrent_handle_t lt_session_add_torrent(lt_session_t session, lt_torrent_info_t info, const char* save_path, lt_error_t* error) {
+    if (!session || !info) {
+        if (error) {
+            error->code = -1;
+            error->message = "Invalid session or torrent info";
+        }
+        return nullptr;
+    }
+
+    try {
+        auto wrapper = static_cast<lt_session_wrapper*>(session);
+        auto ti = static_cast<lt::torrent_info*>(info);
+
+        lt::add_torrent_params params;
+        params.ti = std::make_shared<lt::torrent_info>(*ti);
+        if (save_path) {
+            params.save_path = save_path;
+        } else {
+            params.save_path = "/tmp/torrentfs-cache";
+        }
+
+        std::lock_guard<std::mutex> lock(wrapper->mutex);
+        auto handle = wrapper->session->add_torrent(params);
+        return static_cast<lt_torrent_handle_t>(new lt::torrent_handle(handle));
+    } catch (const std::exception& e) {
+        if (error) {
+            error->code = -1;
+            static thread_local std::string err_msg;
+            err_msg = e.what();
+            error->message = err_msg.c_str();
+        }
+        return nullptr;
+    }
+}
+
+void lt_session_remove_torrent(lt_session_t session, lt_torrent_handle_t handle, int remove_files) {
+    if (session && handle) {
+        auto wrapper = static_cast<lt_session_wrapper*>(session);
+        auto h = static_cast<lt::torrent_handle*>(handle);
+        lt::remove_flags_t flags = remove_files ? lt::session::delete_files : lt::remove_flags_t{};
+        std::lock_guard<std::mutex> lock(wrapper->mutex);
+        wrapper->session->remove_torrent(*h, flags);
+        delete h;
+    }
+}
+
+void lt_torrent_handle_destroy(lt_torrent_handle_t handle) {
+    if (handle) {
+        auto h = static_cast<lt::torrent_handle*>(handle);
+        delete h;
+    }
+}
+
+int lt_torrent_handle_is_valid(lt_torrent_handle_t handle) {
+    if (!handle) return 0;
+    auto h = static_cast<lt::torrent_handle*>(handle);
+    return h->is_valid() ? 1 : 0;
+}
+
+int lt_torrent_handle_status(lt_torrent_handle_t handle, int* state, float* progress, uint64_t* total_done, uint64_t* total) {
+    if (!handle || !state || !progress || !total_done || !total) return -1;
+    
+    auto h = static_cast<lt::torrent_handle*>(handle);
+    if (!h->is_valid()) return -1;
+    
+    auto status = h->status();
+    *state = static_cast<int>(status.state);
+    *progress = status.progress;
+    *total_done = static_cast<uint64_t>(status.total_done);
+    *total = static_cast<uint64_t>(status.total);
+    return 0;
+}
+
+int lt_torrent_handle_read_piece(lt_session_t session, lt_torrent_handle_t handle, int piece_index, uint8_t** data_out, size_t* size_out, lt_error_t* error) {
+    if (!session || !handle || !data_out || !size_out) {
+        if (error) {
+            error->code = -1;
+            error->message = "Invalid arguments";
+        }
+        return -1;
+    }
+
+    auto wrapper = static_cast<lt_session_wrapper*>(session);
+    auto h = static_cast<lt::torrent_handle*>(handle);
+    if (!h->is_valid()) {
+        if (error) {
+            error->code = -1;
+            error->message = "Invalid torrent handle";
+        }
+        return -1;
+    }
+
+    try {
+        h->read_piece(lt::piece_index_t(piece_index));
+        
+        auto start = std::chrono::steady_clock::now();
+        auto timeout = std::chrono::seconds(60);
+        
+        while (true) {
+            auto now = std::chrono::steady_clock::now();
+            if (now - start > timeout) {
+                if (error) {
+                    error->code = -1;
+                    error->message = "Timeout waiting for piece data";
+                }
+                return -1;
+            }
+            
+            std::vector<lt::alert*> alerts;
+            {
+                std::lock_guard<std::mutex> lock(wrapper->mutex);
+                wrapper->session->pop_alerts(&alerts);
+            }
+            
+            for (auto* alert : alerts) {
+                if (auto* rp = lt::alert_cast<lt::read_piece_alert>(alert)) {
+                    if (static_cast<int>(rp->piece) == piece_index) {
+                        if (rp->error) {
+                            if (error) {
+                                error->code = rp->error.value();
+                                static thread_local std::string err_msg;
+                                err_msg = rp->error.message();
+                                error->message = err_msg.c_str();
+                            }
+                            return -1;
+                        }
+                        
+                        size_t sz = rp->size;
+                        if (sz == 0) {
+                            *size_out = 0;
+                            *data_out = nullptr;
+                            return 0;
+                        }
+                        
+                        *size_out = sz;
+                        *data_out = static_cast<uint8_t*>(std::malloc(sz));
+                        if (*data_out) {
+                            std::memcpy(*data_out, rp->buffer.get(), sz);
+                            return 0;
+                        }
+                        return -1;
+                    }
+                }
+            }
+            
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    } catch (const std::exception& e) {
+        if (error) {
+            error->code = -1;
+            static thread_local std::string err_msg;
+            err_msg = e.what();
+            error->message = err_msg.c_str();
+        }
+        return -1;
+    }
+}
+
+void lt_piece_data_free(uint8_t* data) {
+    if (data) {
+        std::free(data);
+    }
+}
+
+int lt_torrent_handle_get_piece_info(lt_torrent_handle_t handle, int file_index, int64_t* first_piece, int64_t* num_pieces, int64_t* file_offset) {
+    if (!handle || !first_piece || !num_pieces || !file_offset) return -1;
+    
+    auto h = static_cast<lt::torrent_handle*>(handle);
+    if (!h->is_valid()) return -1;
+    
+    auto t = h->torrent_file();
+    if (!t) return -1;
+    
+    const auto& fs = t->files();
+    
+    lt::file_index_t fi(file_index);
+    if (fi >= fs.end_file()) return -1;
+    
+    auto file_size = fs.file_size(fi);
+    auto piece_length = t->piece_length();
+    auto file_offset_val = fs.file_offset(fi);
+    
+    int64_t start_piece = file_offset_val / piece_length;
+    int64_t end_offset = file_offset_val + file_size;
+    int64_t end_piece = (end_offset + piece_length - 1) / piece_length;
+    
+    *first_piece = start_piece;
+    *num_pieces = end_piece - start_piece;
+    *file_offset = file_offset_val;
+    
+    return 0;
 }
