@@ -1,9 +1,10 @@
 use std::collections::HashMap;
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::path::Path;
 use std::ptr;
 use std::sync::{Arc, Mutex};
 
+use crate::cache::CacheManager;
 use crate::error::{TorrentError, TorrentResult, error_from_c};
 
 pub struct Session {
@@ -20,6 +21,7 @@ pub struct DownloadManager {
     session: Arc<Mutex<Session>>,
     handles: HashMap<String, Arc<Mutex<TorrentHandle>>>,
     cache_dir: String,
+    cache_manager: Arc<Mutex<CacheManager>>,
 }
 
 impl Session {
@@ -263,11 +265,18 @@ impl DownloadManager {
         let session = Session::new(None)?;
         let cache_dir_str = cache_dir.to_string_lossy().into_owned();
         
+        let cache_manager = CacheManager::new(cache_dir, 1024 * 1024 * 1024)?;
+        
         Ok(DownloadManager {
             session: Arc::new(Mutex::new(session)),
             handles: HashMap::new(),
             cache_dir: cache_dir_str,
+            cache_manager: Arc::new(Mutex::new(cache_manager)),
         })
+    }
+    
+    pub fn get_cache_manager(&self) -> Arc<Mutex<CacheManager>> {
+        self.cache_manager.clone()
     }
     
     pub fn get_or_create_handle(&mut self, info: &crate::TorrentInfo) -> TorrentResult<Arc<Mutex<TorrentHandle>>> {
@@ -292,6 +301,10 @@ impl DownloadManager {
         Ok(handle)
     }
     
+    fn make_piece_key(info_hash: &str, piece_idx: i32) -> String {
+        format!("{}:piece:{}", info_hash, piece_idx)
+    }
+    
     pub fn read_file_range(
         &mut self,
         info: &crate::TorrentInfo,
@@ -303,6 +316,7 @@ impl DownloadManager {
         let handle_guard = handle.lock()
             .map_err(|_| TorrentError::Unknown { code: -1, message: "Handle lock poisoned".to_string() })?;
         
+        let info_hash = handle_guard.info_hash().to_string();
         let piece_info = handle_guard.get_file_piece_info(file_index)?;
         let metadata = info.metadata()?;
         let piece_length = metadata.piece_length as u64;
@@ -321,7 +335,47 @@ impl DownloadManager {
         let mut bytes_read = 0usize;
         
         for piece_idx in start_piece..=end_piece {
-            let piece_data = handle_guard.read_piece(&session, piece_idx)?;
+            let piece_key = Self::make_piece_key(&info_hash, piece_idx);
+            let piece_data = {
+                let mut cache = self.cache_manager.lock()
+                    .map_err(|_| TorrentError::Unknown { code: -1, message: "Cache lock poisoned".to_string() })?;
+                
+                if cache.has_piece(&piece_key) {
+                    let piece_path = cache.piece_path(&piece_key);
+                    if let Ok(data) = std::fs::read(&piece_path) {
+                        if let Err(e) = cache.record_access(&piece_key) {
+                            tracing::warn!("Failed to record cache access for {}: {:?}", piece_key, e);
+                        }
+                        data
+                    } else {
+                        drop(cache);
+                        let data = handle_guard.read_piece(&session, piece_idx)?;
+                        let mut cache = self.cache_manager.lock()
+                            .map_err(|_| TorrentError::Unknown { code: -1, message: "Cache lock poisoned".to_string() })?;
+                        let piece_path = cache.piece_path(&piece_key);
+                        if let Err(e) = std::fs::write(&piece_path, &data) {
+                            tracing::warn!("Failed to write cache piece {}: {:?}", piece_key, e);
+                        }
+                        if let Err(e) = cache.add_piece(&piece_key, data.len() as u64) {
+                            tracing::warn!("Failed to add piece {} to cache metadata: {:?}", piece_key, e);
+                        }
+                        data
+                    }
+                } else {
+                    drop(cache);
+                    let data = handle_guard.read_piece(&session, piece_idx)?;
+                    let mut cache = self.cache_manager.lock()
+                        .map_err(|_| TorrentError::Unknown { code: -1, message: "Cache lock poisoned".to_string() })?;
+                    let piece_path = cache.piece_path(&piece_key);
+                    if let Err(e) = std::fs::write(&piece_path, &data) {
+                        tracing::warn!("Failed to write cache piece {}: {:?}", piece_key, e);
+                    }
+                    if let Err(e) = cache.add_piece(&piece_key, data.len() as u64) {
+                        tracing::warn!("Failed to add piece {} to cache metadata: {:?}", piece_key, e);
+                    }
+                    data
+                }
+            };
             
             let piece_start = (piece_idx as u64) * piece_length;
             let piece_end = piece_start + piece_data.len() as u64;
