@@ -17,13 +17,16 @@ mod db;
 mod error;
 mod torrent_info;
 
-use db::{Database, DbError, FileEntry, InsertTorrentResult};
+use db::{Database, FileEntry, InsertTorrentResult};
 use torrent_info::TorrentInfo;
 
 const ROOT_INO: u64 = 1;
 const METADATA_INO: u64 = 2;
 const DATA_INO: u64 = 3;
 const MAX_TORRENT_SIZE: usize = 10 * 1024 * 1024;
+const DATA_TORRENT_INO_BASE: u64 = 1_000_000;
+const DATA_DIR_INO_BASE: u64 = 2_000_000;
+const DATA_FILE_INO_BASE: u64 = 3_000_000;
 
 static NEXT_INO: AtomicU64 = AtomicU64::new(4);
 static NEXT_FH: AtomicU64 = AtomicU64::new(1);
@@ -32,6 +35,14 @@ static NEXT_FH: AtomicU64 = AtomicU64::new(1);
 enum InodeData {
     Directory { parent: u64, name: String },
     File { parent: u64, name: String, data: Vec<u8> },
+}
+
+#[derive(Clone, Debug)]
+enum DataInode {
+    SourcePathDir { path: String },
+    TorrentRoot { torrent_id: i64, source_path: String, name: String },
+    TorrentDir { torrent_id: i64, dir_id: i64, name: String },
+    TorrentFile { torrent_id: i64, file_id: i64, name: String, size: i64 },
 }
 
 #[derive(Parser, Debug)]
@@ -47,6 +58,7 @@ struct Args {
 struct TorrentFs {
     creation_time: Duration,
     inodes: HashMap<u64, InodeData>,
+    data_inodes: HashMap<u64, DataInode>,
     open_files: HashMap<u64, u64>,
     db: Option<Arc<Mutex<Database>>>,
     processing_torrents: Arc<Mutex<HashMap<String, ()>>>,
@@ -67,6 +79,7 @@ impl TorrentFs {
                     .as_secs(),
             ),
             inodes,
+            data_inodes: HashMap::new(),
             open_files: HashMap::new(),
             db: None,
             processing_torrents: Arc::new(Mutex::new(HashMap::new())),
@@ -77,6 +90,281 @@ impl TorrentFs {
         let mut fs = Self::new();
         fs.db = Some(Arc::new(Mutex::new(db)));
         fs
+    }
+
+    fn make_torrent_root_ino(torrent_id: i64) -> u64 {
+        DATA_TORRENT_INO_BASE + (torrent_id as u64)
+    }
+
+    fn make_torrent_dir_ino(dir_id: i64) -> u64 {
+        DATA_DIR_INO_BASE + (dir_id as u64)
+    }
+
+    fn make_torrent_file_ino(file_id: i64) -> u64 {
+        DATA_FILE_INO_BASE + (file_id as u64)
+    }
+
+    fn is_data_ino(ino: u64) -> bool {
+        ino >= DATA_TORRENT_INO_BASE
+    }
+
+    fn get_db(&self) -> Result<&Arc<Mutex<Database>>, i32> {
+        self.db.as_ref().ok_or_else(|| {
+            error!("Database not available");
+            EIO
+        })
+    }
+
+    fn resolve_data_lookup(&self, parent: u64, name: &str) -> Option<(u64, DataInode)> {
+        if parent == DATA_INO {
+            return self.resolve_data_root_lookup(name);
+        }
+
+        let data_inode = self.data_inodes.get(&parent)?;
+        match data_inode {
+            DataInode::SourcePathDir { path } => {
+                self.resolve_source_path_dir_lookup(path, name)
+            }
+            DataInode::TorrentRoot { torrent_id, .. } => {
+                self.resolve_torrent_root_lookup(*torrent_id, name)
+            }
+            DataInode::TorrentDir { torrent_id, dir_id, .. } => {
+                self.resolve_torrent_dir_lookup(*torrent_id, Some(*dir_id), name)
+            }
+            DataInode::TorrentFile { .. } => None,
+        }
+    }
+
+    fn resolve_data_root_lookup(&self, name: &str) -> Option<(u64, DataInode)> {
+        let db = self.get_db().ok()?;
+        let db_guard = db.lock().ok()?;
+
+        let torrents = db_guard.get_torrents_by_source_path(name).ok()?;
+        
+        if !torrents.is_empty() {
+            let torrent = torrents.first()?;
+            let ino = Self::make_torrent_root_ino(torrent.id);
+            return Some((ino, DataInode::TorrentRoot {
+                torrent_id: torrent.id,
+                source_path: torrent.source_path.clone(),
+                name: torrent.name.clone(),
+            }));
+        }
+
+        let prefixes = db_guard.get_source_path_prefixes("").ok()?;
+        if prefixes.contains(&name.to_string()) {
+            let full_path = name.to_string();
+            let ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
+            return Some((ino, DataInode::SourcePathDir { path: full_path }));
+        }
+
+        None
+    }
+
+    fn resolve_source_path_dir_lookup(&self, prefix: &str, name: &str) -> Option<(u64, DataInode)> {
+        let db = self.get_db().ok()?;
+        let db_guard = db.lock().ok()?;
+
+        let new_path = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}/{}", prefix, name)
+        };
+
+        let torrents = db_guard.get_torrents_by_source_path(&new_path).ok()?;
+        if !torrents.is_empty() {
+            let torrent = torrents.first()?;
+            let ino = Self::make_torrent_root_ino(torrent.id);
+            return Some((ino, DataInode::TorrentRoot {
+                torrent_id: torrent.id,
+                source_path: torrent.source_path.clone(),
+                name: torrent.name.clone(),
+            }));
+        }
+
+        let prefixes = db_guard.get_source_path_prefixes(&new_path).ok()?;
+        if prefixes.contains(&name.to_string()) {
+            let ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
+            return Some((ino, DataInode::SourcePathDir { path: new_path }));
+        }
+
+        None
+    }
+
+    fn resolve_torrent_root_lookup(&self, torrent_id: i64, name: &str) -> Option<(u64, DataInode)> {
+        self.resolve_torrent_dir_lookup(torrent_id, None, name)
+    }
+
+    fn resolve_torrent_dir_lookup(&self, torrent_id: i64, parent_dir_id: Option<i64>, name: &str) -> Option<(u64, DataInode)> {
+        let db = self.get_db().ok()?;
+        let db_guard = db.lock().ok()?;
+
+        if let Some(dir) = db_guard.get_torrent_directory(torrent_id, parent_dir_id, name).ok()? {
+            let ino = Self::make_torrent_dir_ino(dir.id);
+            return Some((ino, DataInode::TorrentDir {
+                torrent_id,
+                dir_id: dir.id,
+                name: dir.name,
+            }));
+        }
+
+        let files = if let Some(pid) = parent_dir_id {
+            db_guard.get_files_in_directory(pid).ok()?
+        } else {
+            db_guard.get_root_files(torrent_id).ok()?
+        };
+
+        for file in files {
+            if file.name == name {
+                let ino = Self::make_torrent_file_ino(file.id);
+                return Some((ino, DataInode::TorrentFile {
+                    torrent_id,
+                    file_id: file.id,
+                    name: file.name,
+                    size: file.size,
+                }));
+            }
+        }
+
+        None
+    }
+
+    fn lookup_data_inode(&self, parent: u64, name: &str) -> Option<(u64, fuser::FileType, u64)> {
+        let (ino, data_inode) = self.resolve_data_lookup(parent, name)?;
+        
+        match &data_inode {
+            DataInode::SourcePathDir { .. } |
+            DataInode::TorrentRoot { .. } |
+            DataInode::TorrentDir { .. } => {
+                Some((ino, fuser::FileType::Directory, 0))
+            }
+            DataInode::TorrentFile { size, .. } => {
+                Some((ino, fuser::FileType::RegularFile, *size as u64))
+            }
+        }
+    }
+
+    fn readdir_data(&self, ino: u64, offset: i64) -> Option<Vec<(u64, i64, fuser::FileType, String)>> {
+        let mut entries: Vec<(u64, i64, fuser::FileType, String)> = Vec::new();
+        
+        if ino == DATA_INO {
+            entries.push((DATA_INO, 1, fuser::FileType::Directory, ".".to_string()));
+            entries.push((ROOT_INO, 2, fuser::FileType::Directory, "..".to_string()));
+            
+            let db = self.get_db().ok()?;
+            let db_guard = db.lock().ok()?;
+            
+            let prefixes = db_guard.get_source_path_prefixes("").ok()?;
+            let mut offset_counter = 3i64;
+            
+            for prefix in prefixes {
+                let torrents = db_guard.get_torrents_by_source_path(&prefix).ok()?;
+                if !torrents.is_empty() {
+                    let torrent = torrents.first()?;
+                    let torrent_ino = Self::make_torrent_root_ino(torrent.id);
+                    let name = format!("{}/", torrent.name);
+                    entries.push((torrent_ino, offset_counter, fuser::FileType::Directory, name));
+                    offset_counter += 1;
+                } else {
+                    let child_ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
+                    let data_inode = DataInode::SourcePathDir { path: prefix.clone() };
+                    entries.push((child_ino, offset_counter, fuser::FileType::Directory, prefix));
+                    offset_counter += 1;
+                }
+            }
+            
+            return Some(entries.into_iter().filter(|(_, o, _, _)| *o > offset).collect());
+        }
+
+        let data_inode = self.data_inodes.get(&ino)?.clone();
+        
+        match data_inode {
+            DataInode::SourcePathDir { path } => {
+                entries.push((ino, 1, fuser::FileType::Directory, ".".to_string()));
+                entries.push((DATA_INO, 2, fuser::FileType::Directory, "..".to_string()));
+                
+                let db = self.get_db().ok()?;
+                let db_guard = db.lock().ok()?;
+                
+                let mut offset_counter = 3i64;
+                
+                let sub_prefixes = db_guard.get_source_path_prefixes(&path).ok()?;
+                for sub in sub_prefixes {
+                    let new_path = if path.is_empty() { sub.clone() } else { format!("{}/{}", path, sub) };
+                    let torrents = db_guard.get_torrents_by_source_path(&new_path).ok()?;
+                    
+                    if !torrents.is_empty() {
+                        let torrent = torrents.first()?;
+                        let torrent_ino = Self::make_torrent_root_ino(torrent.id);
+                        let name = format!("{}/", torrent.name);
+                        entries.push((torrent_ino, offset_counter, fuser::FileType::Directory, name));
+                    } else {
+                        let child_ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
+                        entries.push((child_ino, offset_counter, fuser::FileType::Directory, sub));
+                    }
+                    offset_counter += 1;
+                }
+                
+                let direct_torrents = db_guard.get_torrents_by_source_path(&path).ok()?;
+                for torrent in direct_torrents {
+                    let torrent_ino = Self::make_torrent_root_ino(torrent.id);
+                    let name = format!("{}/", torrent.name);
+                    entries.push((torrent_ino, offset_counter, fuser::FileType::Directory, name));
+                    offset_counter += 1;
+                }
+            }
+            DataInode::TorrentRoot { torrent_id, .. } => {
+                entries.push((ino, 1, fuser::FileType::Directory, ".".to_string()));
+                entries.push((DATA_INO, 2, fuser::FileType::Directory, "..".to_string()));
+                
+                let db = self.get_db().ok()?;
+                let db_guard = db.lock().ok()?;
+                
+                let mut offset_counter = 3i64;
+                
+                let root_dirs = db_guard.get_torrent_directories_by_parent(None, torrent_id).ok()?;
+                for dir in root_dirs {
+                    let dir_ino = Self::make_torrent_dir_ino(dir.id);
+                    entries.push((dir_ino, offset_counter, fuser::FileType::Directory, dir.name));
+                    offset_counter += 1;
+                }
+                
+                let root_files = db_guard.get_root_files(torrent_id).ok()?;
+                for file in root_files {
+                    let file_ino = Self::make_torrent_file_ino(file.id);
+                    entries.push((file_ino, offset_counter, fuser::FileType::RegularFile, file.name));
+                    offset_counter += 1;
+                }
+            }
+            DataInode::TorrentDir { torrent_id, dir_id, .. } => {
+                entries.push((ino, 1, fuser::FileType::Directory, ".".to_string()));
+                entries.push((Self::make_torrent_dir_ino(dir_id), 2, fuser::FileType::Directory, "..".to_string()));
+                
+                let db = self.get_db().ok()?;
+                let db_guard = db.lock().ok()?;
+                
+                let mut offset_counter = 3i64;
+                
+                let sub_dirs = db_guard.get_torrent_directories_by_parent(Some(dir_id), torrent_id).ok()?;
+                for dir in sub_dirs {
+                    let sub_dir_ino = Self::make_torrent_dir_ino(dir.id);
+                    entries.push((sub_dir_ino, offset_counter, fuser::FileType::Directory, dir.name));
+                    offset_counter += 1;
+                }
+                
+                let dir_files = db_guard.get_files_in_directory(dir_id).ok()?;
+                for file in dir_files {
+                    let file_ino = Self::make_torrent_file_ino(file.id);
+                    entries.push((file_ino, offset_counter, fuser::FileType::RegularFile, file.name));
+                    offset_counter += 1;
+                }
+            }
+            DataInode::TorrentFile { .. } => {
+                return None;
+            }
+        }
+        
+        Some(entries.into_iter().filter(|(_, o, _, _)| *o > offset).collect())
     }
 
     fn extract_source_path(&self, parent: u64) -> String {
@@ -284,6 +572,23 @@ impl Filesystem for TorrentFs {
             return;
         }
         
+        if parent == DATA_INO || Self::is_data_ino(parent) {
+            if let Some((ino, kind, size)) = self.lookup_data_inode(parent, &name_str) {
+                match kind {
+                    fuser::FileType::Directory => {
+                        reply.entry(&Duration::from_secs(1), &self.attr_for_dir(ino, false), 0);
+                    }
+                    fuser::FileType::RegularFile => {
+                        reply.entry(&Duration::from_secs(1), &self.attr_for_file(ino, size), 0);
+                    }
+                    _ => reply.error(ENOENT),
+                }
+                return;
+            }
+            reply.error(ENOENT);
+            return;
+        }
+        
         if let Some(child_ino) = self.find_child_by_name(parent, &name_str) {
             if let Some(data) = self.inodes.get(&child_ino) {
                 match data {
@@ -307,6 +612,37 @@ impl Filesystem for TorrentFs {
             METADATA_INO => reply.attr(&Duration::from_secs(1), &self.attr_for_dir(ino, true)),
             DATA_INO => reply.attr(&Duration::from_secs(1), &self.attr_for_dir(ino, false)),
             _ => {
+                if Self::is_data_ino(ino) {
+                    if let Some(data_inode) = self.data_inodes.get(&ino) {
+                        match data_inode {
+                            DataInode::SourcePathDir { .. } |
+                            DataInode::TorrentRoot { .. } |
+                            DataInode::TorrentDir { .. } => {
+                                reply.attr(&Duration::from_secs(1), &self.attr_for_dir(ino, false));
+                            }
+                            DataInode::TorrentFile { size, .. } => {
+                                reply.attr(&Duration::from_secs(1), &self.attr_for_file(ino, *size as u64));
+                            }
+                        }
+                        return;
+                    }
+                    
+                    let torrent_id = (ino - DATA_TORRENT_INO_BASE) as i64;
+                    if ino >= DATA_TORRENT_INO_BASE && ino < DATA_DIR_INO_BASE {
+                        if let Ok(db) = self.get_db() {
+                            if let Ok(db_guard) = db.lock() {
+                                if let Ok(Some(torrent)) = db_guard.get_torrent_by_info_hash(&torrent_id.to_string()) {
+                                    reply.attr(&Duration::from_secs(1), &self.attr_for_dir(ino, false));
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    
+                    reply.error(ENOENT);
+                    return;
+                }
+                
                 if let Some(data) = &self.inodes.get(&ino) {
                     match data {
                         InodeData::Directory { .. } => {
@@ -331,6 +667,20 @@ impl Filesystem for TorrentFs {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
+        if ino == DATA_INO || Self::is_data_ino(ino) {
+            if let Some(entries) = self.readdir_data(ino, offset) {
+                for (entry_ino, entry_offset, kind, name) in entries {
+                    if reply.add(entry_ino, entry_offset, kind, &name) {
+                        break;
+                    }
+                }
+                reply.ok();
+                return;
+            }
+            reply.error(ENOENT);
+            return;
+        }
+        
         let mut entries: Vec<(u64, i64, fuser::FileType, &str)> = vec![
             (ino, 1, fuser::FileType::Directory, "."),
         ];
@@ -376,6 +726,17 @@ impl Filesystem for TorrentFs {
         match ino {
             ROOT_INO | METADATA_INO | DATA_INO => reply.opened(0, 0),
             _ => {
+                if Self::is_data_ino(ino) {
+                    if let Some(DataInode::TorrentFile { .. }) = self.data_inodes.get(&ino) {
+                        let fh = NEXT_FH.fetch_add(1, Ordering::SeqCst);
+                        self.open_files.insert(fh, ino);
+                        reply.opened(fh, 0);
+                    } else {
+                        reply.opened(0, 0);
+                    }
+                    return;
+                }
+                
                 if self.inodes.contains_key(&ino) {
                     let fh = NEXT_FH.fetch_add(1, Ordering::SeqCst);
                     self.open_files.insert(fh, ino);
@@ -456,6 +817,31 @@ impl Filesystem for TorrentFs {
         match ino {
             ROOT_INO | METADATA_INO | DATA_INO => reply.error(EISDIR),
             _ => {
+                if Self::is_data_ino(ino) {
+                    if let Some(DataInode::TorrentFile { torrent_id, file_id, name, size: file_size }) = self.data_inodes.get(&ino) {
+                        let offset = offset as usize;
+                        let read_size = size as usize;
+                        
+                        info!("Read request for torrent file: {} (torrent_id={}, file_id={}, offset={}, size={})", 
+                              name, torrent_id, file_id, offset, read_size);
+                        
+                        let actual_size = *file_size as usize;
+                        if offset >= actual_size {
+                            reply.data(&[]);
+                            return;
+                        }
+                        
+                        let end = std::cmp::min(offset + read_size, actual_size);
+                        let result_size = end - offset;
+                        let placeholder_data = vec![0u8; result_size];
+                        
+                        reply.data(&placeholder_data);
+                    } else {
+                        reply.error(ENOENT);
+                    }
+                    return;
+                }
+                
                 if let Some(InodeData::File { data, .. }) = &self.inodes.get(&ino) {
                     let offset = offset as usize;
                     let end = std::cmp::min(offset + size as usize, data.len());
@@ -475,6 +861,11 @@ impl Filesystem for TorrentFs {
         match ino {
             ROOT_INO | METADATA_INO | DATA_INO => reply.opened(0, 0),
             _ => {
+                if Self::is_data_ino(ino) {
+                    reply.opened(0, 0);
+                    return;
+                }
+                
                 if self.inodes.contains_key(&ino) {
                     reply.opened(0, 0);
                 } else {

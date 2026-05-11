@@ -375,6 +375,84 @@ impl Database {
         Ok(files)
     }
 
+    pub fn get_root_files(&self, torrent_id: i64) -> Result<Vec<TorrentFile>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, torrent_id, directory_id, name, size, piece_start, piece_end
+             FROM torrent_files WHERE torrent_id = ? AND directory_id IS NULL",
+        )?;
+
+        let files = stmt
+            .query_map(params![torrent_id], |row| {
+                Ok(TorrentFile {
+                    id: row.get(0)?,
+                    torrent_id: row.get(1)?,
+                    directory_id: row.get(2)?,
+                    name: row.get(3)?,
+                    size: row.get(4)?,
+                    piece_start: row.get(5)?,
+                    piece_end: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(files)
+    }
+
+    pub fn get_torrent_directory(&self, torrent_id: i64, parent_id: Option<i64>, name: &str) -> Result<Option<TorrentDirectory>, DbError> {
+        let result = self.conn
+            .query_row(
+                "SELECT id, torrent_id, parent_id, name FROM torrent_directories WHERE torrent_id = ? AND parent_id IS ? AND name = ?",
+                params![torrent_id, parent_id, name],
+                |row| {
+                    Ok(TorrentDirectory {
+                        id: row.get(0)?,
+                        torrent_id: row.get(1)?,
+                        parent_id: row.get(2)?,
+                        name: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        Ok(result)
+    }
+
+    pub fn get_torrent_directories_by_parent(&self, parent_id: Option<i64>, torrent_id: i64) -> Result<Vec<TorrentDirectory>, DbError> {
+        let mut stmt = if parent_id.is_none() {
+            self.conn.prepare(
+                "SELECT id, torrent_id, parent_id, name FROM torrent_directories WHERE torrent_id = ? AND parent_id IS NULL",
+            )?
+        } else {
+            self.conn.prepare(
+                "SELECT id, torrent_id, parent_id, name FROM torrent_directories WHERE torrent_id = ? AND parent_id = ?",
+            )?
+        };
+
+        let dirs = if parent_id.is_none() {
+            stmt.query_map(params![torrent_id], |row| {
+                Ok(TorrentDirectory {
+                    id: row.get(0)?,
+                    torrent_id: row.get(1)?,
+                    parent_id: row.get(2)?,
+                    name: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map(params![torrent_id, parent_id], |row| {
+                Ok(TorrentDirectory {
+                    id: row.get(0)?,
+                    torrent_id: row.get(1)?,
+                    parent_id: row.get(2)?,
+                    name: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+
+        Ok(dirs)
+    }
+
     pub fn get_all_files_under_directory(&self, directory_id: i64) -> Result<Vec<TorrentFile>, DbError> {
         let mut stmt = self.conn.prepare(
             "SELECT f.id, f.torrent_id, f.directory_id, f.name, f.size, f.piece_start, f.piece_end
@@ -431,83 +509,189 @@ impl Database {
         Ok(torrents)
     }
 
-    pub fn get_torrent_directory(&self, torrent_id: i64, parent_id: Option<i64>, name: &str) -> Result<Option<TorrentDirectory>, DbError> {
+    pub fn get_torrents_by_source_path(&self, source_path: &str) -> Result<Vec<Torrent>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_path, name, total_size, info_hash, duplicate_count, created_at
+             FROM torrents WHERE source_path = ? ORDER BY id",
+        )?;
+
+        let torrents = stmt
+            .query_map(params![source_path], |row| {
+                Ok(Torrent {
+                    id: row.get(0)?,
+                    source_path: row.get(1)?,
+                    name: row.get(2)?,
+                    total_size: row.get(3)?,
+                    info_hash: row.get(4)?,
+                    duplicate_count: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(torrents)
+    }
+
+    pub fn get_source_path_prefixes(&self, prefix: &str) -> Result<Vec<String>, DbError> {
+        let paths: Vec<String> = if prefix.is_empty() {
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT source_path FROM torrents WHERE source_path != '' ORDER BY source_path",
+            )?;
+            let rows = stmt.query_map([], |row| row.get(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        } else {
+            let pattern = format!("{}%", prefix);
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT source_path FROM torrents WHERE source_path LIKE ? ORDER BY source_path",
+            )?;
+            let rows = stmt.query_map(params![pattern], |row| row.get(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        let mut result: Vec<String> = paths
+            .iter()
+            .filter_map(|p| {
+                let stripped: &str = if prefix.is_empty() {
+                    p.as_str()
+                } else {
+                    p.strip_prefix(prefix)?.trim_start_matches('/')
+                };
+                
+                if stripped.is_empty() {
+                    return None;
+                }
+                
+                let first_component = stripped.split('/').next().unwrap_or("");
+                if first_component.is_empty() {
+                    None
+                } else {
+                    Some(first_component.to_string())
+                }
+            })
+            .collect();
+
+        result.sort();
+        result.dedup();
+        Ok(result)
+    }
+
+    pub fn get_file_by_path(&self, torrent_id: i64, path: &str) -> Result<Option<TorrentFile>, DbError> {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.is_empty() {
+            return Ok(None);
+        }
+
+        let file_name = parts.last().unwrap();
+        let dir_path_parts: Vec<&str> = parts[..parts.len()-1].to_vec();
+        
+        if dir_path_parts.is_empty() {
+            let result = self.conn
+                .query_row(
+                    "SELECT id, torrent_id, directory_id, name, size, piece_start, piece_end
+                     FROM torrent_files WHERE torrent_id = ? AND directory_id IS NULL AND name = ?",
+                    params![torrent_id, file_name],
+                    |row| {
+                        Ok(TorrentFile {
+                            id: row.get(0)?,
+                            torrent_id: row.get(1)?,
+                            directory_id: row.get(2)?,
+                            name: row.get(3)?,
+                            size: row.get(4)?,
+                            piece_start: row.get(5)?,
+                            piece_end: row.get(6)?,
+                        })
+                    },
+                )
+                .optional()?;
+
+            return Ok(result);
+        }
+
+        let dir_id = self.resolve_directory_path(torrent_id, &dir_path_parts)?;
+        
+        match dir_id {
+            Some(did) => {
+                let result = self.conn
+                    .query_row(
+                        "SELECT id, torrent_id, directory_id, name, size, piece_start, piece_end
+                         FROM torrent_files WHERE torrent_id = ? AND directory_id = ? AND name = ?",
+                        params![torrent_id, did, file_name],
+                        |row| {
+                            Ok(TorrentFile {
+                                id: row.get(0)?,
+                                torrent_id: row.get(1)?,
+                                directory_id: row.get(2)?,
+                                name: row.get(3)?,
+                                size: row.get(4)?,
+                                piece_start: row.get(5)?,
+                                piece_end: row.get(6)?,
+                            })
+                        },
+                    )
+                    .optional()?;
+                Ok(result)
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn resolve_directory_path(&self, torrent_id: i64, parts: &[&str]) -> Result<Option<i64>, DbError> {
+        let mut current_parent: Option<i64> = None;
+
+        for part in parts {
+            let existing_id: Option<i64> = self.conn
+                .query_row(
+                    "SELECT id FROM torrent_directories WHERE torrent_id = ? AND parent_id IS ? AND name = ?",
+                    params![torrent_id, current_parent, part],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+
+            match existing_id {
+                Some(id) => current_parent = Some(id),
+                None => return Ok(None),
+            }
+        }
+
+        Ok(current_parent)
+    }
+
+pub fn get_torrent_id_by_name_and_source_path(&self, name: &str, source_path: &str) -> Result<Option<i64>, DbError> {
+        let result = self.conn
+            .query_row(
+                "SELECT id FROM torrents WHERE name = ? AND source_path = ?",
+                params![name, source_path],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+
+        Ok(result)
+    }
+
+    pub fn get_torrent_by_id(&self, id: i64) -> Result<Option<Torrent>, DbError> {
         let result = self
             .conn
             .query_row(
-                "SELECT id, torrent_id, parent_id, name FROM torrent_directories WHERE torrent_id = ? AND parent_id IS ? AND name = ?",
-                params![torrent_id, parent_id, name],
+                "SELECT id, source_path, name, total_size, info_hash, duplicate_count, created_at
+                 FROM torrents WHERE id = ?",
+                params![id],
                 |row| {
-                    Ok(TorrentDirectory {
+                    Ok(Torrent {
                         id: row.get(0)?,
-                        torrent_id: row.get(1)?,
-                        parent_id: row.get(2)?,
-                        name: row.get(3)?,
+                        source_path: row.get(1)?,
+                        name: row.get(2)?,
+                        total_size: row.get(3)?,
+                        info_hash: row.get(4)?,
+                        duplicate_count: row.get(5)?,
+                        created_at: row.get(6)?,
                     })
                 },
             )
             .optional()?;
 
         Ok(result)
-    }
-
-    pub fn get_torrent_directories_by_parent(&self, parent_id: Option<i64>, torrent_id: i64) -> Result<Vec<TorrentDirectory>, DbError> {
-        let mut stmt = if parent_id.is_none() {
-            self.conn.prepare(
-                "SELECT id, torrent_id, parent_id, name FROM torrent_directories WHERE torrent_id = ? AND parent_id IS NULL",
-            )?
-        } else {
-            self.conn.prepare(
-                "SELECT id, torrent_id, parent_id, name FROM torrent_directories WHERE torrent_id = ? AND parent_id = ?",
-            )?
-        };
-
-        let dirs = if parent_id.is_none() {
-            stmt.query_map(params![torrent_id], |row| {
-                Ok(TorrentDirectory {
-                    id: row.get(0)?,
-                    torrent_id: row.get(1)?,
-                    parent_id: row.get(2)?,
-                    name: row.get(3)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-        } else {
-            stmt.query_map(params![torrent_id, parent_id], |row| {
-                Ok(TorrentDirectory {
-                    id: row.get(0)?,
-                    torrent_id: row.get(1)?,
-                    parent_id: row.get(2)?,
-                    name: row.get(3)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-        };
-
-        Ok(dirs)
-    }
-
-    pub fn get_root_files(&self, torrent_id: i64) -> Result<Vec<TorrentFile>, DbError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, torrent_id, directory_id, name, size, piece_start, piece_end
-             FROM torrent_files WHERE torrent_id = ? AND directory_id IS NULL",
-        )?;
-
-        let files = stmt
-            .query_map(params![torrent_id], |row| {
-                Ok(TorrentFile {
-                    id: row.get(0)?,
-                    torrent_id: row.get(1)?,
-                    directory_id: row.get(2)?,
-                    name: row.get(3)?,
-                    size: row.get(4)?,
-                    piece_start: row.get(5)?,
-                    piece_end: row.get(6)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(files)
     }
 }
 
@@ -719,5 +903,79 @@ mod tests {
 
         let all_files = db.get_files_by_torrent_id(torrent_id).unwrap();
         assert_eq!(all_files.len(), 1);
+    }
+
+    #[test]
+    fn test_get_torrents_by_source_path() {
+        let mut db = Database::open_in_memory().unwrap();
+        
+        db.insert_torrent("path1", "Torrent 1", 1024, "hash1").unwrap();
+        db.insert_torrent("path2", "Torrent 2", 2048, "hash2").unwrap();
+        db.insert_torrent("other", "Torrent 3", 3072, "hash3").unwrap();
+        
+        let torrents = db.get_torrents_by_source_path("path1").unwrap();
+        assert_eq!(torrents.len(), 1);
+        assert_eq!(torrents[0].name, "Torrent 1");
+        
+        let torrents = db.get_torrents_by_source_path("nonexistent").unwrap();
+        assert_eq!(torrents.len(), 0);
+    }
+
+    #[test]
+    fn test_get_source_path_prefixes() {
+        let mut db = Database::open_in_memory().unwrap();
+        
+        db.insert_torrent("a/b", "Torrent 1", 1024, "hash1").unwrap();
+        db.insert_torrent("a/c", "Torrent 2", 2048, "hash2").unwrap();
+        db.insert_torrent("d", "Torrent 3", 3072, "hash3").unwrap();
+        
+        let prefixes = db.get_source_path_prefixes("").unwrap();
+        assert!(prefixes.contains(&"a".to_string()));
+        assert!(prefixes.contains(&"d".to_string()));
+        
+        let prefixes = db.get_source_path_prefixes("a").unwrap();
+        assert!(prefixes.contains(&"b".to_string()));
+        assert!(prefixes.contains(&"c".to_string()));
+    }
+
+    #[test]
+    fn test_get_root_files() {
+        let mut db = Database::open_in_memory().unwrap();
+        
+        let torrent_id = match db.insert_torrent("path1", "Test", 1024, "hash1").unwrap() {
+            InsertTorrentResult::Inserted(id) => id,
+            _ => panic!("Expected Inserted"),
+        };
+
+        let files = vec![
+            FileEntry { path: "file1.txt".to_string(), size: 100 },
+            FileEntry { path: "file2.txt".to_string(), size: 200 },
+            FileEntry { path: "dir/file3.txt".to_string(), size: 300 },
+        ];
+
+        db.insert_files(torrent_id, &files).unwrap();
+
+        let root_files = db.get_root_files(torrent_id).unwrap();
+        assert_eq!(root_files.len(), 2);
+    }
+
+    #[test]
+    fn test_get_torrent_directory() {
+        let mut db = Database::open_in_memory().unwrap();
+        
+        let torrent_id = match db.insert_torrent("path1", "Test", 1024, "hash1").unwrap() {
+            InsertTorrentResult::Inserted(id) => id,
+            _ => panic!("Expected Inserted"),
+        };
+
+        let files = vec![
+            FileEntry { path: "dir1/file.txt".to_string(), size: 100 },
+        ];
+
+        db.insert_files(torrent_id, &files).unwrap();
+
+        let dir = db.get_torrent_directory(torrent_id, None, "dir1").unwrap();
+        assert!(dir.is_some());
+        assert_eq!(dir.unwrap().name, "dir1");
     }
 }
