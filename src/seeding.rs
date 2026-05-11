@@ -150,33 +150,22 @@ impl SeedingManager {
         info_map.get(info_hash).cloned()
     }
     
-    pub fn is_seeding(&self, info_hash: &str) -> bool {
-        let handles = self.handles.lock().ok().map(|h| h.contains_key(info_hash)).unwrap_or(false);
-        handles
-    }
-    
-    pub fn get_all_seeds(&self) -> Vec<SeedingInfo> {
-        if let Err(e) = self.update_seeding_status() {
-            eprintln!("[WARN] Failed to update seeding status: {}", e);
-        }
-        let info_map = self.seeding_info.lock().ok();
-        info_map.map(|m| m.values().cloned().collect()).unwrap_or_default()
-    }
-    
-    pub fn get_total_uploaded(&self) -> u64 {
-        if let Err(e) = self.update_seeding_status() {
-            eprintln!("[WARN] Failed to update seeding status: {}", e);
-        }
-        let info_map = self.seeding_info.lock().ok();
-        info_map.map(|m| m.values().map(|s| s.uploaded).sum()).unwrap_or(0)
-    }
-        let info_map = self.seeding_info.lock().ok()?;
-        info_map.get(info_hash).cloned()
+    pub fn has_handle(&self, info_hash: &str) -> bool {
+        self.handles.lock().ok().map(|h| h.contains_key(info_hash)).unwrap_or(false)
     }
     
     pub fn is_seeding(&self, info_hash: &str) -> bool {
-        let handles = self.handles.lock().ok().map(|h| h.contains_key(info_hash)).unwrap_or(false);
-        handles
+        if let Err(e) = self.update_seeding_status() {
+            eprintln!("[WARN] Failed to update seeding status: {}", e);
+        }
+        let info_map = match self.seeding_info.lock().ok() {
+            Some(m) => m,
+            None => return false,
+        };
+        match info_map.get(info_hash) {
+            Some(info) => info.state == SeedingState::Seeding,
+            None => false,
+        }
     }
     
     pub fn get_all_seeds(&self) -> Vec<SeedingInfo> {
@@ -209,6 +198,14 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let manager = SeedingManager::new(temp_dir.path());
         assert!(manager.is_ok());
+    }
+    
+    #[test]
+    fn test_has_handle() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = SeedingManager::new(temp_dir.path()).unwrap();
+        
+        assert!(!manager.has_handle("nonexistent"));
     }
     
     #[test]
