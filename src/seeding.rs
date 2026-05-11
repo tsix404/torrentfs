@@ -3,12 +3,17 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::error::{TorrentError, TorrentResult};
-use crate::download::{Session, TorrentHandle, TorrentState};
+use crate::download::Session;
 
 pub struct SeedingManager {
     session: Arc<Mutex<Session>>,
+    handles: Arc<Mutex<HashMap<String, SeedingHandle>>>,
     active_seeds: Arc<Mutex<HashMap<String, SeedingInfo>>>,
     cache_dir: PathBuf,
+}
+
+struct SeedingHandle {
+    _inner: crate::download::TorrentHandle,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +40,7 @@ impl SeedingManager {
         
         Ok(Self {
             session: Arc::new(Mutex::new(session)),
+            handles: Arc::new(Mutex::new(HashMap::new())),
             active_seeds: Arc::new(Mutex::new(HashMap::new())),
             cache_dir: cache_dir.to_path_buf(),
         })
@@ -44,10 +50,10 @@ impl SeedingManager {
         let info_hash = hex::encode(info.info_hash()?);
         
         {
-            let seeds = self.active_seeds.lock()
+            let handles = self.handles.lock()
                 .map_err(|_| TorrentError::Unknown { code: -1, message: "Lock poisoned".to_string() })?;
             
-            if seeds.contains_key(&info_hash) {
+            if handles.contains_key(&info_hash) {
                 return Ok(());
             }
         }
@@ -67,6 +73,13 @@ impl SeedingManager {
         let total_size = info.total_size();
         
         {
+            let mut handles = self.handles.lock()
+                .map_err(|_| TorrentError::Unknown { code: -1, message: "Lock poisoned".to_string() })?;
+            
+            handles.insert(info_hash.clone(), SeedingHandle { _inner: handle });
+        }
+        
+        {
             let mut seeds = self.active_seeds.lock()
                 .map_err(|_| TorrentError::Unknown { code: -1, message: "Lock poisoned".to_string() })?;
             
@@ -75,7 +88,7 @@ impl SeedingManager {
                 name,
                 total_size,
                 uploaded: 0,
-                state: SeedingState::Checking,
+                state: SeedingState::Seeding,
             });
         }
         
@@ -83,11 +96,16 @@ impl SeedingManager {
     }
     
     pub fn remove_seed(&self, info_hash: &str) -> TorrentResult<()> {
-        let mut seeds = self.active_seeds.lock()
-            .map_err(|_| TorrentError::Unknown { code: -1, message: "Lock poisoned".to_string() })?;
+        {
+            let mut handles = self.handles.lock()
+                .map_err(|_| TorrentError::Unknown { code: -1, message: "Lock poisoned".to_string() })?;
+            handles.remove(info_hash);
+        }
         
-        if seeds.remove(info_hash).is_some() {
-            drop(seeds);
+        {
+            let mut seeds = self.active_seeds.lock()
+                .map_err(|_| TorrentError::Unknown { code: -1, message: "Lock poisoned".to_string() })?;
+            seeds.remove(info_hash);
         }
         
         Ok(())
@@ -99,7 +117,7 @@ impl SeedingManager {
         let seeds = self.active_seeds.lock()
             .map_err(|_| TorrentError::Unknown { code: -1, message: "Lock poisoned".to_string() })?;
         
-        for (info_hash, info) in seeds.iter() {
+        for (_, info) in seeds.iter() {
             result.push(info.clone());
         }
         
@@ -112,8 +130,8 @@ impl SeedingManager {
     }
     
     pub fn is_seeding(&self, info_hash: &str) -> bool {
-        let seeds = self.active_seeds.lock().unwrap();
-        seeds.contains_key(info_hash)
+        let handles = self.handles.lock().unwrap();
+        handles.contains_key(info_hash)
     }
     
     pub fn get_all_seeds(&self) -> Vec<SeedingInfo> {

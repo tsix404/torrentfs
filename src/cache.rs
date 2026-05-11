@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{TorrentError, TorrentResult};
 
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 const METADATA_FILE: &str = "cache.meta";
+const ENTRIES_FILE: &str = "entries.dat";
 
 #[derive(Debug, Clone)]
 pub struct PieceInfo {
@@ -47,13 +48,16 @@ impl PieceCache {
         };
         
         cache.load_metadata()?;
-        cache.rebuild_index()?;
         
         Ok(cache)
     }
     
     fn metadata_path(&self) -> PathBuf {
         self.cache_dir.join(METADATA_FILE)
+    }
+    
+    fn entries_path(&self) -> PathBuf {
+        self.cache_dir.join(ENTRIES_FILE)
     }
     
     fn piece_path(&self, info_hash: &str, piece_index: i32) -> PathBuf {
@@ -92,22 +96,132 @@ impl PieceCache {
         *self.current_size.lock().map_err(|_| 
             TorrentError::Unknown { code: -1, message: "Lock poisoned".to_string() })? = current_size;
         
+        self.load_entries()?;
+        
+        Ok(())
+    }
+    
+    fn load_entries(&mut self) -> TorrentResult<()> {
+        let entries_path = self.entries_path();
+        
+        if !entries_path.exists() {
+            self.rebuild_index()?;
+            return Ok(());
+        }
+        
+        let mut file = match File::open(&entries_path) {
+            Ok(f) => f,
+            Err(_) => {
+                self.rebuild_index()?;
+                return Ok(());
+            }
+        };
+        
+        let mut data = Vec::new();
+        if file.read_to_end(&mut data).is_err() {
+            self.rebuild_index()?;
+            return Ok(());
+        }
+        
+        let mut entries = self.entries.lock()
+            .map_err(|_| TorrentError::Unknown { code: -1, message: "Lock poisoned".to_string() })?;
+        entries.clear();
+        
+        let mut pos = 0;
+        while pos + 20 <= data.len() {
+            let entry_data = &data[pos..pos + 20];
+            let info_hash_len = u32::from_le_bytes([
+                entry_data[0], entry_data[1], entry_data[2], entry_data[3]
+            ]) as usize;
+            pos += 4;
+            
+            if pos + info_hash_len + 16 > data.len() {
+                break;
+            }
+            
+            let info_hash = String::from_utf8_lossy(&data[pos..pos + info_hash_len]).to_string();
+            pos += info_hash_len;
+            
+            let piece_index = i32::from_le_bytes([
+                data[pos], data[pos + 1], data[pos + 2], data[pos + 3]
+            ]);
+            pos += 4;
+            
+            let last_accessed = u64::from_le_bytes([
+                data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
+                data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]
+            ]);
+            pos += 8;
+            
+            let access_count = u64::from_le_bytes([
+                data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
+                data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]
+            ]);
+            pos += 8;
+            
+            let key = Self::make_key(&info_hash, piece_index);
+            entries.insert(key, CacheEntry {
+                info_hash,
+                piece_index,
+                last_accessed,
+                access_count,
+            });
+        }
+        
         Ok(())
     }
     
     fn save_metadata(&self) -> TorrentResult<()> {
         let meta_path = self.metadata_path();
+        let temp_meta_path = self.cache_dir.join(format!("{}.tmp", METADATA_FILE));
         
-        let mut file = File::create(&meta_path)
-            .map_err(|e| TorrentError::IoError(format!("Failed to create metadata: {}", e)))?;
+        {
+            let mut file = File::create(&temp_meta_path)
+                .map_err(|e| TorrentError::IoError(format!("Failed to create metadata temp file: {}", e)))?;
+            
+            file.write_all(&CACHE_VERSION.to_le_bytes())
+                .map_err(|e| TorrentError::IoError(format!("Failed to write metadata version: {}", e)))?;
+            
+            let current_size = *self.current_size.lock()
+                .map_err(|_| TorrentError::Unknown { code: -1, message: "Lock poisoned".to_string() })?;
+            file.write_all(&current_size.to_le_bytes())
+                .map_err(|e| TorrentError::IoError(format!("Failed to write cache size: {}", e)))?;
+        }
         
-        file.write_all(&CACHE_VERSION.to_le_bytes())
-            .map_err(|e| TorrentError::IoError(format!("Failed to write metadata version: {}", e)))?;
+        fs::rename(&temp_meta_path, &meta_path)
+            .map_err(|e| TorrentError::IoError(format!("Failed to rename metadata file: {}", e)))?;
         
-        let current_size = *self.current_size.lock()
-            .map_err(|_| TorrentError::Unknown { code: -1, message: "Lock poisoned".to_string() })?;
-        file.write_all(&current_size.to_le_bytes())
-            .map_err(|e| TorrentError::IoError(format!("Failed to write cache size: {}", e)))?;
+        Ok(())
+    }
+    
+    fn save_entries(&self) -> TorrentResult<()> {
+        let entries_path = self.entries_path();
+        let temp_entries_path = self.cache_dir.join(format!("{}.tmp", ENTRIES_FILE));
+        
+        {
+            let mut file = File::create(&temp_entries_path)
+                .map_err(|e| TorrentError::IoError(format!("Failed to create entries temp file: {}", e)))?;
+            
+            let entries = self.entries.lock()
+                .map_err(|_| TorrentError::Unknown { code: -1, message: "Lock poisoned".to_string() })?;
+            
+            for (_, entry) in entries.iter() {
+                let hash_bytes = entry.info_hash.as_bytes();
+                file.write_all(&(hash_bytes.len() as u32).to_le_bytes())
+                    .map_err(|e| TorrentError::IoError(format!("Failed to write hash length: {}", e)))?;
+                file.write_all(hash_bytes)
+                    .map_err(|e| TorrentError::IoError(format!("Failed to write hash: {}", e)))?;
+                file.write_all(&entry.piece_index.to_le_bytes())
+                    .map_err(|e| TorrentError::IoError(format!("Failed to write piece index: {}", e)))?;
+                file.write_all(&entry.last_accessed.to_le_bytes())
+                    .map_err(|e| TorrentError::IoError(format!("Failed to write last accessed: {}", e)))?;
+                file.write_all(&entry.access_count.to_le_bytes())
+                    .map_err(|e| TorrentError::IoError(format!("Failed to write access count: {}", e)))?;
+            }
+        }
+        
+        fs::rename(&temp_entries_path, &entries_path)
+            .map_err(|e| TorrentError::IoError(format!("Failed to rename entries file: {}", e)))?;
         
         Ok(())
     }
@@ -116,6 +230,11 @@ impl PieceCache {
         let mut entries = self.entries.lock()
             .map_err(|_| TorrentError::Unknown { code: -1, message: "Lock poisoned".to_string() })?;
         entries.clear();
+        
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         
         for entry in fs::read_dir(&self.cache_dir)
             .map_err(|e| TorrentError::IoError(format!("Failed to read cache directory: {}", e)))? {
@@ -128,7 +247,7 @@ impl PieceCache {
             }
             
             if let Some(info_hash) = path.file_name().and_then(|n| n.to_str()) {
-                if info_hash == METADATA_FILE {
+                if info_hash == METADATA_FILE || info_hash == ENTRIES_FILE {
                     continue;
                 }
                 
@@ -141,19 +260,11 @@ impl PieceCache {
                     if let Some(filename) = piece_path.file_name().and_then(|n| n.to_str()) {
                         if let Some(piece_idx_str) = filename.strip_prefix("piece_") {
                             if let Ok(piece_index) = piece_idx_str.parse::<i32>() {
-                                let metadata = piece_entry.metadata()
-                                    .map_err(|e| TorrentError::IoError(e.to_string()))?;
-                                let last_accessed = metadata.accessed()
-                                    .map_err(|e| TorrentError::IoError(e.to_string()))?
-                                    .duration_since(UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs();
-                                
                                 let key = Self::make_key(info_hash, piece_index);
                                 entries.insert(key, CacheEntry {
                                     info_hash: info_hash.to_string(),
                                     piece_index,
-                                    last_accessed,
+                                    last_accessed: now,
                                     access_count: 0,
                                 });
                             }
@@ -162,6 +273,9 @@ impl PieceCache {
                 }
             }
         }
+        
+        drop(entries);
+        self.save_entries()?;
         
         Ok(())
     }
@@ -216,6 +330,8 @@ impl PieceCache {
             }
         }
         
+        self.save_entries()?;
+        
         Ok(Some(data))
     }
     
@@ -268,7 +384,8 @@ impl PieceCache {
             });
         }
         
-        let _ = self.save_metadata();
+        self.save_metadata()?;
+        self.save_entries()?;
         
         Ok(())
     }
@@ -309,6 +426,9 @@ impl PieceCache {
                         .map_err(|_| TorrentError::Unknown { code: -1, message: "Lock poisoned".to_string() })?;
                     *current_size = current_size.saturating_sub(size);
                 }
+                
+                self.save_metadata()?;
+                self.save_entries()?;
             }
         }
         
@@ -341,7 +461,7 @@ impl PieceCache {
             if path.is_dir() {
                 fs::remove_dir_all(&path)
                     .map_err(|e| TorrentError::IoError(format!("Failed to remove cache directory: {}", e)))?;
-            } else if path.file_name().map(|n| n != METADATA_FILE).unwrap_or(false) {
+            } else if path.file_name().map(|n| n != METADATA_FILE && n != ENTRIES_FILE).unwrap_or(false) {
                 fs::remove_file(&path)
                     .map_err(|e| TorrentError::IoError(format!("Failed to remove cache file: {}", e)))?;
             }
@@ -351,7 +471,8 @@ impl PieceCache {
             .map_err(|_| TorrentError::Unknown { code: -1, message: "Lock poisoned".to_string() })?;
         *current_size = 0;
         
-        self.save_metadata()
+        self.save_metadata()?;
+        self.save_entries()
     }
 }
 
@@ -443,5 +564,26 @@ mod tests {
         let pieces = cache.get_cached_pieces("hash2");
         assert_eq!(pieces.len(), 1);
         assert!(pieces.contains(&0));
+    }
+    
+    #[test]
+    fn test_lru_order_preserved_on_restart() {
+        let temp_dir = TempDir::new().unwrap();
+        
+        {
+            let cache = PieceCache::new(temp_dir.path(), 100).unwrap();
+            cache.write_piece("hash1", 0, &[1, 2, 3]).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            cache.write_piece("hash1", 1, &[4, 5, 6]).unwrap();
+            
+            cache.read_piece("hash1", 0).unwrap();
+        }
+        
+        {
+            let cache = PieceCache::new(temp_dir.path(), 100).unwrap();
+            let entries = cache.entries.lock().unwrap();
+            let entry0 = entries.get(&"hash1:0".to_string()).unwrap();
+            assert!(entry0.access_count > 0, "entry0 should have access_count > 0");
+        }
     }
 }

@@ -674,6 +674,7 @@ impl TorrentFs {
             
             let mut result = Vec::with_capacity(size);
             let mut bytes_read = 0usize;
+            let mut all_pieces_from_cache = true;
             
             for piece_idx in start_piece..=end_piece {
                 let piece_data = if let Some(cache) = &self.piece_cache {
@@ -685,6 +686,7 @@ impl TorrentFs {
                         }
                         Ok(None) => {
                             drop(cache_guard);
+                            all_pieces_from_cache = false;
                             
                             let piece_data = dm_guard.read_piece(&info, piece_idx).map_err(|e| {
                                 error!("Failed to read piece {}: {:?}", piece_idx, e);
@@ -700,6 +702,7 @@ impl TorrentFs {
                         }
                         Err(e) => {
                             warn!("Cache read error for piece {}: {:?}", piece_idx, e);
+                            all_pieces_from_cache = false;
                             dm_guard.read_piece(&info, piece_idx).map_err(|e| {
                                 error!("Failed to read piece {}: {:?}", piece_idx, e);
                                 EIO
@@ -707,6 +710,7 @@ impl TorrentFs {
                         }
                     }
                 } else {
+                    all_pieces_from_cache = false;
                     dm_guard.read_piece(&info, piece_idx).map_err(|e| {
                         error!("Failed to read piece {}: {:?}", piece_idx, e);
                         EIO
@@ -733,13 +737,15 @@ impl TorrentFs {
                 }
             }
             
-            if let Some(sm) = &self.seeding_manager {
-                let sm_guard = sm.lock().map_err(|_| EIO)?;
-                if !sm_guard.is_seeding(&info_hash) {
-                    if let Err(e) = sm_guard.add_seed(&info) {
-                        warn!("Failed to add seed for {}: {:?}", info_hash, e);
-                    } else {
-                        info!("Auto-seeding enabled for {}", info_hash);
+            if all_pieces_from_cache {
+                if let Some(sm) = &self.seeding_manager {
+                    let sm_guard = sm.lock().map_err(|_| EIO)?;
+                    if !sm_guard.is_seeding(&info_hash) {
+                        if let Err(e) = sm_guard.add_seed(&info) {
+                            warn!("Failed to add seed for {}: {:?}", info_hash, e);
+                        } else {
+                            info!("Auto-seeding enabled for {} (all pieces from cache)", info_hash);
+                        }
                     }
                 }
             }
