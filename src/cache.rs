@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,6 +21,13 @@ pub struct CacheManager {
     metadata: HashMap<String, PieceMetadata>,
     max_cache_size: u64,
     current_size: u64,
+}
+
+fn current_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 impl CacheManager {
@@ -110,12 +117,7 @@ impl CacheManager {
                 let last_accessed = self.metadata
                     .get(&piece_key)
                     .map(|m| m.last_accessed)
-                    .unwrap_or_else(|| {
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs()
-                    });
+                    .unwrap_or_else(current_timestamp_ms);
                 
                 self.metadata.insert(piece_key.clone(), PieceMetadata { last_accessed, size });
                 self.current_size += size;
@@ -143,10 +145,7 @@ impl CacheManager {
     }
     
     pub fn record_access(&mut self, piece_key: &str) -> TorrentResult<()> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now = current_timestamp_ms();
         
         if let Some(meta) = self.metadata.get_mut(piece_key) {
             meta.last_accessed = now;
@@ -158,10 +157,7 @@ impl CacheManager {
     }
     
     pub fn add_piece(&mut self, piece_key: &str, size: u64) -> TorrentResult<()> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now = current_timestamp_ms();
         
         self.metadata.insert(piece_key.to_string(), PieceMetadata {
             last_accessed: now,
@@ -248,6 +244,8 @@ mod tests {
         assert_eq!(cache.piece_count(), 0);
         
         let test_key = "test_piece_001";
+        let piece_path = cache.piece_path(test_key);
+        std::fs::write(&piece_path, vec![0u8; 100])?;
         cache.add_piece(test_key, 100)?;
         
         assert!(cache.has_piece(test_key));
@@ -259,13 +257,13 @@ mod tests {
     #[test]
     fn test_lru_eviction() -> TorrentResult<()> {
         let temp_dir = TempDir::new().unwrap();
-        let mut cache = CacheManager::new(temp_dir.path(), 200)?;
+        let mut cache = CacheManager::new(temp_dir.path(), 250)?;
         
         let piece_1_path = cache.piece_path("piece_1");
         std::fs::write(&piece_1_path, vec![0u8; 100])?;
         cache.add_piece("piece_1", 100)?;
         
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(5));
         
         let piece_2_path = cache.piece_path("piece_2");
         std::fs::write(&piece_2_path, vec![0u8; 100])?;
@@ -273,14 +271,18 @@ mod tests {
         
         assert!(cache.has_piece("piece_1"));
         assert!(cache.has_piece("piece_2"));
+        assert_eq!(cache.current_size(), 200);
+        
+        std::thread::sleep(std::time::Duration::from_millis(5));
         
         let piece_3_path = cache.piece_path("piece_3");
         std::fs::write(&piece_3_path, vec![0u8; 100])?;
         cache.add_piece("piece_3", 100)?;
         
-        assert!(!cache.has_piece("piece_1"));
-        assert!(cache.has_piece("piece_2"));
-        assert!(cache.has_piece("piece_3"));
+        assert!(!cache.has_piece("piece_1"), "piece_1 should be evicted (oldest)");
+        assert!(cache.has_piece("piece_2"), "piece_2 should remain");
+        assert!(cache.has_piece("piece_3"), "piece_3 should remain");
+        assert_eq!(cache.current_size(), 200);
         
         Ok(())
     }
@@ -299,6 +301,37 @@ mod tests {
         let cache = CacheManager::new(temp_dir.path(), 1024 * 1024)?;
         
         assert!(cache.has_piece("persist_piece"));
+        
+        Ok(())
+    }
+    
+    #[test]
+    fn test_record_access_updates_lru() -> TorrentResult<()> {
+        let temp_dir = TempDir::new().unwrap();
+        let mut cache = CacheManager::new(temp_dir.path(), 250)?;
+        
+        let piece_1_path = cache.piece_path("piece_1");
+        std::fs::write(&piece_1_path, vec![0u8; 100])?;
+        cache.add_piece("piece_1", 100)?;
+        
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        
+        let piece_2_path = cache.piece_path("piece_2");
+        std::fs::write(&piece_2_path, vec![0u8; 100])?;
+        cache.add_piece("piece_2", 100)?;
+        
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        cache.record_access("piece_1")?;
+        
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        
+        let piece_3_path = cache.piece_path("piece_3");
+        std::fs::write(&piece_3_path, vec![0u8; 100])?;
+        cache.add_piece("piece_3", 100)?;
+        
+        assert!(cache.has_piece("piece_1"), "piece_1 should remain (accessed recently)");
+        assert!(!cache.has_piece("piece_2"), "piece_2 should be evicted (oldest after piece_1 access)");
+        assert!(cache.has_piece("piece_3"), "piece_3 should remain");
         
         Ok(())
     }
