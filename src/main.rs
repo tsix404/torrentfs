@@ -19,7 +19,7 @@ mod torrent_info;
 mod download;
 mod cache;
 
-use db::{Database, FileEntry, InsertTorrentResult, TorrentFile};
+use db::{Database, FileEntry, InsertTorrentResult};
 use torrent_info::TorrentInfo;
 use download::DownloadManager;
 use cache::CacheManager;
@@ -507,6 +507,7 @@ impl TorrentFs {
             &metadata.name,
             metadata.total_size as i64,
             &info_hash_hex,
+            metadata.num_files as i64,
         ).map_err(|e| {
             error!("Failed to insert torrent {}: {:?}", filename, e);
             EIO
