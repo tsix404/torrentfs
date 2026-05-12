@@ -507,6 +507,7 @@ impl TorrentFs {
             &metadata.name,
             metadata.total_size as i64,
             &info_hash_hex,
+            metadata.num_files as i64,
         ).map_err(|e| {
             error!("Failed to insert torrent {}: {:?}", filename, e);
             EIO
