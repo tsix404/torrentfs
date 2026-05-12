@@ -14,6 +14,7 @@ pub struct Session {
 pub struct TorrentHandle {
     inner: libtorrent_sys::lt_torrent_handle_t,
     info_hash: String,
+    #[allow(dead_code)]
     session: libtorrent_sys::lt_session_t,
 }
 
@@ -326,7 +327,7 @@ impl DownloadManager {
         
         let start_piece = (absolute_offset / piece_length) as i32;
         let end_offset = absolute_offset + size as u64;
-        let end_piece = ((end_offset + piece_length - 1) / piece_length) as i32;
+        let end_piece = end_offset.div_ceil(piece_length) as i32;
         
         let session = self.session.lock()
             .map_err(|_| TorrentError::Unknown { code: -1, message: "Session lock poisoned".to_string() })?;

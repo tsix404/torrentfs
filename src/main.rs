@@ -19,7 +19,7 @@ mod torrent_info;
 mod download;
 mod cache;
 
-use db::{Database, FileEntry, InsertTorrentResult, TorrentFile};
+use db::{Database, FileEntry, InsertTorrentResult};
 use torrent_info::TorrentInfo;
 use download::DownloadManager;
 use cache::CacheManager;
