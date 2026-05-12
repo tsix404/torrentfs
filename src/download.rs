@@ -321,13 +321,17 @@ impl DownloadManager {
         let piece_info = handle_guard.get_file_piece_info(file_index)?;
         let metadata = info.metadata()?;
         let piece_length = metadata.piece_length as u64;
+        let num_pieces = metadata.num_pieces as i32;
         
         let file_start_offset = piece_info.file_offset as u64;
         let absolute_offset = file_start_offset + offset;
         
         let start_piece = (absolute_offset / piece_length) as i32;
         let end_offset = absolute_offset + size as u64;
-        let end_piece = end_offset.div_ceil(piece_length) as i32;
+        let end_piece = std::cmp::min(
+            end_offset.div_ceil(piece_length) as i32,
+            num_pieces - 1
+        );
         
         let session = self.session.lock()
             .map_err(|_| TorrentError::Unknown { code: -1, message: "Session lock poisoned".to_string() })?;
