@@ -6,6 +6,8 @@ use fuser::{
 use libc::{EACCES, EEXIST, EFBIG, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR};
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1219,6 +1221,16 @@ impl Filesystem for TorrentFs {
     }
 }
 
+fn fuse_allow_other_enabled() -> io::Result<bool> {
+    let file = File::open("/etc/fuse.conf")?;
+    for line in BufReader::new(file).lines() {
+        if line?.trim_start().starts_with("user_allow_other") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn main() {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
@@ -1277,14 +1289,30 @@ fn main() {
 
     info!("Mounting torrentfs at {:?}", args.mountpoint);
 
-    let options = vec![
+    let mut options = vec![
         MountOption::FSName("torrentfs".to_string()),
-        MountOption::AllowOther,
         MountOption::AutoUnmount,
     ];
 
-    fuser::mount2(fs, &args.mountpoint, &options)
-        .expect("Failed to mount filesystem");
+    if let Ok(enabled) = fuse_allow_other_enabled() {
+        if enabled {
+            options.push(MountOption::AllowOther);
+        } else {
+            warn!("user_allow_other not set in /etc/fuse.conf, other users cannot access the mount");
+        }
+    } else {
+        warn!("Unable to read /etc/fuse.conf, other users may not be able to access the mount");
+    }
 
-    info!("torrentfs unmounted successfully");
+    match fuser::mount2(fs, &args.mountpoint, &options) {
+        Ok(()) => info!("torrentfs unmounted successfully"),
+        Err(e) => {
+            if e.kind() == io::ErrorKind::PermissionDenied {
+                error!("Mount failed: {}. This usually means 'user_allow_other' is not set in /etc/fuse.conf.", e);
+                std::process::exit(2);
+            }
+            error!("Failed to mount filesystem: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
