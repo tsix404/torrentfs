@@ -513,6 +513,25 @@ impl Database {
         Ok(result)
     }
 
+    pub fn get_torrent_directory_by_id(&self, dir_id: i64) -> Result<Option<TorrentDirectory>, DbError> {
+        let result = self.conn
+            .query_row(
+                "SELECT id, torrent_id, parent_id, name FROM torrent_directories WHERE id = ?",
+                params![dir_id],
+                |row| {
+                    Ok(TorrentDirectory {
+                        id: row.get(0)?,
+                        torrent_id: row.get(1)?,
+                        parent_id: row.get(2)?,
+                        name: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        Ok(result)
+    }
+
     pub fn get_torrent_directories_by_parent(&self, parent_id: Option<i64>, torrent_id: i64) -> Result<Vec<TorrentDirectory>, DbError> {
         let mut stmt = if parent_id.is_none() {
             self.conn.prepare(
