@@ -15,6 +15,40 @@ A Rust library for parsing torrent files using libtorrent via FFI.
 - libtorrent-rasterbar 2.0.x
 - OpenSSL
 - C++17 compiler
+- FUSE 3.x (libfuse3-dev)
+
+## FUSE Configuration
+
+TorrentFS uses FUSE to mount the virtual filesystem. To allow non-root users to access the mount point, you need to configure FUSE:
+
+1. Edit `/etc/fuse.conf`:
+   ```bash
+   sudo sed -i 's/#user_allow_other/user_allow_other/' /etc/fuse.conf
+   ```
+
+   Or manually uncomment the `user_allow_other` line in `/etc/fuse.conf`:
+   ```
+   user_allow_other
+   ```
+
+2. Ensure your user is in the `fuse` group:
+   ```bash
+   sudo usermod -aG fuse $USER
+   ```
+   
+   (Log out and back in for group changes to take effect)
+
+3. On some systems, you may need to install FUSE development headers:
+   ```bash
+   # Ubuntu/Debian
+   sudo apt-get install libfuse3-dev
+   
+   # Fedora
+   sudo dnf install fuse3-devel
+   
+   # Arch Linux
+   sudo pacman -S fuse3
+   ```
 
 ## Installation
 
