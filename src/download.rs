@@ -328,10 +328,14 @@ impl DownloadManager {
         
         let start_piece = (absolute_offset / piece_length) as i32;
         let end_offset = absolute_offset + size as u64;
-        let end_piece = std::cmp::min(
-            end_offset.div_ceil(piece_length) as i32,
-            num_pieces - 1
-        );
+        let end_piece = if size > 0 {
+            std::cmp::min(
+                ((end_offset - 1) / piece_length) as i32,
+                num_pieces - 1
+            )
+        } else {
+            start_piece
+        };
         
         let session = self.session.lock()
             .map_err(|_| TorrentError::Unknown { code: -1, message: "Session lock poisoned".to_string() })?;
