@@ -4,6 +4,7 @@ pub mod error;
 pub mod download;
 pub mod cache;
 pub mod seeding;
+pub mod mock_fs;
 
 pub use torrent_info::TorrentInfo;
 pub use error::{TorrentError, TorrentResult};
@@ -11,3 +12,4 @@ pub use db::{Database, DbError, Torrent, TorrentFile, TorrentDirectory, TorrentS
 pub use download::{Session, TorrentHandle, DownloadManager, TorrentStatus as DownloadTorrentStatus, TorrentState, FilePieceInfo};
 pub use cache::{CacheManager, PieceMetadata};
 pub use seeding::{SeedingManager, SeedingInfo, SeedingState};
+pub use mock_fs::{MockTorrentFs, InodeData, DataInode, FileType, FileAttr, DirEntry, FsError};
