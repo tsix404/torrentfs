@@ -1374,7 +1374,17 @@ fn main() {
         Ok(()) => info!("torrentfs unmounted successfully"),
         Err(e) => {
             if e.kind() == io::ErrorKind::PermissionDenied {
-                error!("Mount failed: {}. This usually means 'user_allow_other' is not set in /etc/fuse.conf.", e);
+                match fuse_allow_other_enabled() {
+                    Ok(true) => {
+                        error!("Mount failed with permission denied even though 'user_allow_other' is enabled in /etc/fuse.conf. This may indicate other permission issues (e.g., container restrictions, mount point permissions). Error: {}", e);
+                    }
+                    Ok(false) => {
+                        error!("Mount failed: {}. This usually means 'user_allow_other' is not set in /etc/fuse.conf.", e);
+                    }
+                    Err(_) => {
+                        error!("Mount failed with permission denied. Unable to verify /etc/fuse.conf status. Error: {}", e);
+                    }
+                }
                 std::process::exit(2);
             }
             error!("Failed to mount filesystem: {}", e);
