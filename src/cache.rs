@@ -7,7 +7,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::error::{TorrentError, TorrentResult};
 
 const CACHE_METADATA_FILE: &str = "cache_metadata.txt";
-const PIECE_METADATA_SUFFIX: &str = ".meta";
 
 #[derive(Debug, Clone)]
 pub struct PieceMetadata {
@@ -90,12 +89,62 @@ impl CacheManager {
     fn scan_cache_directory(&mut self) -> TorrentResult<()> {
         self.current_size = 0;
         
+        if let Err(e) = self.migrate_old_cache_files() {
+            tracing::warn!("Failed to migrate old cache files: {:?}", e);
+        }
+        
         let pieces_dir = self.cache_dir.join("pieces");
         if !pieces_dir.exists() {
             return Ok(());
         }
         
         self.scan_pieces_subdirectory(&pieces_dir)?;
+        
+        Ok(())
+    }
+    
+    fn migrate_old_cache_files(&mut self) -> TorrentResult<()> {
+        let entries = fs::read_dir(&self.cache_dir)
+            .map_err(|e| TorrentError::IoError(format!("Failed to read cache directory: {}", e)))?;
+        
+        for entry in entries {
+            let entry = entry
+                .map_err(|e| TorrentError::IoError(format!("Failed to read directory entry: {}", e)))?;
+            let path = entry.path();
+            
+            if path.is_dir() {
+                continue;
+            }
+            
+            let filename = path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            
+            if filename == CACHE_METADATA_FILE {
+                continue;
+            }
+            
+            if !filename.contains(':') {
+                continue;
+            }
+            
+            let info_hash = match filename.split(':').next() {
+                Some(hash) => hash,
+                None => continue,
+            };
+            
+            let new_dir = self.cache_dir.join("pieces").join(info_hash);
+            if !new_dir.exists() {
+                fs::create_dir_all(&new_dir)
+                    .map_err(|e| TorrentError::IoError(format!("Failed to create pieces directory: {}", e)))?;
+            }
+            
+            let new_path = new_dir.join(filename);
+            fs::rename(&path, &new_path)
+                .map_err(|e| TorrentError::IoError(format!("Failed to migrate cache file: {}", e)))?;
+            
+            tracing::info!("Migrated old cache file: {} -> {}", path.display(), new_path.display());
+        }
         
         Ok(())
     }
@@ -116,7 +165,7 @@ impl CacheManager {
                     .and_then(|n| n.to_str())
                     .unwrap_or("");
                 
-                if filename == CACHE_METADATA_FILE || filename.ends_with(PIECE_METADATA_SUFFIX) {
+                if filename == CACHE_METADATA_FILE {
                     continue;
                 }
                 
@@ -217,25 +266,29 @@ impl CacheManager {
             self.current_size = self.current_size.saturating_sub(size);
         }
         
-        let info_hash = piece_key.split(':').next().unwrap_or("unknown");
-        let meta_path = self.cache_dir.join("pieces").join(info_hash).join(format!("{}{}", piece_key, PIECE_METADATA_SUFFIX));
-        if meta_path.exists() {
-            let _ = fs::remove_file(&meta_path);
-        }
-        
         self.metadata.remove(piece_key);
         
         self.save_metadata_file()
     }
     
+    fn extract_info_hash<'a>(&self, piece_key: &'a str) -> &'a str {
+        match piece_key.split(':').next() {
+            Some(hash) if !hash.is_empty() => hash,
+            _ => {
+                tracing::warn!("Invalid piece_key format (missing ':'): {}", piece_key);
+                "unknown"
+            }
+        }
+    }
+    
     pub fn piece_path(&self, piece_key: &str) -> PathBuf {
-        let info_hash = piece_key.split(':').next().unwrap_or("unknown");
+        let info_hash = self.extract_info_hash(piece_key);
         let pieces_dir = self.cache_dir.join("pieces").join(info_hash);
         pieces_dir.join(piece_key)
     }
     
     pub fn ensure_piece_dir(&self, piece_key: &str) -> TorrentResult<PathBuf> {
-        let info_hash = piece_key.split(':').next().unwrap_or("unknown");
+        let info_hash = self.extract_info_hash(piece_key);
         let pieces_dir = self.cache_dir.join("pieces").join(info_hash);
         
         if !pieces_dir.exists() {
@@ -417,6 +470,29 @@ mod tests {
         assert!(dir2.exists(), "directory for torrent 2 should exist");
         assert!(dir1.join(&piece1_key).exists());
         assert!(dir2.join(&piece2_key).exists());
+        
+        Ok(())
+    }
+    
+    #[test]
+    fn test_backward_compatibility_migration() -> TorrentResult<()> {
+        let temp_dir = TempDir::new().unwrap();
+        
+        let info_hash = "oldhash123";
+        let piece_key = format!("{}:piece:0", info_hash);
+        let old_path = temp_dir.path().join(&piece_key);
+        std::fs::write(&old_path, vec![0u8; 100])?;
+        
+        assert!(old_path.exists(), "old file should exist before migration");
+        
+        let cache = CacheManager::new(temp_dir.path(), 1024 * 1024)?;
+        
+        assert!(!old_path.exists(), "old file should be migrated");
+        
+        let new_path = temp_dir.path().join("pieces").join(info_hash).join(&piece_key);
+        assert!(new_path.exists(), "file should exist in new location");
+        
+        assert!(cache.has_piece(&piece_key), "migrated piece should be in metadata");
         
         Ok(())
     }
