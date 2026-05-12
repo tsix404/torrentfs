@@ -1292,8 +1292,7 @@ fn fuse_allow_other_enabled() -> io::Result<bool> {
     let file = File::open("/etc/fuse.conf")?;
     for line in BufReader::new(file).lines() {
         let line = line?;
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("user_allow_other") && !trimmed.starts_with("#") {
+        if line.trim() == "user_allow_other" {
             return Ok(true);
         }
     }
