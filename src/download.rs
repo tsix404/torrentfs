@@ -317,6 +317,16 @@ impl DownloadManager {
         let handle_guard = handle.lock()
             .map_err(|_| TorrentError::Unknown { code: -1, message: "Handle lock poisoned".to_string() })?;
         
+        if !handle_guard.is_valid() {
+            return Err(TorrentError::InvalidFile("Torrent handle is invalid".to_string()));
+        }
+        
+        let status = handle_guard.status()?;
+        tracing::debug!(
+            "read_file_range: torrent state = {:?}, progress = {:.2}%",
+            status.state, status.progress * 100.0
+        );
+        
         let info_hash = handle_guard.info_hash().to_string();
         let piece_info = handle_guard.get_file_piece_info(file_index)?;
         let metadata = info.metadata()?;
@@ -325,6 +335,13 @@ impl DownloadManager {
         
         let file_start_offset = piece_info.file_offset as u64;
         let absolute_offset = file_start_offset + offset;
+        
+        if num_pieces <= 0 {
+            return Err(TorrentError::InvalidFile(format!(
+                "Invalid torrent: num_pieces = {}",
+                num_pieces
+            )));
+        }
         
         let start_piece = (absolute_offset / piece_length) as i32;
         let end_offset = absolute_offset + size as u64;
@@ -336,6 +353,22 @@ impl DownloadManager {
         } else {
             start_piece
         };
+        
+        if start_piece >= num_pieces {
+            return Err(TorrentError::InvalidFile(format!(
+                "start_piece {} exceeds num_pieces {} (absolute_offset={}, piece_length={})",
+                start_piece, num_pieces, absolute_offset, piece_length
+            )));
+        }
+        
+        if start_piece > end_piece {
+            return Ok(Vec::new());
+        }
+        
+        tracing::debug!(
+            "read_file_range: file_index={}, offset={}, size={}, start_piece={}, end_piece={}, num_pieces={}, piece_length={}",
+            file_index, offset, size, start_piece, end_piece, num_pieces, piece_length
+        );
         
         let session = self.session.lock()
             .map_err(|_| TorrentError::Unknown { code: -1, message: "Session lock poisoned".to_string() })?;
