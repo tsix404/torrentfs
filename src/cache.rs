@@ -88,17 +88,30 @@ impl CacheManager {
     }
     
     fn scan_cache_directory(&mut self) -> TorrentResult<()> {
-        let entries = fs::read_dir(&self.cache_dir)
-            .map_err(|e| TorrentError::IoError(format!("Failed to read cache directory: {}", e)))?;
-        
         self.current_size = 0;
+        
+        let pieces_dir = self.cache_dir.join("pieces");
+        if !pieces_dir.exists() {
+            return Ok(());
+        }
+        
+        self.scan_pieces_subdirectory(&pieces_dir)?;
+        
+        Ok(())
+    }
+    
+    fn scan_pieces_subdirectory(&mut self, dir: &Path) -> TorrentResult<()> {
+        let entries = fs::read_dir(dir)
+            .map_err(|e| TorrentError::IoError(format!("Failed to read directory: {}", e)))?;
         
         for entry in entries {
             let entry = entry
                 .map_err(|e| TorrentError::IoError(format!("Failed to read directory entry: {}", e)))?;
             let path = entry.path();
             
-            if path.is_file() {
+            if path.is_dir() {
+                self.scan_pieces_subdirectory(&path)?;
+            } else if path.is_file() {
                 let filename = path.file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("");
@@ -191,7 +204,7 @@ impl CacheManager {
     }
     
     fn remove_piece(&mut self, piece_key: &str) -> TorrentResult<()> {
-        let piece_path = self.cache_dir.join(piece_key);
+        let piece_path = self.piece_path(piece_key);
         
         if piece_path.exists() {
             let size = fs::metadata(&piece_path)
@@ -204,7 +217,8 @@ impl CacheManager {
             self.current_size = self.current_size.saturating_sub(size);
         }
         
-        let meta_path = self.cache_dir.join(format!("{}{}", piece_key, PIECE_METADATA_SUFFIX));
+        let info_hash = piece_key.split(':').next().unwrap_or("unknown");
+        let meta_path = self.cache_dir.join("pieces").join(info_hash).join(format!("{}{}", piece_key, PIECE_METADATA_SUFFIX));
         if meta_path.exists() {
             let _ = fs::remove_file(&meta_path);
         }
@@ -215,7 +229,21 @@ impl CacheManager {
     }
     
     pub fn piece_path(&self, piece_key: &str) -> PathBuf {
-        self.cache_dir.join(piece_key)
+        let info_hash = piece_key.split(':').next().unwrap_or("unknown");
+        let pieces_dir = self.cache_dir.join("pieces").join(info_hash);
+        pieces_dir.join(piece_key)
+    }
+    
+    pub fn ensure_piece_dir(&self, piece_key: &str) -> TorrentResult<PathBuf> {
+        let info_hash = piece_key.split(':').next().unwrap_or("unknown");
+        let pieces_dir = self.cache_dir.join("pieces").join(info_hash);
+        
+        if !pieces_dir.exists() {
+            fs::create_dir_all(&pieces_dir)
+                .map_err(|e| TorrentError::IoError(format!("Failed to create pieces directory: {}", e)))?;
+        }
+        
+        Ok(pieces_dir.join(piece_key))
     }
     
     pub fn has_piece(&self, piece_key: &str) -> bool {
@@ -243,8 +271,8 @@ mod tests {
         
         assert_eq!(cache.piece_count(), 0);
         
-        let test_key = "test_piece_001";
-        let piece_path = cache.piece_path(test_key);
+        let test_key = "abc123:piece:0";
+        let piece_path = cache.ensure_piece_dir(test_key)?;
         std::fs::write(&piece_path, vec![0u8; 100])?;
         cache.add_piece(test_key, 100)?;
         
@@ -259,29 +287,32 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let mut cache = CacheManager::new(temp_dir.path(), 250)?;
         
-        let piece_1_path = cache.piece_path("piece_1");
+        let piece_1_key = "hash1:piece:0";
+        let piece_1_path = cache.ensure_piece_dir(piece_1_key)?;
         std::fs::write(&piece_1_path, vec![0u8; 100])?;
-        cache.add_piece("piece_1", 100)?;
+        cache.add_piece(piece_1_key, 100)?;
         
         std::thread::sleep(std::time::Duration::from_millis(5));
         
-        let piece_2_path = cache.piece_path("piece_2");
+        let piece_2_key = "hash1:piece:1";
+        let piece_2_path = cache.ensure_piece_dir(piece_2_key)?;
         std::fs::write(&piece_2_path, vec![0u8; 100])?;
-        cache.add_piece("piece_2", 100)?;
+        cache.add_piece(piece_2_key, 100)?;
         
-        assert!(cache.has_piece("piece_1"));
-        assert!(cache.has_piece("piece_2"));
+        assert!(cache.has_piece(piece_1_key));
+        assert!(cache.has_piece(piece_2_key));
         assert_eq!(cache.current_size(), 200);
         
         std::thread::sleep(std::time::Duration::from_millis(5));
         
-        let piece_3_path = cache.piece_path("piece_3");
+        let piece_3_key = "hash1:piece:2";
+        let piece_3_path = cache.ensure_piece_dir(piece_3_key)?;
         std::fs::write(&piece_3_path, vec![0u8; 100])?;
-        cache.add_piece("piece_3", 100)?;
+        cache.add_piece(piece_3_key, 100)?;
         
-        assert!(!cache.has_piece("piece_1"), "piece_1 should be evicted (oldest)");
-        assert!(cache.has_piece("piece_2"), "piece_2 should remain");
-        assert!(cache.has_piece("piece_3"), "piece_3 should remain");
+        assert!(!cache.has_piece(piece_1_key), "piece_1 should be evicted (oldest)");
+        assert!(cache.has_piece(piece_2_key), "piece_2 should remain");
+        assert!(cache.has_piece(piece_3_key), "piece_3 should remain");
         assert_eq!(cache.current_size(), 200);
         
         Ok(())
@@ -293,14 +324,15 @@ mod tests {
         
         {
             let mut cache = CacheManager::new(temp_dir.path(), 1024 * 1024)?;
-            let piece_path = cache.piece_path("persist_piece");
+            let piece_key = "def456:piece:0";
+            let piece_path = cache.ensure_piece_dir(piece_key)?;
             std::fs::write(&piece_path, vec![0u8; 50])?;
-            cache.add_piece("persist_piece", 50)?;
+            cache.add_piece(piece_key, 50)?;
         }
         
         let cache = CacheManager::new(temp_dir.path(), 1024 * 1024)?;
         
-        assert!(cache.has_piece("persist_piece"));
+        assert!(cache.has_piece("def456:piece:0"));
         
         Ok(())
     }
@@ -310,28 +342,81 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let mut cache = CacheManager::new(temp_dir.path(), 250)?;
         
-        let piece_1_path = cache.piece_path("piece_1");
+        let piece_1_key = "hash2:piece:0";
+        let piece_1_path = cache.ensure_piece_dir(piece_1_key)?;
         std::fs::write(&piece_1_path, vec![0u8; 100])?;
-        cache.add_piece("piece_1", 100)?;
+        cache.add_piece(piece_1_key, 100)?;
         
         std::thread::sleep(std::time::Duration::from_millis(5));
         
-        let piece_2_path = cache.piece_path("piece_2");
+        let piece_2_key = "hash2:piece:1";
+        let piece_2_path = cache.ensure_piece_dir(piece_2_key)?;
         std::fs::write(&piece_2_path, vec![0u8; 100])?;
-        cache.add_piece("piece_2", 100)?;
+        cache.add_piece(piece_2_key, 100)?;
         
         std::thread::sleep(std::time::Duration::from_millis(5));
-        cache.record_access("piece_1")?;
+        cache.record_access(piece_1_key)?;
         
         std::thread::sleep(std::time::Duration::from_millis(5));
         
-        let piece_3_path = cache.piece_path("piece_3");
+        let piece_3_key = "hash2:piece:2";
+        let piece_3_path = cache.ensure_piece_dir(piece_3_key)?;
         std::fs::write(&piece_3_path, vec![0u8; 100])?;
-        cache.add_piece("piece_3", 100)?;
+        cache.add_piece(piece_3_key, 100)?;
         
-        assert!(cache.has_piece("piece_1"), "piece_1 should remain (accessed recently)");
-        assert!(!cache.has_piece("piece_2"), "piece_2 should be evicted (oldest after piece_1 access)");
-        assert!(cache.has_piece("piece_3"), "piece_3 should remain");
+        assert!(cache.has_piece(piece_1_key), "piece_1 should remain (accessed recently)");
+        assert!(!cache.has_piece(piece_2_key), "piece_2 should be evicted (oldest after piece_1 access)");
+        assert!(cache.has_piece(piece_3_key), "piece_3 should remain");
+        
+        Ok(())
+    }
+    
+    #[test]
+    fn test_piece_directory_structure() -> TorrentResult<()> {
+        let temp_dir = TempDir::new().unwrap();
+        let mut cache = CacheManager::new(temp_dir.path(), 1024 * 1024)?;
+        
+        let info_hash = "abc123def456";
+        let piece_key = format!("{}:piece:0", info_hash);
+        
+        let piece_path = cache.ensure_piece_dir(&piece_key)?;
+        std::fs::write(&piece_path, vec![0u8; 100])?;
+        cache.add_piece(&piece_key, 100)?;
+        
+        let expected_dir = temp_dir.path().join("pieces").join(info_hash);
+        assert!(expected_dir.exists(), "pieces/<info_hash> directory should exist");
+        
+        let expected_file = expected_dir.join(&piece_key);
+        assert!(expected_file.exists(), "piece file should be in pieces/<info_hash>/ directory");
+        
+        Ok(())
+    }
+    
+    #[test]
+    fn test_multiple_torrents_separate_directories() -> TorrentResult<()> {
+        let temp_dir = TempDir::new().unwrap();
+        let mut cache = CacheManager::new(temp_dir.path(), 1024 * 1024)?;
+        
+        let hash1 = "torrent_hash_1";
+        let hash2 = "torrent_hash_2";
+        
+        let piece1_key = format!("{}:piece:0", hash1);
+        let piece1_path = cache.ensure_piece_dir(&piece1_key)?;
+        std::fs::write(&piece1_path, vec![0u8; 100])?;
+        cache.add_piece(&piece1_key, 100)?;
+        
+        let piece2_key = format!("{}:piece:0", hash2);
+        let piece2_path = cache.ensure_piece_dir(&piece2_key)?;
+        std::fs::write(&piece2_path, vec![0u8; 100])?;
+        cache.add_piece(&piece2_key, 100)?;
+        
+        let dir1 = temp_dir.path().join("pieces").join(hash1);
+        let dir2 = temp_dir.path().join("pieces").join(hash2);
+        
+        assert!(dir1.exists(), "directory for torrent 1 should exist");
+        assert!(dir2.exists(), "directory for torrent 2 should exist");
+        assert!(dir1.join(&piece1_key).exists());
+        assert!(dir2.join(&piece2_key).exists());
         
         Ok(())
     }
