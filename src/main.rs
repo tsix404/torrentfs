@@ -6,6 +6,8 @@ use fuser::{
 use libc::{EACCES, EEXIST, EFBIG, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR};
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1286,6 +1288,47 @@ impl Filesystem for TorrentFs {
     }
 }
 
+fn fuse_allow_other_enabled() -> io::Result<bool> {
+    let file = File::open("/etc/fuse.conf")?;
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("user_allow_other") && !trimmed.starts_with("#") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn user_in_fuse_group() -> bool {
+    use std::fs;
+    if let Ok(current_uid) = std::env::var("UID") {
+        if let Ok(group_file) = fs::read_to_string("/etc/group") {
+            for line in group_file.lines() {
+                let parts: Vec<&str> = line.split(':').collect();
+                if parts.len() >= 4 && parts[0] == "fuse" {
+                    let members = parts[3];
+                    if let Ok(current_user) = std::env::var("USER") {
+                        if members.split(',').any(|m| m.trim() == current_user) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        let _ = current_uid;
+    }
+    
+    if let Ok(output) = std::process::Command::new("groups").output() {
+        let groups = String::from_utf8_lossy(&output.stdout);
+        if groups.split_whitespace().any(|g| g == "fuse") {
+            return true;
+        }
+    }
+    
+    false
+}
+
 fn main() {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
@@ -1310,48 +1353,118 @@ fn main() {
         }
     }
 
-    let fs = if let Some(db_path) = &args.db {
-        match Database::open(db_path) {
+    let db_path = if let Some(db_path) = &args.db {
+        db_path.clone()
+    } else {
+        args.mountpoint.join(".torrentfs/metadata.db")
+    };
+
+    if let Some(parent) = db_path.parent() {
+        if !parent.exists() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                warn!("Failed to create database directory: {:?}", e);
+            }
+        }
+    }
+
+    let allow_other_enabled = fuse_allow_other_enabled().unwrap_or(false);
+    
+    if allow_other_enabled {
+        let options = vec![
+            MountOption::FSName("torrentfs".to_string()),
+            MountOption::AutoUnmount,
+            MountOption::AllowOther,
+        ];
+        
+        let db = match Database::open(&db_path) {
             Ok(db) => {
                 info!("Database opened at {:?}", db_path);
-                TorrentFs::new_with_db_and_cache(db, cache_path)
+                Some(db)
             }
             Err(e) => {
-                error!("Failed to open database: {:?}", e);
+                if args.db.is_some() {
+                    error!("Failed to open database: {:?}", e);
+                    std::process::exit(1);
+                }
+                warn!("Failed to open database at {:?}: {:?}, running without persistence", db_path, e);
+                None
+            }
+        };
+        
+        let fs = match db {
+            Some(d) => TorrentFs::new_with_db_and_cache(d, cache_path.clone()),
+            None => TorrentFs::new_with_cache_path(cache_path.clone()),
+        };
+        
+        match fuser::mount2(fs, &args.mountpoint, &options) {
+            Ok(()) => {
+                info!("torrentfs unmounted successfully");
+                return;
+            }
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                warn!("Mount with AllowOther failed, falling back to owner-only mode");
+            }
+            Err(e) => {
+                error!("Failed to mount filesystem: {}", e);
                 std::process::exit(1);
             }
         }
     } else {
-        let db_path = args.mountpoint.join(".torrentfs/metadata.db");
-        if let Some(parent) = db_path.parent() {
-            if !parent.exists() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
-                    warn!("Failed to create database directory: {:?}", e);
-                }
-            }
-        }
-        match Database::open(&db_path) {
-            Ok(db) => {
-                info!("Database opened at {:?}", db_path);
-                TorrentFs::new_with_db_and_cache(db, cache_path)
-            }
-            Err(e) => {
-                warn!("Failed to open database at {:?}: {:?}, running without persistence", db_path, e);
-                TorrentFs::new_with_cache_path(cache_path)
-            }
-        }
-    };
-
-    info!("Mounting torrentfs at {:?}", args.mountpoint);
+        warn!("user_allow_other not set in /etc/fuse.conf, mount will only be accessible by owner");
+    }
 
     let options = vec![
         MountOption::FSName("torrentfs".to_string()),
-        MountOption::AllowOther,
         MountOption::AutoUnmount,
     ];
-
-    fuser::mount2(fs, &args.mountpoint, &options)
-        .expect("Failed to mount filesystem");
-
-    info!("torrentfs unmounted successfully");
+    
+    let db = match Database::open(&db_path) {
+        Ok(db) => {
+            info!("Database opened at {:?}", db_path);
+            Some(db)
+        }
+        Err(e) => {
+            if args.db.is_some() {
+                error!("Failed to open database: {:?}", e);
+                std::process::exit(1);
+            }
+            warn!("Failed to open database at {:?}: {:?}, running without persistence", db_path, e);
+            None
+        }
+    };
+    
+    let fs = match db {
+        Some(d) => TorrentFs::new_with_db_and_cache(d, cache_path.clone()),
+        None => TorrentFs::new_with_cache_path(cache_path.clone()),
+    };
+    
+    match fuser::mount2(fs, &args.mountpoint, &options) {
+        Ok(()) => info!("torrentfs unmounted successfully"),
+        Err(e) => {
+            let error_msg = e.to_string();
+            if e.kind() == io::ErrorKind::PermissionDenied {
+                let mut hints = Vec::new();
+                
+                if !allow_other_enabled {
+                    hints.push("'user_allow_other' is not set in /etc/fuse.conf");
+                }
+                
+                if !user_in_fuse_group() {
+                    hints.push("user may not be in the 'fuse' group (some systems require this)");
+                }
+                
+                hints.push("running in a container or restricted environment");
+                hints.push("SELinux/AppArmor restrictions");
+                hints.push("/dev/fuse device permissions");
+                
+                error!(
+                    "Mount failed: Operation not permitted. Possible causes:\n  - {}",
+                    hints.join("\n  - ")
+                );
+                std::process::exit(2);
+            }
+            error!("Failed to mount filesystem: {}", error_msg);
+            std::process::exit(1);
+        }
+    }
 }
