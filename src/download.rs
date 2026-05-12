@@ -352,7 +352,7 @@ impl DownloadManager {
                         let data = handle_guard.read_piece(&session, piece_idx)?;
                         let mut cache = self.cache_manager.lock()
                             .map_err(|_| TorrentError::Unknown { code: -1, message: "Cache lock poisoned".to_string() })?;
-                        let piece_path = cache.piece_path(&piece_key);
+                        let piece_path = cache.ensure_piece_dir(&piece_key)?;
                         if let Err(e) = std::fs::write(&piece_path, &data) {
                             tracing::warn!("Failed to write cache piece {}: {:?}", piece_key, e);
                         }
@@ -366,7 +366,7 @@ impl DownloadManager {
                     let data = handle_guard.read_piece(&session, piece_idx)?;
                     let mut cache = self.cache_manager.lock()
                         .map_err(|_| TorrentError::Unknown { code: -1, message: "Cache lock poisoned".to_string() })?;
-                    let piece_path = cache.piece_path(&piece_key);
+                    let piece_path = cache.ensure_piece_dir(&piece_key)?;
                     if let Err(e) = std::fs::write(&piece_path, &data) {
                         tracing::warn!("Failed to write cache piece {}: {:?}", piece_key, e);
                     }
