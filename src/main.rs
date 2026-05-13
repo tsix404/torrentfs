@@ -580,6 +580,11 @@ impl TorrentFs {
                     EIO
                 })?;
 
+                db_guard.set_torrent_data(torrent_id, data).map_err(|e| {
+                    error!("Failed to store torrent data for {}: {:?}", filename, e);
+                    EIO
+                })?;
+
                 info!(
                     "Persisted torrent '{}' ({} files, {} bytes) from {}",
                     metadata.name, metadata.num_files, metadata.total_size, 
@@ -803,6 +808,12 @@ impl TorrentFs {
                 error!("Torrent not found for source_path: {}", source_path);
                 ENOENT
             })?;
+        
+        if let Some(ref data) = torrent.torrent_data {
+            if !data.is_empty() {
+                return Ok(data.clone());
+            }
+        }
         
         let metadata_dir_ino = METADATA_INO;
         for (ino, data) in &self.inodes {
