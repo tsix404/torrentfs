@@ -20,3 +20,4 @@ hex = "0.4"
 
 [dev-dependencies]
 tempfile = "3.10"
+sha1_smol = "1"
