@@ -200,6 +200,28 @@ impl TorrentHandle {
         }
     }
     
+    pub fn get_torrent_info(&self) -> TorrentResult<(i64, i64)> {
+        let mut piece_length: i64 = 0;
+        let mut num_pieces: i64 = 0;
+        
+        let result = unsafe {
+            libtorrent_sys::lt_torrent_handle_get_torrent_info(
+                self.inner,
+                &mut piece_length,
+                &mut num_pieces,
+            )
+        };
+        
+        if result != 0 {
+            Err(TorrentError::Unknown {
+                code: result,
+                message: "Failed to get torrent info from handle".to_string(),
+            })
+        } else {
+            Ok((piece_length, num_pieces))
+        }
+    }
+    
     pub fn info_hash(&self) -> &str {
         &self.info_hash
     }
@@ -321,17 +343,41 @@ impl DownloadManager {
             return Err(TorrentError::InvalidFile("Torrent handle is invalid".to_string()));
         }
         
-        let status = handle_guard.status()?;
+        let mut status = handle_guard.status()?;
         tracing::debug!(
-            "read_file_range: torrent state = {:?}, progress = {:.2}%",
+            "read_file_range: initial torrent state = {:?}, progress = {:.2}%",
             status.state, status.progress * 100.0
         );
         
+        let max_wait_secs = 10;
+        let start = std::time::Instant::now();
+        while matches!(status.state, TorrentState::QueuedForChecking | TorrentState::CheckingFiles | TorrentState::Allocating | TorrentState::CheckingResumeData) {
+            if start.elapsed().as_secs() > max_wait_secs {
+                return Err(TorrentError::InvalidFile(format!(
+                    "Torrent stuck in state {:?} for {} seconds",
+                    status.state, max_wait_secs
+                )));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            status = handle_guard.status()?;
+            tracing::debug!(
+                "read_file_range: waiting for torrent state = {:?}, progress = {:.2}%",
+                status.state, status.progress * 100.0
+            );
+        }
+        
+        tracing::debug!(
+            "read_file_range: final torrent state = {:?}, progress = {:.2}%",
+            status.state, status.progress * 100.0
+        );
+        
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        
         let info_hash = handle_guard.info_hash().to_string();
         let piece_info = handle_guard.get_file_piece_info(file_index)?;
-        let metadata = info.metadata()?;
-        let piece_length = metadata.piece_length as u64;
-        let num_pieces = metadata.num_pieces as i32;
+        let (handle_piece_length, handle_num_pieces) = handle_guard.get_torrent_info()?;
+        let piece_length = handle_piece_length as u64;
+        let num_pieces = handle_num_pieces as i32;
         
         let file_start_offset = piece_info.file_offset as u64;
         let absolute_offset = file_start_offset + offset;
