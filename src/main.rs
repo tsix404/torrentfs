@@ -1393,8 +1393,20 @@ fn user_in_fuse_group() -> bool {
 }
 
 fn main() {
+    let log_level = std::env::var("RUST_LOG")
+        .ok()
+        .and_then(|v| match v.to_lowercase().as_str() {
+            "trace" => Some(Level::TRACE),
+            "debug" => Some(Level::DEBUG),
+            "info" => Some(Level::INFO),
+            "warn" => Some(Level::WARN),
+            "error" => Some(Level::ERROR),
+            _ => None,
+        })
+        .unwrap_or(Level::INFO);
+    
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+        .with_max_level(log_level)
         .finish();
     tracing::subscriber::set_global_default(subscriber)
         .expect("Failed to set tracing subscriber");

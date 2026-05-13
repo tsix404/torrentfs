@@ -445,3 +445,15 @@ int lt_torrent_handle_get_torrent_info(lt_torrent_handle_t handle, int64_t* piec
     
     return 0;
 }
+
+int lt_torrent_handle_have_piece(lt_torrent_handle_t handle, int piece_index) {
+    if (!handle) return 0;
+    
+    auto h = static_cast<lt::torrent_handle*>(handle);
+    if (!h->is_valid()) return 0;
+    
+    auto status = h->status();
+    if (static_cast<int>(status.pieces.size()) <= piece_index) return 0;
+    
+    return status.pieces[piece_index] ? 1 : 0;
+}

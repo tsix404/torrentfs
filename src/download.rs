@@ -222,6 +222,10 @@ impl TorrentHandle {
         }
     }
     
+    pub fn have_piece(&self, piece_index: i32) -> bool {
+        unsafe { libtorrent_sys::lt_torrent_handle_have_piece(self.inner, piece_index) != 0 }
+    }
+    
     pub fn info_hash(&self) -> &str {
         &self.info_hash
     }
@@ -415,6 +419,19 @@ impl DownloadManager {
             "read_file_range: file_index={}, offset={}, size={}, start_piece={}, end_piece={}, num_pieces={}, piece_length={}",
             file_index, offset, size, start_piece, end_piece, num_pieces, piece_length
         );
+        
+        for piece_idx in start_piece..=end_piece {
+            if !handle_guard.have_piece(piece_idx) {
+                tracing::debug!(
+                    "read_file_range: piece {} not available, torrent is still downloading",
+                    piece_idx
+                );
+                return Err(TorrentError::InvalidFile(format!(
+                    "Piece {} not yet downloaded. Torrent is still in downloading state with {:.2}% progress.",
+                    piece_idx, status.progress * 100.0
+                )));
+            }
+        }
         
         let session = self.session.lock()
             .map_err(|_| TorrentError::Unknown { code: -1, message: "Session lock poisoned".to_string() })?;

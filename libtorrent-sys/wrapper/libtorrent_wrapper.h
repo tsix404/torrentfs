@@ -63,6 +63,7 @@ int lt_torrent_handle_read_piece(lt_session_t session, lt_torrent_handle_t handl
 void lt_piece_data_free(uint8_t* data);
 int lt_torrent_handle_get_piece_info(lt_torrent_handle_t handle, int file_index, int64_t* first_piece, int64_t* num_pieces, int64_t* file_offset);
 int lt_torrent_handle_get_torrent_info(lt_torrent_handle_t handle, int64_t* piece_length, int64_t* num_pieces);
+int lt_torrent_handle_have_piece(lt_torrent_handle_t handle, int piece_index);
 
 #ifdef __cplusplus
 }
