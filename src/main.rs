@@ -580,6 +580,11 @@ impl TorrentFs {
                     EIO
                 })?;
 
+                db_guard.set_torrent_data(torrent_id, data).map_err(|e| {
+                    error!("Failed to store torrent data for {}: {:?}", filename, e);
+                    EIO
+                })?;
+
                 info!(
                     "Persisted torrent '{}' ({} files, {} bytes) from {}",
                     metadata.name, metadata.num_files, metadata.total_size, 
