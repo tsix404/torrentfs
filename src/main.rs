@@ -809,6 +809,12 @@ impl TorrentFs {
                 ENOENT
             })?;
         
+        if let Some(ref data) = torrent.torrent_data {
+            if !data.is_empty() {
+                return Ok(data.clone());
+            }
+        }
+        
         let metadata_dir_ino = METADATA_INO;
         for (ino, data) in &self.inodes {
             if let InodeData::File { name, data: file_data, .. } = data {
