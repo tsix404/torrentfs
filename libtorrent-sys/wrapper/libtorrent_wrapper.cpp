@@ -430,3 +430,18 @@ int lt_torrent_handle_get_piece_info(lt_torrent_handle_t handle, int file_index,
     
     return 0;
 }
+
+int lt_torrent_handle_get_torrent_info(lt_torrent_handle_t handle, int64_t* piece_length, int64_t* num_pieces) {
+    if (!handle || !piece_length || !num_pieces) return -1;
+    
+    auto h = static_cast<lt::torrent_handle*>(handle);
+    if (!h->is_valid()) return -1;
+    
+    auto t = h->torrent_file();
+    if (!t) return -1;
+    
+    *piece_length = t->piece_length();
+    *num_pieces = t->num_pieces();
+    
+    return 0;
+}
