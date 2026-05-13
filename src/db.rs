@@ -129,8 +129,30 @@ impl Database {
             Self::migrate_v2(&tx)?;
             tx.pragma_update(None, "user_version", 2)?;
         }
+        
+        if user_version < 3 {
+            Self::migrate_v3(&tx)?;
+            tx.pragma_update(None, "user_version", 3)?;
+        }
 
         tx.commit()?;
+        
+        if user_version < 3 {
+            let paths: Vec<String> = {
+                let mut stmt = self.conn.prepare(
+                    "SELECT DISTINCT source_path FROM torrents WHERE source_path != ''",
+                )?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+
+            for path in paths {
+                if let Err(e) = self.ensure_metadata_directories(&path) {
+                    tracing::warn!("Failed to create metadata directories for {}: {}", path, e);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -219,6 +241,49 @@ impl Database {
         Ok(())
     }
 
+    fn migrate_v3(conn: &Connection) -> Result<(), DbError> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS metadata_directories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                parent_id INTEGER,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE,
+                FOREIGN KEY (parent_id) REFERENCES metadata_directories(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_metadata_dirs_parent_id ON metadata_directories(parent_id);
+            CREATE INDEX IF NOT EXISTS idx_metadata_dirs_path ON metadata_directories(path);
+
+            CREATE TABLE IF NOT EXISTS metadata_directory_closure (
+                ancestor_id INTEGER NOT NULL,
+                descendant_id INTEGER NOT NULL,
+                depth INTEGER NOT NULL,
+                PRIMARY KEY (ancestor_id, descendant_id),
+                FOREIGN KEY (ancestor_id) REFERENCES metadata_directories(id) ON DELETE CASCADE,
+                FOREIGN KEY (descendant_id) REFERENCES metadata_directories(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_metadata_closure_descendant ON metadata_directory_closure(descendant_id);",
+        )?;
+        Ok(())
+    }
+
+    pub fn rebuild_metadata_directories(&mut self) -> Result<(), DbError> {
+        let paths: Vec<String> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT source_path FROM torrents WHERE source_path != ''",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        for path in paths {
+            self.ensure_metadata_directories(&path)?;
+        }
+
+        Ok(())
+    }
+
     pub fn insert_torrent(
         &mut self,
         source_path: &str,
@@ -247,7 +312,69 @@ impl Database {
         )?;
 
         let id = self.conn.last_insert_rowid();
+        
+        if !source_path.is_empty() {
+            if let Err(e) = self.ensure_metadata_directories(source_path) {
+                tracing::warn!("Failed to create metadata directories for {}: {}", source_path, e);
+            }
+        }
+        
         Ok(InsertTorrentResult::Inserted(id))
+    }
+
+    fn ensure_metadata_directories(&mut self, source_path: &str) -> Result<(), DbError> {
+        let parts: Vec<&str> = source_path.split('/').filter(|s| !s.is_empty()).collect();
+        if parts.is_empty() {
+            return Ok(());
+        }
+
+        let mut current_path = String::new();
+        let mut parent_id: Option<i64> = None;
+
+        for part in parts {
+            if current_path.is_empty() {
+                current_path = part.to_string();
+            } else {
+                current_path = format!("{}/{}", current_path, part);
+            }
+
+            let existing_id: Option<i64> = self.conn
+                .query_row(
+                    "SELECT id FROM metadata_directories WHERE path = ?",
+                    params![&current_path],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+
+            if let Some(id) = existing_id {
+                parent_id = Some(id);
+                continue;
+            }
+
+            self.conn.execute(
+                "INSERT INTO metadata_directories (parent_id, name, path) VALUES (?, ?, ?)",
+                params![parent_id, part, &current_path],
+            )?;
+            let dir_id = self.conn.last_insert_rowid();
+
+            self.conn.execute(
+                "INSERT INTO metadata_directory_closure (ancestor_id, descendant_id, depth) VALUES (?, ?, 0)",
+                params![dir_id, dir_id],
+            )?;
+
+            if let Some(pid) = parent_id {
+                self.conn.execute(
+                    "INSERT INTO metadata_directory_closure (ancestor_id, descendant_id, depth)
+                     SELECT ancestor_id, ?, depth + 1 FROM metadata_directory_closure WHERE descendant_id = ?",
+                    params![dir_id, pid],
+                )?;
+            }
+
+            parent_id = Some(dir_id);
+        }
+
+        Ok(())
     }
 
     pub fn set_torrent_data(&mut self, torrent_id: i64, data: &[u8]) -> Result<(), DbError> {
@@ -683,46 +810,35 @@ impl Database {
     }
 
     pub fn get_source_path_prefixes(&self, prefix: &str) -> Result<Vec<String>, DbError> {
-        let paths: Vec<String> = if prefix.is_empty() {
+        let names: Vec<String> = if prefix.is_empty() {
             let mut stmt = self.conn.prepare(
-                "SELECT DISTINCT source_path FROM torrents WHERE source_path != '' ORDER BY source_path",
+                "SELECT name FROM metadata_directories WHERE parent_id IS NULL ORDER BY name",
             )?;
             let rows = stmt.query_map([], |row| row.get(0))?;
             rows.collect::<Result<Vec<_>, _>>()?
         } else {
-            let pattern = format!("{}%", prefix);
-            let mut stmt = self.conn.prepare(
-                "SELECT DISTINCT source_path FROM torrents WHERE source_path LIKE ? ORDER BY source_path",
-            )?;
-            let rows = stmt.query_map(params![pattern], |row| row.get(0))?;
-            rows.collect::<Result<Vec<_>, _>>()?
+            let parent_id: Option<i64> = self.conn
+                .query_row(
+                    "SELECT id FROM metadata_directories WHERE path = ?",
+                    params![prefix],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+
+            match parent_id {
+                Some(pid) => {
+                    let mut stmt = self.conn.prepare(
+                        "SELECT name FROM metadata_directories WHERE parent_id = ? ORDER BY name",
+                    )?;
+                    let rows = stmt.query_map(params![pid], |row| row.get(0))?;
+                    rows.collect::<Result<Vec<_>, _>>()?
+                }
+                None => Vec::new(),
+            }
         };
 
-        let mut result: Vec<String> = paths
-            .iter()
-            .filter_map(|p| {
-                let stripped: &str = if prefix.is_empty() {
-                    p.as_str()
-                } else {
-                    p.strip_prefix(prefix)?.trim_start_matches('/')
-                };
-                
-                if stripped.is_empty() {
-                    return None;
-                }
-                
-                let first_component = stripped.split('/').next().unwrap_or("");
-                if first_component.is_empty() {
-                    None
-                } else {
-                    Some(first_component.to_string())
-                }
-            })
-            .collect();
-
-        result.sort();
-        result.dedup();
-        Ok(result)
+        Ok(names)
     }
 
     pub fn get_file_by_path(&self, torrent_id: i64, path: &str) -> Result<Option<TorrentFile>, DbError> {
@@ -1182,6 +1298,38 @@ mod tests {
         let prefixes = db.get_source_path_prefixes("a").unwrap();
         assert!(prefixes.contains(&"b".to_string()));
         assert!(prefixes.contains(&"c".to_string()));
+    }
+
+    #[test]
+    fn test_metadata_directory_structure_preserved() {
+        let mut db = Database::open_in_memory().unwrap();
+        
+        db.insert_torrent("anime/naruto/season1", "Naruto S1", 1024, "hash1", 1).unwrap();
+        db.insert_torrent("anime/naruto/season2", "Naruto S2", 2048, "hash2", 1).unwrap();
+        db.insert_torrent("anime/onepiece", "One Piece", 3072, "hash3", 1).unwrap();
+        db.insert_torrent("movies/scifi", "SciFi Movies", 4096, "hash4", 1).unwrap();
+        
+        let root = db.get_source_path_prefixes("").unwrap();
+        assert_eq!(root.len(), 2);
+        assert!(root.contains(&"anime".to_string()));
+        assert!(root.contains(&"movies".to_string()));
+        
+        let anime = db.get_source_path_prefixes("anime").unwrap();
+        assert_eq!(anime.len(), 2);
+        assert!(anime.contains(&"naruto".to_string()));
+        assert!(anime.contains(&"onepiece".to_string()));
+        
+        let naruto = db.get_source_path_prefixes("anime/naruto").unwrap();
+        assert_eq!(naruto.len(), 2);
+        assert!(naruto.contains(&"season1".to_string()));
+        assert!(naruto.contains(&"season2".to_string()));
+        
+        let onepiece = db.get_source_path_prefixes("anime/onepiece").unwrap();
+        assert_eq!(onepiece.len(), 0);
+        
+        let movies = db.get_source_path_prefixes("movies").unwrap();
+        assert_eq!(movies.len(), 1);
+        assert!(movies.contains(&"scifi".to_string()));
     }
 
     #[test]
