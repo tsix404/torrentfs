@@ -324,13 +324,12 @@ impl TorrentFs {
                     if !torrents.is_empty() {
                         let torrent = torrents.first()?;
                         let torrent_ino = Self::make_torrent_root_ino(torrent.id);
-                        let name = torrent.name.clone();
                         cache_entries.push((torrent_ino, DataInode::TorrentRoot {
                             torrent_id: torrent.id,
                             source_path: torrent.source_path.clone(),
                             name: torrent.name.clone(),
                         }));
-                        entries.push((torrent_ino, offset_counter, fuser::FileType::Directory, name));
+                        entries.push((torrent_ino, offset_counter, fuser::FileType::Directory, prefix));
                         offset_counter += 1;
                     } else {
                         let child_ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
@@ -369,13 +368,12 @@ impl TorrentFs {
                         if !torrents.is_empty() {
                             let torrent = torrents.first()?;
                             let torrent_ino = Self::make_torrent_root_ino(torrent.id);
-                            let name = torrent.name.clone();
                             cache_entries.push((torrent_ino, DataInode::TorrentRoot {
                                 torrent_id: torrent.id,
                                 source_path: torrent.source_path.clone(),
                                 name: torrent.name.clone(),
                             }));
-                            entries.push((torrent_ino, offset_counter, fuser::FileType::Directory, name));
+                            entries.push((torrent_ino, offset_counter, fuser::FileType::Directory, sub));
                         } else {
                             let child_ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
                             cache_entries.push((child_ino, DataInode::SourcePathDir { path: new_path.clone() }));
