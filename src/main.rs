@@ -147,6 +147,17 @@ impl TorrentFs {
         })
     }
 
+    fn find_source_path_dir_ino(&self, path: &str) -> Option<u64> {
+        for (ino, data_inode) in &self.data_inodes {
+            if let DataInode::SourcePathDir { path: p } = data_inode {
+                if p == path {
+                    return Some(*ino);
+                }
+            }
+        }
+        None
+    }
+
     fn resolve_data_lookup(&self, parent: u64, name: &str) -> Option<(u64, DataInode)> {
         if parent == DATA_INO {
             return self.resolve_data_root_lookup(name);
@@ -168,12 +179,17 @@ impl TorrentFs {
     }
 
     fn resolve_data_root_lookup(&self, name: &str) -> Option<(u64, DataInode)> {
+        let full_path = name.to_string();
+        
+        if let Some(ino) = self.find_source_path_dir_ino(&full_path) {
+            return Some((ino, DataInode::SourcePathDir { path: full_path }));
+        }
+
         let db = self.get_db().ok()?;
         let db_guard = db.lock().ok()?;
 
         let prefixes = db_guard.get_source_path_prefixes("").ok()?;
         if prefixes.contains(&name.to_string()) {
-            let full_path = name.to_string();
             let ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
             return Some((ino, DataInode::SourcePathDir { path: full_path }));
         }
@@ -194,14 +210,18 @@ impl TorrentFs {
     }
 
     fn resolve_source_path_dir_lookup(&self, prefix: &str, name: &str) -> Option<(u64, DataInode)> {
-        let db = self.get_db().ok()?;
-        let db_guard = db.lock().ok()?;
-
         let new_path = if prefix.is_empty() {
             name.to_string()
         } else {
             format!("{}/{}", prefix, name)
         };
+
+        if let Some(ino) = self.find_source_path_dir_ino(&new_path) {
+            return Some((ino, DataInode::SourcePathDir { path: new_path }));
+        }
+
+        let db = self.get_db().ok()?;
+        let db_guard = db.lock().ok()?;
 
         let prefixes = db_guard.get_source_path_prefixes(prefix).ok()?;
         if prefixes.contains(&name.to_string()) {
