@@ -1380,7 +1380,9 @@ fn main() {
     }
 
     let cache_path = args.cache.clone().unwrap_or_else(|| {
-        args.mountpoint.join(".torrentfs/cache")
+        dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("torrentfs/cache")
     });
     
     if !cache_path.exists() {
@@ -1392,7 +1394,9 @@ fn main() {
     let db_path = if let Some(db_path) = &args.db {
         db_path.clone()
     } else {
-        args.mountpoint.join(".torrentfs/metadata.db")
+        dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("torrentfs/db/metadata.db")
     };
 
     if let Some(parent) = db_path.parent() {
