@@ -171,16 +171,11 @@ impl TorrentFs {
         let db = self.get_db().ok()?;
         let db_guard = db.lock().ok()?;
 
-        let torrents = db_guard.get_torrents_by_source_path(name).ok()?;
-        
-        if !torrents.is_empty() {
-            let torrent = torrents.first()?;
-            let ino = Self::make_torrent_root_ino(torrent.id);
-            return Some((ino, DataInode::TorrentRoot {
-                torrent_id: torrent.id,
-                source_path: torrent.source_path.clone(),
-                name: torrent.name.clone(),
-            }));
+        let prefixes = db_guard.get_source_path_prefixes("").ok()?;
+        if prefixes.contains(&name.to_string()) {
+            let full_path = name.to_string();
+            let ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
+            return Some((ino, DataInode::SourcePathDir { path: full_path }));
         }
 
         let root_torrents = db_guard.get_torrents_by_source_path("").ok()?;
@@ -193,13 +188,6 @@ impl TorrentFs {
                     name: torrent.name.clone(),
                 }));
             }
-        }
-
-        let prefixes = db_guard.get_source_path_prefixes("").ok()?;
-        if prefixes.contains(&name.to_string()) {
-            let full_path = name.to_string();
-            let ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
-            return Some((ino, DataInode::SourcePathDir { path: full_path }));
         }
 
         None
@@ -215,21 +203,22 @@ impl TorrentFs {
             format!("{}/{}", prefix, name)
         };
 
-        let torrents = db_guard.get_torrents_by_source_path(&new_path).ok()?;
-        if !torrents.is_empty() {
-            let torrent = torrents.first()?;
-            let ino = Self::make_torrent_root_ino(torrent.id);
-            return Some((ino, DataInode::TorrentRoot {
-                torrent_id: torrent.id,
-                source_path: torrent.source_path.clone(),
-                name: torrent.name.clone(),
-            }));
-        }
-
-        let prefixes = db_guard.get_source_path_prefixes(&new_path).ok()?;
+        let prefixes = db_guard.get_source_path_prefixes(prefix).ok()?;
         if prefixes.contains(&name.to_string()) {
             let ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
             return Some((ino, DataInode::SourcePathDir { path: new_path }));
+        }
+
+        let torrents = db_guard.get_torrents_by_source_path(prefix).ok()?;
+        for torrent in torrents {
+            if torrent.name == name {
+                let ino = Self::make_torrent_root_ino(torrent.id);
+                return Some((ino, DataInode::TorrentRoot {
+                    torrent_id: torrent.id,
+                    source_path: torrent.source_path.clone(),
+                    name: torrent.name.clone(),
+                }));
+            }
         }
 
         None
@@ -320,24 +309,10 @@ impl TorrentFs {
                 let prefixes = db_guard.get_source_path_prefixes("").ok()?;
                 
                 for prefix in prefixes {
-                    let torrents = db_guard.get_torrents_by_source_path(&prefix).ok()?;
-                    if !torrents.is_empty() {
-                        let torrent = torrents.first()?;
-                        let torrent_ino = Self::make_torrent_root_ino(torrent.id);
-                        let name = torrent.name.clone();
-                        cache_entries.push((torrent_ino, DataInode::TorrentRoot {
-                            torrent_id: torrent.id,
-                            source_path: torrent.source_path.clone(),
-                            name: torrent.name.clone(),
-                        }));
-                        entries.push((torrent_ino, offset_counter, fuser::FileType::Directory, name));
-                        offset_counter += 1;
-                    } else {
-                        let child_ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
-                        cache_entries.push((child_ino, DataInode::SourcePathDir { path: prefix.clone() }));
-                        entries.push((child_ino, offset_counter, fuser::FileType::Directory, prefix));
-                        offset_counter += 1;
-                    }
+                    let child_ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
+                    cache_entries.push((child_ino, DataInode::SourcePathDir { path: prefix.clone() }));
+                    entries.push((child_ino, offset_counter, fuser::FileType::Directory, prefix));
+                    offset_counter += 1;
                 }
             }
             
@@ -362,27 +337,13 @@ impl TorrentFs {
                     let mut offset_counter = 3i64;
                     
                     let sub_prefixes = db_guard.get_source_path_prefixes(&path).ok()?;
-                    for sub in sub_prefixes {
-                        let new_path = if path.is_empty() { sub.clone() } else { format!("{}/{}", path, sub) };
-                        let torrents = db_guard.get_torrents_by_source_path(&new_path).ok()?;
-                        
-                        if !torrents.is_empty() {
-                            let torrent = torrents.first()?;
-                            let torrent_ino = Self::make_torrent_root_ino(torrent.id);
-                            let name = torrent.name.clone();
-                            cache_entries.push((torrent_ino, DataInode::TorrentRoot {
-                                torrent_id: torrent.id,
-                                source_path: torrent.source_path.clone(),
-                                name: torrent.name.clone(),
-                            }));
-                            entries.push((torrent_ino, offset_counter, fuser::FileType::Directory, name));
-                        } else {
-                            let child_ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
-                            cache_entries.push((child_ino, DataInode::SourcePathDir { path: new_path.clone() }));
-                            entries.push((child_ino, offset_counter, fuser::FileType::Directory, sub));
-                        }
-                        offset_counter += 1;
-                    }
+                     for sub in sub_prefixes {
+                         let new_path = if path.is_empty() { sub.clone() } else { format!("{}/{}", path, sub) };
+                         let child_ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
+                         cache_entries.push((child_ino, DataInode::SourcePathDir { path: new_path.clone() }));
+                         entries.push((child_ino, offset_counter, fuser::FileType::Directory, sub));
+                         offset_counter += 1;
+                     }
                     
                     let direct_torrents = db_guard.get_torrents_by_source_path(&path).ok()?;
                     for torrent in direct_torrents {
