@@ -212,21 +212,22 @@ impl TorrentFs {
         let db = self.get_db().ok()?;
         let db_guard = db.lock().ok()?;
 
-        let prefixes = db_guard.get_source_path_prefixes(&new_path).ok()?;
+        let prefixes = db_guard.get_source_path_prefixes(prefix).ok()?;
         if prefixes.contains(&name.to_string()) {
             let ino = Self::make_source_path_dir_ino(&new_path);
             return Some((ino, DataInode::SourcePathDir { path: new_path }));
         }
 
-        let torrents = db_guard.get_torrents_by_source_path(&new_path).ok()?;
-        if !torrents.is_empty() {
-            let torrent = torrents.first()?;
-            let ino = Self::make_torrent_root_ino(torrent.id);
-            return Some((ino, DataInode::TorrentRoot {
-                torrent_id: torrent.id,
-                source_path: torrent.source_path.clone(),
-                name: torrent.name.clone(),
-            }));
+        let torrents = db_guard.get_torrents_by_source_path(prefix).ok()?;
+        for torrent in torrents {
+            if torrent.name == name {
+                let ino = Self::make_torrent_root_ino(torrent.id);
+                return Some((ino, DataInode::TorrentRoot {
+                    torrent_id: torrent.id,
+                    source_path: torrent.source_path.clone(),
+                    name: torrent.name.clone(),
+                }));
+            }
         }
 
         None
