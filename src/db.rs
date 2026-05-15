@@ -809,6 +809,23 @@ impl Database {
         Ok(torrents)
     }
 
+    /// Get all metadata directories with their id, parent_id, name, and path.
+    /// Used to restore inode cache on filesystem startup.
+    pub fn get_all_metadata_directories(&self) -> Result<Vec<(i64, Option<i64>, String, String)>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, parent_id, name, path FROM metadata_directories ORDER BY path",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+            ))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn get_source_path_prefixes(&self, prefix: &str) -> Result<Vec<String>, DbError> {
         let names: Vec<String> = if prefix.is_empty() {
             let mut stmt = self.conn.prepare(

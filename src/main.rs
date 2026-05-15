@@ -123,8 +123,82 @@ impl TorrentFs {
     
     fn new_with_db_and_cache(db: Database, cache_path: PathBuf) -> Self {
         let mut fs = Self::new_with_cache_path(cache_path);
+        
+        // First, collect all data we need from the database
+        let (dirs, torrents) = {
+            let dirs = db.get_all_metadata_directories().unwrap_or_default();
+            let torrents = db.get_all_torrents().unwrap_or_default();
+            (dirs, torrents)
+        };
+        
         fs.db = Some(Arc::new(Mutex::new(db)));
+        fs.restore_metadata_inodes(dirs, torrents);
         fs
+    }
+
+    /// Restore metadata/ subdirectory inodes from the database on startup.
+    /// This is critical for extract_source_path() to work correctly after remount.
+    fn restore_metadata_inodes(&mut self, dirs: Vec<(i64, Option<i64>, String, String)>, torrents: Vec<db::Torrent>) {
+        // Build a mapping from metadata_directories id to inode number
+        // We use NEXT_INO to create stable inodes for each directory
+        let mut dir_id_to_ino: HashMap<i64, u64> = HashMap::new();
+
+        for (db_id, parent_db_id, name, path) in &dirs {
+            let parent_ino = if let Some(pid) = parent_db_id {
+                // Parent is another metadata subdirectory
+                *dir_id_to_ino.get(pid).unwrap_or(&METADATA_INO)
+            } else {
+                // Parent is metadata/ root
+                METADATA_INO
+            };
+
+            let new_ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
+            dir_id_to_ino.insert(*db_id, new_ino);
+
+            self.inodes.insert(new_ino, InodeData::Directory {
+                parent: parent_ino,
+                name: name.clone(),
+            });
+
+            info!("Restored metadata inode {} for path '{}' (db_id={}, parent_ino={})", 
+                  new_ino, path, db_id, parent_ino);
+        }
+
+        // Also restore torrent file inodes from the database
+        for torrent in &torrents {
+            // Find the parent directory inode for this torrent's source_path
+            let parent_ino = if torrent.source_path.is_empty() {
+                METADATA_INO
+            } else {
+                // Look up the source_path directory in our restored inodes
+                // We need to find the inode whose full_path is "metadata/<source_path>"
+                let full_source = format!("metadata/{}", torrent.source_path);
+                self.find_ino_by_full_path(&full_source).unwrap_or(METADATA_INO)
+            };
+
+            let new_ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
+            let filename = format!("{}.torrent", torrent.name);
+            self.inodes.insert(new_ino, InodeData::File {
+                parent: parent_ino,
+                name: filename,
+                data: torrent.torrent_data.clone().unwrap_or_default(),
+            });
+        }
+    }
+
+    /// Find an inode number by its full path (e.g., "metadata/os/linux")
+    fn find_ino_by_full_path(&self, target_path: &str) -> Option<u64> {
+        for (ino, data) in &self.inodes {
+            let full_path = match data {
+                InodeData::Directory { .. } | InodeData::File { .. } => {
+                    self.get_full_path(*ino)
+                }
+            };
+            if full_path == target_path {
+                return Some(*ino);
+            }
+        }
+        None
     }
 
     fn make_torrent_root_ino(torrent_id: i64) -> u64 {
@@ -352,7 +426,20 @@ impl TorrentFs {
         match data_inode {
             DataInode::SourcePathDir { path } => {
                 entries.push((ino, 1, fuser::FileType::Directory, ".".to_string()));
-                entries.push((DATA_INO, 2, fuser::FileType::Directory, "..".to_string()));
+                
+                // Calculate the correct parent inode for nested directories
+                let parent_ino = if path.is_empty() {
+                    DATA_INO
+                } else {
+                    let path_parts: Vec<&str> = path.split('/').collect();
+                    if path_parts.len() == 1 {
+                        DATA_INO
+                    } else {
+                        let parent_path = path_parts[..path_parts.len() - 1].join("/");
+                        Self::make_source_path_dir_ino(&parent_path)
+                    }
+                };
+                entries.push((parent_ino, 2, fuser::FileType::Directory, "..".to_string()));
                 
                 {
                     let db = self.get_db().ok()?;
