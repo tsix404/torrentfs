@@ -424,8 +424,8 @@ impl Database {
 
                 if is_file {
                     tx.execute(
-                        "INSERT INTO torrent_files (torrent_id, directory_id, name, size) VALUES (?, ?, ?, ?)",
-                        params![torrent_id, current_parent_id, part, file_entry.size],
+                        "INSERT INTO torrent_files (torrent_id, directory_id, name, path, size) VALUES (?, ?, ?, ?, ?)",
+                        params![torrent_id, current_parent_id, part, &file_entry.path, file_entry.size],
                     )?;
                 } else {
                     if let Some(&cached_id) = dir_cache.get(&current_path) {
@@ -1119,6 +1119,37 @@ mod tests {
 
         let all_files = db.get_files_by_torrent_id(torrent_id).unwrap();
         assert_eq!(all_files.len(), 3);
+    }
+
+    #[test]
+    fn test_file_path_field_populated() {
+        let mut db = Database::open_in_memory().unwrap();
+        
+        let torrent_id = match db.insert_torrent("path1", "Test", 1024, "hash1", 3).unwrap() {
+            InsertTorrentResult::Inserted(id) => id,
+            _ => panic!("Expected Inserted"),
+        };
+
+        let files = vec![
+            FileEntry { path: "dir1/file1.txt".to_string(), size: 100 },
+            FileEntry { path: "file2.txt".to_string(), size: 200 },
+            FileEntry { path: "a/b/c/deep.txt".to_string(), size: 300 },
+        ];
+
+        db.insert_files(torrent_id, &files).unwrap();
+
+        let all_files = db.get_files_by_torrent_id(torrent_id).unwrap();
+        assert_eq!(all_files.len(), 3);
+        
+        // Verify path field is correctly populated
+        let file1 = all_files.iter().find(|f| f.name == "file1.txt").unwrap();
+        assert_eq!(file1.path, "dir1/file1.txt");
+        
+        let file2 = all_files.iter().find(|f| f.name == "file2.txt").unwrap();
+        assert_eq!(file2.path, "file2.txt");
+        
+        let deep = all_files.iter().find(|f| f.name == "deep.txt").unwrap();
+        assert_eq!(deep.path, "a/b/c/deep.txt");
     }
 
     #[test]
