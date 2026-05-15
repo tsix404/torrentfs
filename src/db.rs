@@ -52,6 +52,7 @@ pub struct Torrent {
     pub id: i64,
     pub source_path: String,
     pub name: String,
+    pub filename: String,
     pub total_size: i64,
     pub info_hash: String,
     pub file_count: i64,
@@ -133,6 +134,11 @@ impl Database {
         if user_version < 3 {
             Self::migrate_v3(&tx)?;
             tx.pragma_update(None, "user_version", 3)?;
+        }
+
+        if user_version < 4 {
+            Self::migrate_v4(&tx)?;
+            tx.pragma_update(None, "user_version", 4)?;
         }
 
         tx.commit()?;
@@ -268,6 +274,14 @@ impl Database {
         Ok(())
     }
 
+    fn migrate_v4(conn: &Connection) -> Result<(), DbError> {
+        conn.execute_batch(
+            "ALTER TABLE torrents ADD COLUMN filename TEXT NOT NULL DEFAULT '';
+             UPDATE torrents SET filename = name WHERE filename = '';",
+        )?;
+        Ok(())
+    }
+
     pub fn rebuild_metadata_directories(&mut self) -> Result<(), DbError> {
         let paths: Vec<String> = {
             let mut stmt = self.conn.prepare(
@@ -288,6 +302,7 @@ impl Database {
         &mut self,
         source_path: &str,
         name: &str,
+        filename: &str,
         total_size: i64,
         info_hash: &str,
         file_count: i64,
@@ -307,8 +322,8 @@ impl Database {
         }
 
         self.conn.execute(
-            "INSERT INTO torrents (source_path, name, total_size, info_hash, file_count, status) VALUES (?, ?, ?, ?, ?, 'pending')",
-            params![source_path, name, total_size, info_hash, file_count],
+            "INSERT INTO torrents (source_path, name, filename, total_size, info_hash, file_count, status) VALUES (?, ?, ?, ?, ?, ?, 'pending')",
+            params![source_path, name, filename, total_size, info_hash, file_count],
         )?;
 
         let id = self.conn.last_insert_rowid();
@@ -481,7 +496,7 @@ impl Database {
         let result = self
             .conn
             .query_row(
-                "SELECT id, source_path, name, total_size, info_hash, file_count, status, torrent_data, resume_data, created_at
+                "SELECT id, source_path, name, filename, total_size, info_hash, file_count, status, torrent_data, resume_data, created_at
                  FROM torrents WHERE source_path = ?",
                 params![source_path],
                 |row| {
@@ -489,13 +504,14 @@ impl Database {
                         id: row.get(0)?,
                         source_path: row.get(1)?,
                         name: row.get(2)?,
-                        total_size: row.get(3)?,
-                        info_hash: row.get(4)?,
-                        file_count: row.get(5)?,
-                        status: row.get::<_, String>(6)?.into(),
-                        torrent_data: row.get(7)?,
-                        resume_data: row.get(8)?,
-                        created_at: row.get(9)?,
+                        filename: row.get(3)?,
+                        total_size: row.get(4)?,
+                        info_hash: row.get(5)?,
+                        file_count: row.get(6)?,
+                        status: row.get::<_, String>(7)?.into(),
+                        torrent_data: row.get(8)?,
+                        resume_data: row.get(9)?,
+                        created_at: row.get(10)?,
                     })
                 },
             )
@@ -508,7 +524,7 @@ impl Database {
         let result = self
             .conn
             .query_row(
-                "SELECT id, source_path, name, total_size, info_hash, file_count, status, torrent_data, resume_data, created_at
+                "SELECT id, source_path, name, filename, total_size, info_hash, file_count, status, torrent_data, resume_data, created_at
                  FROM torrents WHERE info_hash = ?",
                 params![info_hash],
                 |row| {
@@ -516,13 +532,14 @@ impl Database {
                         id: row.get(0)?,
                         source_path: row.get(1)?,
                         name: row.get(2)?,
-                        total_size: row.get(3)?,
-                        info_hash: row.get(4)?,
-                        file_count: row.get(5)?,
-                        status: row.get::<_, String>(6)?.into(),
-                        torrent_data: row.get(7)?,
-                        resume_data: row.get(8)?,
-                        created_at: row.get(9)?,
+                        filename: row.get(3)?,
+                        total_size: row.get(4)?,
+                        info_hash: row.get(5)?,
+                        file_count: row.get(6)?,
+                        status: row.get::<_, String>(7)?.into(),
+                        torrent_data: row.get(8)?,
+                        resume_data: row.get(9)?,
+                        created_at: row.get(10)?,
                     })
                 },
             )
@@ -733,7 +750,7 @@ impl Database {
 
     pub fn get_all_torrents(&self) -> Result<Vec<Torrent>, DbError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, source_path, name, total_size, info_hash, file_count, status, torrent_data, resume_data, created_at
+            "SELECT id, source_path, name, filename, total_size, info_hash, file_count, status, torrent_data, resume_data, created_at
              FROM torrents ORDER BY id",
         )?;
 
@@ -743,13 +760,14 @@ impl Database {
                     id: row.get(0)?,
                     source_path: row.get(1)?,
                     name: row.get(2)?,
-                    total_size: row.get(3)?,
-                    info_hash: row.get(4)?,
-                    file_count: row.get(5)?,
-                    status: row.get::<_, String>(6)?.into(),
-                    torrent_data: row.get(7)?,
-                    resume_data: row.get(8)?,
-                    created_at: row.get(9)?,
+                    filename: row.get(3)?,
+                    total_size: row.get(4)?,
+                    info_hash: row.get(5)?,
+                    file_count: row.get(6)?,
+                    status: row.get::<_, String>(7)?.into(),
+                    torrent_data: row.get(8)?,
+                    resume_data: row.get(9)?,
+                    created_at: row.get(10)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -759,7 +777,7 @@ impl Database {
 
     pub fn get_torrents_by_status(&self, status: &TorrentStatus) -> Result<Vec<Torrent>, DbError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, source_path, name, total_size, info_hash, file_count, status, torrent_data, resume_data, created_at
+            "SELECT id, source_path, name, filename, total_size, info_hash, file_count, status, torrent_data, resume_data, created_at
              FROM torrents WHERE status = ? ORDER BY id",
         )?;
 
@@ -769,13 +787,14 @@ impl Database {
                     id: row.get(0)?,
                     source_path: row.get(1)?,
                     name: row.get(2)?,
-                    total_size: row.get(3)?,
-                    info_hash: row.get(4)?,
-                    file_count: row.get(5)?,
-                    status: row.get::<_, String>(6)?.into(),
-                    torrent_data: row.get(7)?,
-                    resume_data: row.get(8)?,
-                    created_at: row.get(9)?,
+                    filename: row.get(3)?,
+                    total_size: row.get(4)?,
+                    info_hash: row.get(5)?,
+                    file_count: row.get(6)?,
+                    status: row.get::<_, String>(7)?.into(),
+                    torrent_data: row.get(8)?,
+                    resume_data: row.get(9)?,
+                    created_at: row.get(10)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -785,7 +804,7 @@ impl Database {
 
     pub fn get_torrents_by_source_path(&self, source_path: &str) -> Result<Vec<Torrent>, DbError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, source_path, name, total_size, info_hash, file_count, status, torrent_data, resume_data, created_at
+            "SELECT id, source_path, name, filename, total_size, info_hash, file_count, status, torrent_data, resume_data, created_at
              FROM torrents WHERE source_path = ? ORDER BY id",
         )?;
 
@@ -795,13 +814,14 @@ impl Database {
                     id: row.get(0)?,
                     source_path: row.get(1)?,
                     name: row.get(2)?,
-                    total_size: row.get(3)?,
-                    info_hash: row.get(4)?,
-                    file_count: row.get(5)?,
-                    status: row.get::<_, String>(6)?.into(),
-                    torrent_data: row.get(7)?,
-                    resume_data: row.get(8)?,
-                    created_at: row.get(9)?,
+                    filename: row.get(3)?,
+                    total_size: row.get(4)?,
+                    info_hash: row.get(5)?,
+                    file_count: row.get(6)?,
+                    status: row.get::<_, String>(7)?.into(),
+                    torrent_data: row.get(8)?,
+                    resume_data: row.get(9)?,
+                    created_at: row.get(10)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -946,7 +966,7 @@ pub fn get_torrent_id_by_name_and_source_path(&self, name: &str, source_path: &s
         let result = self
             .conn
             .query_row(
-                "SELECT id, source_path, name, total_size, info_hash, file_count, status, torrent_data, resume_data, created_at
+                "SELECT id, source_path, name, filename, total_size, info_hash, file_count, status, torrent_data, resume_data, created_at
                  FROM torrents WHERE id = ?",
                 params![id],
                 |row| {
@@ -954,13 +974,14 @@ pub fn get_torrent_id_by_name_and_source_path(&self, name: &str, source_path: &s
                         id: row.get(0)?,
                         source_path: row.get(1)?,
                         name: row.get(2)?,
-                        total_size: row.get(3)?,
-                        info_hash: row.get(4)?,
-                        file_count: row.get(5)?,
-                        status: row.get::<_, String>(6)?.into(),
-                        torrent_data: row.get(7)?,
-                        resume_data: row.get(8)?,
-                        created_at: row.get(9)?,
+                        filename: row.get(3)?,
+                        total_size: row.get(4)?,
+                        info_hash: row.get(5)?,
+                        file_count: row.get(6)?,
+                        status: row.get::<_, String>(7)?.into(),
+                        torrent_data: row.get(8)?,
+                        resume_data: row.get(9)?,
+                        created_at: row.get(10)?,
                     })
                 },
             )
@@ -985,7 +1006,7 @@ mod tests {
     fn test_insert_and_get_torrent() {
         let mut db = Database::open_in_memory().unwrap();
         
-        let result = db.insert_torrent("test/path", "Test Torrent", 1024, "abc123", 5).unwrap();
+        let result = db.insert_torrent("test/path", "Test Torrent", "Test Torrent", 1024, "abc123", 5).unwrap();
         assert_eq!(result, InsertTorrentResult::Inserted(1));
         
         let torrent = db.get_torrent_by_source_path("test/path").unwrap().unwrap();
@@ -999,10 +1020,10 @@ mod tests {
     fn test_same_info_hash_different_source_path() {
         let mut db = Database::open_in_memory().unwrap();
         
-        let result1 = db.insert_torrent("path1", "Torrent 1", 1024, "hash1", 1).unwrap();
+        let result1 = db.insert_torrent("path1", "Torrent 1", "Torrent 1", 1024, "hash1", 1).unwrap();
         assert_eq!(result1, InsertTorrentResult::Inserted(1));
         
-        let result2 = db.insert_torrent("path2", "Torrent 2", 2048, "hash1", 2).unwrap();
+        let result2 = db.insert_torrent("path2", "Torrent 2", "Torrent 2", 2048, "hash1", 2).unwrap();
         assert_eq!(result2, InsertTorrentResult::Inserted(2));
         
         let torrent1 = db.get_torrent_by_source_path("path1").unwrap().unwrap();
@@ -1016,8 +1037,8 @@ mod tests {
     fn test_duplicate_info_hash_and_source_path() {
         let mut db = Database::open_in_memory().unwrap();
         
-        db.insert_torrent("path1", "Torrent 1", 1024, "hash1", 1).unwrap();
-        let result = db.insert_torrent("path1", "Torrent 2", 2048, "hash1", 2).unwrap();
+        db.insert_torrent("path1", "Torrent 1", "Torrent 1", 1024, "hash1", 1).unwrap();
+        let result = db.insert_torrent("path1", "Torrent 2", "Torrent 2", 2048, "hash1", 2).unwrap();
         assert_eq!(result, InsertTorrentResult::Duplicate(1));
     }
 
@@ -1025,7 +1046,7 @@ mod tests {
     fn test_torrent_status() {
         let mut db = Database::open_in_memory().unwrap();
         
-        let torrent_id = match db.insert_torrent("path1", "Test", 1024, "hash1", 1).unwrap() {
+        let torrent_id = match db.insert_torrent("path1", "Test", "Test", 1024, "hash1", 1).unwrap() {
             InsertTorrentResult::Inserted(id) => id,
             _ => panic!("Expected Inserted"),
         };
@@ -1050,7 +1071,7 @@ mod tests {
     fn test_torrent_data() {
         let mut db = Database::open_in_memory().unwrap();
         
-        let torrent_id = match db.insert_torrent("path1", "Test", 1024, "hash1", 1).unwrap() {
+        let torrent_id = match db.insert_torrent("path1", "Test", "Test", 1024, "hash1", 1).unwrap() {
             InsertTorrentResult::Inserted(id) => id,
             _ => panic!("Expected Inserted"),
         };
@@ -1074,15 +1095,15 @@ mod tests {
     fn test_get_torrents_by_status() {
         let mut db = Database::open_in_memory().unwrap();
         
-        let id1 = match db.insert_torrent("path1", "T1", 100, "hash1", 1).unwrap() {
+        let id1 = match db.insert_torrent("path1", "T1", "T1", 100, "hash1", 1).unwrap() {
             InsertTorrentResult::Inserted(id) => id,
             _ => panic!("Expected Inserted"),
         };
-        let id2 = match db.insert_torrent("path2", "T2", 200, "hash2", 1).unwrap() {
+        let id2 = match db.insert_torrent("path2", "T2", "T2", 200, "hash2", 1).unwrap() {
             InsertTorrentResult::Inserted(id) => id,
             _ => panic!("Expected Inserted"),
         };
-        let id3 = match db.insert_torrent("path3", "T3", 300, "hash3", 1).unwrap() {
+        let id3 = match db.insert_torrent("path3", "T3", "T3", 300, "hash3", 1).unwrap() {
             InsertTorrentResult::Inserted(id) => id,
             _ => panic!("Expected Inserted"),
         };
@@ -1104,7 +1125,7 @@ mod tests {
     fn test_insert_files() {
         let mut db = Database::open_in_memory().unwrap();
         
-        let torrent_id = match db.insert_torrent("path1", "Test", 1024, "hash1", 3).unwrap() {
+        let torrent_id = match db.insert_torrent("path1", "Test", "Test", 1024, "hash1", 3).unwrap() {
             InsertTorrentResult::Inserted(id) => id,
             _ => panic!("Expected Inserted"),
         };
@@ -1125,7 +1146,7 @@ mod tests {
     fn test_get_subdirectory_ids() {
         let mut db = Database::open_in_memory().unwrap();
         
-        let torrent_id = match db.insert_torrent("path1", "Test", 1024, "hash1", 2).unwrap() {
+        let torrent_id = match db.insert_torrent("path1", "Test", "Test", 1024, "hash1", 2).unwrap() {
             InsertTorrentResult::Inserted(id) => id,
             _ => panic!("Expected Inserted"),
         };
@@ -1145,7 +1166,7 @@ mod tests {
     fn test_delete_torrent_cascade() {
         let mut db = Database::open_in_memory().unwrap();
         
-        let torrent_id = match db.insert_torrent("path1", "Test", 1024, "hash1", 1).unwrap() {
+        let torrent_id = match db.insert_torrent("path1", "Test", "Test", 1024, "hash1", 1).unwrap() {
             InsertTorrentResult::Inserted(id) => id,
             _ => panic!("Expected Inserted"),
         };
@@ -1166,7 +1187,7 @@ mod tests {
     fn test_get_files_in_directory() {
         let mut db = Database::open_in_memory().unwrap();
         
-        let torrent_id = match db.insert_torrent("path1", "Test", 1024, "hash1", 3).unwrap() {
+        let torrent_id = match db.insert_torrent("path1", "Test", "Test", 1024, "hash1", 3).unwrap() {
             InsertTorrentResult::Inserted(id) => id,
             _ => panic!("Expected Inserted"),
         };
@@ -1190,7 +1211,7 @@ mod tests {
     fn test_get_all_files_under_directory() {
         let mut db = Database::open_in_memory().unwrap();
         
-        let torrent_id = match db.insert_torrent("path1", "Test", 1024, "hash1", 2).unwrap() {
+        let torrent_id = match db.insert_torrent("path1", "Test", "Test", 1024, "hash1", 2).unwrap() {
             InsertTorrentResult::Inserted(id) => id,
             _ => panic!("Expected Inserted"),
         };
@@ -1216,7 +1237,7 @@ mod tests {
 
         {
             let mut db = Database::open(path).unwrap();
-            db.insert_torrent("path1", "Test", 1024, "hash1", 1).unwrap();
+            db.insert_torrent("path1", "Test", "Test", 1024, "hash1", 1).unwrap();
         }
 
         {
@@ -1231,7 +1252,7 @@ mod tests {
     fn test_get_torrent_by_info_hash() {
         let mut db = Database::open_in_memory().unwrap();
         
-        db.insert_torrent("path1", "Test", 1024, "abc123", 1).unwrap();
+        db.insert_torrent("path1", "Test", "Test", 1024, "abc123", 1).unwrap();
         
         let torrent = db.get_torrent_by_info_hash("abc123").unwrap().unwrap();
         assert_eq!(torrent.source_path, "path1");
@@ -1241,8 +1262,8 @@ mod tests {
     fn test_get_all_torrents() {
         let mut db = Database::open_in_memory().unwrap();
         
-        db.insert_torrent("path1", "Torrent 1", 1024, "hash1", 1).unwrap();
-        db.insert_torrent("path2", "Torrent 2", 2048, "hash2", 1).unwrap();
+        db.insert_torrent("path1", "Torrent 1", "Torrent 1", 1024, "hash1", 1).unwrap();
+        db.insert_torrent("path2", "Torrent 2", "Torrent 2", 2048, "hash2", 1).unwrap();
         
         let torrents = db.get_all_torrents().unwrap();
         assert_eq!(torrents.len(), 2);
@@ -1252,7 +1273,7 @@ mod tests {
     fn test_nested_directory_structure() {
         let mut db = Database::open_in_memory().unwrap();
         
-        let torrent_id = match db.insert_torrent("path1", "Test", 1024, "hash1", 1).unwrap() {
+        let torrent_id = match db.insert_torrent("path1", "Test", "Test", 1024, "hash1", 1).unwrap() {
             InsertTorrentResult::Inserted(id) => id,
             _ => panic!("Expected Inserted"),
         };
@@ -1271,9 +1292,9 @@ mod tests {
     fn test_get_torrents_by_source_path() {
         let mut db = Database::open_in_memory().unwrap();
         
-        db.insert_torrent("path1", "Torrent 1", 1024, "hash1", 1).unwrap();
-        db.insert_torrent("path2", "Torrent 2", 2048, "hash2", 1).unwrap();
-        db.insert_torrent("other", "Torrent 3", 3072, "hash3", 1).unwrap();
+        db.insert_torrent("path1", "Torrent 1", "Torrent 1", 1024, "hash1", 1).unwrap();
+        db.insert_torrent("path2", "Torrent 2", "Torrent 2", 2048, "hash2", 1).unwrap();
+        db.insert_torrent("other", "Torrent 3", "Torrent 3", 3072, "hash3", 1).unwrap();
         
         let torrents = db.get_torrents_by_source_path("path1").unwrap();
         assert_eq!(torrents.len(), 1);
@@ -1287,9 +1308,9 @@ mod tests {
     fn test_get_source_path_prefixes() {
         let mut db = Database::open_in_memory().unwrap();
         
-        db.insert_torrent("a/b", "Torrent 1", 1024, "hash1", 1).unwrap();
-        db.insert_torrent("a/c", "Torrent 2", 2048, "hash2", 1).unwrap();
-        db.insert_torrent("d", "Torrent 3", 3072, "hash3", 1).unwrap();
+        db.insert_torrent("a/b", "Torrent 1", "Torrent 1", 1024, "hash1", 1).unwrap();
+        db.insert_torrent("a/c", "Torrent 2", "Torrent 2", 2048, "hash2", 1).unwrap();
+        db.insert_torrent("d", "Torrent 3", "Torrent 3", 3072, "hash3", 1).unwrap();
         
         let prefixes = db.get_source_path_prefixes("").unwrap();
         assert!(prefixes.contains(&"a".to_string()));
@@ -1304,10 +1325,10 @@ mod tests {
     fn test_metadata_directory_structure_preserved() {
         let mut db = Database::open_in_memory().unwrap();
         
-        db.insert_torrent("anime/naruto/season1", "Naruto S1", 1024, "hash1", 1).unwrap();
-        db.insert_torrent("anime/naruto/season2", "Naruto S2", 2048, "hash2", 1).unwrap();
-        db.insert_torrent("anime/onepiece", "One Piece", 3072, "hash3", 1).unwrap();
-        db.insert_torrent("movies/scifi", "SciFi Movies", 4096, "hash4", 1).unwrap();
+        db.insert_torrent("anime/naruto/season1", "Naruto S1", "Naruto S1", 1024, "hash1", 1).unwrap();
+        db.insert_torrent("anime/naruto/season2", "Naruto S2", "Naruto S2", 2048, "hash2", 1).unwrap();
+        db.insert_torrent("anime/onepiece", "One Piece", "One Piece", 3072, "hash3", 1).unwrap();
+        db.insert_torrent("movies/scifi", "SciFi Movies", "SciFi Movies", 4096, "hash4", 1).unwrap();
         
         let root = db.get_source_path_prefixes("").unwrap();
         assert_eq!(root.len(), 2);
@@ -1336,7 +1357,7 @@ mod tests {
     fn test_get_root_files() {
         let mut db = Database::open_in_memory().unwrap();
         
-        let torrent_id = match db.insert_torrent("path1", "Test", 1024, "hash1", 3).unwrap() {
+        let torrent_id = match db.insert_torrent("path1", "Test", "Test", 1024, "hash1", 3).unwrap() {
             InsertTorrentResult::Inserted(id) => id,
             _ => panic!("Expected Inserted"),
         };
@@ -1357,7 +1378,7 @@ mod tests {
     fn test_get_torrent_directory() {
         let mut db = Database::open_in_memory().unwrap();
         
-        let torrent_id = match db.insert_torrent("path1", "Test", 1024, "hash1", 1).unwrap() {
+        let torrent_id = match db.insert_torrent("path1", "Test", "Test", 1024, "hash1", 1).unwrap() {
             InsertTorrentResult::Inserted(id) => id,
             _ => panic!("Expected Inserted"),
         };
