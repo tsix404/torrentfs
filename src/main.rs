@@ -575,29 +575,27 @@ impl TorrentFs {
             EIO
         })?;
 
-        let result = db_guard.insert_torrent(
+        // Prepare files for atomic insert
+        let files: Vec<FileEntry> = metadata.files.iter().map(|f| FileEntry {
+            path: f.path.clone(),
+            size: f.size as i64,
+        }).collect();
+
+        // Use atomic insert to ensure torrent and files are inserted together
+        let result = db_guard.insert_torrent_with_files(
             source_path,
             &metadata.name,
             metadata.total_size as i64,
             &info_hash_hex,
             metadata.num_files as i64,
+            &files,
         ).map_err(|e| {
-            error!("Failed to insert torrent {}: {:?}", filename, e);
+            error!("Failed to insert torrent with files {}: {:?}", filename, e);
             EIO
         })?;
 
         match result {
             InsertTorrentResult::Inserted(torrent_id) => {
-                let files: Vec<FileEntry> = metadata.files.iter().map(|f| FileEntry {
-                    path: f.path.clone(),
-                    size: f.size as i64,
-                }).collect();
-
-                db_guard.insert_files(torrent_id, &files).map_err(|e| {
-                    error!("Failed to insert files for {}: {:?}", filename, e);
-                    EIO
-                })?;
-
                 db_guard.set_torrent_data(torrent_id, data).map_err(|e| {
                     error!("Failed to store torrent data for {}: {:?}", filename, e);
                     EIO
@@ -1083,8 +1081,8 @@ impl Filesystem for TorrentFs {
                             info!("Successfully processed torrent: {}", name);
                         }
                         Err(e) => {
+                            // Don't remove the inode - keep the file visible for debugging
                             error!("Failed to process torrent {}: {}", name, e);
-                            self.inodes.remove(&ino);
                             let mut processing = self.processing_torrents.lock().unwrap();
                             processing.remove(&source_path);
                             reply.error(e);
