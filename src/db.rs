@@ -841,6 +841,28 @@ impl Database {
         Ok(names)
     }
 
+    /// Get all metadata directories ordered by depth (parent directories first).
+    /// This ensures that when restoring inodes, parent directories are created before children.
+    pub fn get_all_metadata_dirs_ordered(&self) -> Result<Vec<(i64, Option<i64>, String, String)>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT md.id, md.parent_id, md.name, md.path
+             FROM metadata_directories md
+             LEFT JOIN metadata_directory_closure c ON md.id = c.descendant_id AND c.ancestor_id = c.descendant_id
+             ORDER BY COALESCE(c.depth, 0), md.path",
+        )?;
+        
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,           // id
+                row.get::<_, Option<i64>>(1)?,   // parent_id
+                row.get::<_, String>(2)?,        // name
+                row.get::<_, String>(3)?,        // path
+            ))
+        })?;
+        
+        rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+    }
+
     pub fn get_file_by_path(&self, torrent_id: i64, path: &str) -> Result<Option<TorrentFile>, DbError> {
         let parts: Vec<&str> = path.split('/').collect();
         if parts.is_empty() {
@@ -1402,5 +1424,53 @@ mod tests {
         let dir = db.get_torrent_directory(torrent_id, None, "dir1").unwrap();
         assert!(dir.is_some());
         assert_eq!(dir.unwrap().name, "dir1");
+    }
+
+    #[test]
+    fn test_get_all_metadata_dirs_ordered() {
+        let mut db = Database::open_in_memory().unwrap();
+        
+        // Create nested directory structure: a/b/c and a/b/d
+        db.insert_torrent("a/b/c", "Torrent 1", 1024, "hash1", 1).unwrap();
+        db.insert_torrent("a/b/d", "Torrent 2", 2048, "hash2", 1).unwrap();
+        db.insert_torrent("x/y", "Torrent 3", 3072, "hash3", 1).unwrap();
+        
+        let dirs = db.get_all_metadata_dirs_ordered().unwrap();
+        
+        // Should have 5 directories: a, a/b, a/b/c, a/b/d, x, x/y
+        // But actually: a, b (under a), c (under a/b), d (under a/b), x, y (under x)
+        // That's 6 directories
+        assert_eq!(dirs.len(), 6);
+        
+        // Build a map of path -> (index in result, parent_id)
+        let mut path_positions: std::collections::HashMap<String, (usize, Option<i64>)> = 
+            std::collections::HashMap::new();
+        for (idx, (_id, parent_id, _name, path)) in dirs.iter().enumerate() {
+            path_positions.insert(path.clone(), (idx, *parent_id));
+        }
+        
+        // Verify that "a" comes before "a/b"
+        let a_pos = path_positions.get("a").map(|(pos, _)| *pos);
+        let ab_pos = path_positions.get("a/b").map(|(pos, _)| *pos);
+        assert!(a_pos.is_some(), "a should exist");
+        assert!(ab_pos.is_some(), "a/b should exist");
+        assert!(a_pos < ab_pos, "a should come before a/b: {:?} vs {:?}", a_pos, ab_pos);
+        
+        // Verify that "a/b" comes before "a/b/c"
+        let abc_pos = path_positions.get("a/b/c").map(|(pos, _)| *pos);
+        assert!(abc_pos.is_some(), "a/b/c should exist");
+        assert!(ab_pos < abc_pos, "a/b should come before a/b/c: {:?} vs {:?}", ab_pos, abc_pos);
+        
+        // Verify that "a/b" comes before "a/b/d"
+        let abd_pos = path_positions.get("a/b/d").map(|(pos, _)| *pos);
+        assert!(abd_pos.is_some(), "a/b/d should exist");
+        assert!(ab_pos < abd_pos, "a/b should come before a/b/d: {:?} vs {:?}", ab_pos, abd_pos);
+        
+        // Verify that "x" comes before "x/y"
+        let x_pos = path_positions.get("x").map(|(pos, _)| *pos);
+        let xy_pos = path_positions.get("x/y").map(|(pos, _)| *pos);
+        assert!(x_pos.is_some(), "x should exist");
+        assert!(xy_pos.is_some(), "x/y should exist");
+        assert!(x_pos < xy_pos, "x should come before x/y: {:?} vs {:?}", x_pos, xy_pos);
     }
 }

@@ -124,7 +124,55 @@ impl TorrentFs {
     fn new_with_db_and_cache(db: Database, cache_path: PathBuf) -> Self {
         let mut fs = Self::new_with_cache_path(cache_path);
         fs.db = Some(Arc::new(Mutex::new(db)));
+        fs.restore_metadata_inodes();
         fs
+    }
+    
+    /// Restore metadata directory inodes from the database.
+    /// Directories are restored in depth order (parents before children) to ensure
+    /// correct parent inode linking.
+    fn restore_metadata_inodes(&mut self) {
+        if let Some(db) = &self.db {
+            if let Ok(db_guard) = db.lock() {
+                match db_guard.get_all_metadata_dirs_ordered() {
+                    Ok(dirs) => {
+                        let dir_count = dirs.len();
+                        // Map from database id to inode number
+                        let mut id_to_ino: HashMap<i64, u64> = HashMap::new();
+                        
+                        for (db_id, parent_db_id, name, _path) in dirs {
+                            // Determine parent inode
+                            let parent_ino = match parent_db_id {
+                                Some(pid) => {
+                                    // Look up parent inode from our map
+                                    id_to_ino.get(&pid).copied().unwrap_or(METADATA_INO)
+                                }
+                                None => METADATA_INO,
+                            };
+                            
+                            // Allocate new inode
+                            let new_ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
+                            
+                            // Store in our inodes map
+                            self.inodes.insert(new_ino, InodeData::Directory {
+                                parent: parent_ino,
+                                name: name.clone(),
+                            });
+                            
+                            // Remember the mapping for children
+                            id_to_ino.insert(db_id, new_ino);
+                            
+                            info!("Restored metadata directory '{}' with inode {} (parent={})", name, new_ino, parent_ino);
+                        }
+                        
+                        info!("Restored {} metadata directories from database", dir_count);
+                    }
+                    Err(e) => {
+                        warn!("Failed to restore metadata directories: {:?}", e);
+                    }
+                }
+            }
+        }
     }
 
     fn make_torrent_root_ino(torrent_id: i64) -> u64 {
