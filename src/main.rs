@@ -49,7 +49,7 @@ enum InodeData {
 #[derive(Clone, Debug)]
 enum DataInode {
     SourcePathDir { path: String },
-    TorrentRoot { torrent_id: i64, source_path: String, name: String },
+    TorrentRoot { torrent_id: i64, source_path: String, name: String, filename: String },
     TorrentDir { torrent_id: i64, dir_id: i64, name: String },
     TorrentFile { torrent_id: i64, file_id: i64, name: String, size: i64 },
 }
@@ -189,12 +189,13 @@ impl TorrentFs {
 
         let root_torrents = db_guard.get_torrents_by_source_path("").ok()?;
         for torrent in root_torrents {
-            if torrent.name == name {
+            if torrent.filename == name {
                 let ino = Self::make_torrent_root_ino(torrent.id);
                 return Some((ino, DataInode::TorrentRoot {
                     torrent_id: torrent.id,
                     source_path: torrent.source_path.clone(),
                     name: torrent.name.clone(),
+                    filename: torrent.filename.clone(),
                 }));
             }
         }
@@ -220,12 +221,13 @@ impl TorrentFs {
 
         let torrents = db_guard.get_torrents_by_source_path(prefix).ok()?;
         for torrent in torrents {
-            if torrent.name == name {
+            if torrent.filename == name {
                 let ino = Self::make_torrent_root_ino(torrent.id);
                 return Some((ino, DataInode::TorrentRoot {
                     torrent_id: torrent.id,
                     source_path: torrent.source_path.clone(),
                     name: torrent.name.clone(),
+                    filename: torrent.filename.clone(),
                 }));
             }
         }
@@ -320,11 +322,12 @@ impl TorrentFs {
                 let root_torrents = db_guard.get_torrents_by_source_path("").ok()?;
                 for torrent in root_torrents {
                     let torrent_ino = Self::make_torrent_root_ino(torrent.id);
-                    let name = torrent.name.clone();
+                    let name = torrent.filename.clone();
                     cache_entries.push((torrent_ino, DataInode::TorrentRoot {
                         torrent_id: torrent.id,
                         source_path: torrent.source_path.clone(),
                         name: torrent.name.clone(),
+                        filename: torrent.filename.clone(),
                     }));
                     entries.push((torrent_ino, offset_counter, fuser::FileType::Directory, name));
                     offset_counter += 1;
@@ -372,11 +375,12 @@ impl TorrentFs {
                     let direct_torrents = db_guard.get_torrents_by_source_path(&path).ok()?;
                     for torrent in direct_torrents {
                         let torrent_ino = Self::make_torrent_root_ino(torrent.id);
-                        let name = torrent.name.clone();
+                        let name = torrent.filename.clone();
                         cache_entries.push((torrent_ino, DataInode::TorrentRoot {
                             torrent_id: torrent.id,
                             source_path: torrent.source_path.clone(),
                             name: torrent.name.clone(),
+                            filename: torrent.filename.clone(),
                         }));
                         entries.push((torrent_ino, offset_counter, fuser::FileType::Directory, name));
                         offset_counter += 1;
@@ -578,6 +582,7 @@ impl TorrentFs {
         let result = db_guard.insert_torrent(
             source_path,
             &metadata.name,
+            filename,
             metadata.total_size as i64,
             &info_hash_hex,
             metadata.num_files as i64,
