@@ -141,9 +141,18 @@ impl TorrentFs {
     fn restore_metadata_inodes(&mut self, dirs: Vec<(i64, Option<i64>, String, String)>, torrents: Vec<db::Torrent>) {
         // Build a mapping from metadata_directories id to inode number
         // We use NEXT_INO to create stable inodes for each directory
+        
+        // Sort directories by path depth to ensure parents are processed before children
+        let mut sorted_dirs = dirs;
+        sorted_dirs.sort_by(|a, b| {
+            let depth_a = a.3.matches('/').count();
+            let depth_b = b.3.matches('/').count();
+            depth_a.cmp(&depth_b)
+        });
+        
         let mut dir_id_to_ino: HashMap<i64, u64> = HashMap::new();
 
-        for (db_id, parent_db_id, name, path) in &dirs {
+        for (db_id, parent_db_id, name, path) in &sorted_dirs {
             let parent_ino = if let Some(pid) = parent_db_id {
                 // Parent is another metadata subdirectory
                 *dir_id_to_ino.get(pid).unwrap_or(&METADATA_INO)
@@ -177,7 +186,12 @@ impl TorrentFs {
             };
 
             let new_ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
-            let filename = format!("{}.torrent", torrent.name);
+            // Avoid double extension if torrent.name already ends with .torrent
+            let filename = if torrent.name.ends_with(".torrent") {
+                torrent.name.clone()
+            } else {
+                format!("{}.torrent", torrent.name)
+            };
             self.inodes.insert(new_ino, InodeData::File {
                 parent: parent_ino,
                 name: filename,
