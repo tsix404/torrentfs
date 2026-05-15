@@ -861,6 +861,28 @@ impl Database {
         Ok(names)
     }
 
+    /// Get all metadata directories ordered by depth (parent directories first).
+    /// This ensures that when restoring inodes, parent directories are created before children.
+    pub fn get_all_metadata_dirs_ordered(&self) -> Result<Vec<(i64, Option<i64>, String, String)>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT md.id, md.parent_id, md.name, md.path
+             FROM metadata_directories md
+             LEFT JOIN metadata_directory_closure c ON md.id = c.descendant_id AND c.ancestor_id = c.descendant_id
+             ORDER BY COALESCE(c.depth, 0), md.path",
+        )?;
+        
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,           // id
+                row.get::<_, Option<i64>>(1)?,   // parent_id
+                row.get::<_, String>(2)?,        // name
+                row.get::<_, String>(3)?,        // path
+            ))
+        })?;
+        
+        rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+    }
+
     pub fn get_file_by_path(&self, torrent_id: i64, path: &str) -> Result<Option<TorrentFile>, DbError> {
         let parts: Vec<&str> = path.split('/').collect();
         if parts.is_empty() {
@@ -1146,7 +1168,7 @@ mod tests {
     fn test_file_path_field_populated() {
         let mut db = Database::open_in_memory().unwrap();
         
-        let torrent_id = match db.insert_torrent("path1", "Test", 1024, "hash1", 3).unwrap() {
+        let torrent_id = match db.insert_torrent("path1", "Test", "Test", 1024, "hash1", 3).unwrap() {
             InsertTorrentResult::Inserted(id) => id,
             _ => panic!("Expected Inserted"),
         };
