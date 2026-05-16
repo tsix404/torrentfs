@@ -492,6 +492,110 @@ impl Database {
         Ok(())
     }
 
+    /// Insert torrent and its files atomically in a single transaction.
+    /// This prevents orphaned torrent records without file entries.
+    pub fn insert_torrent_with_files(
+        &mut self,
+        source_path: &str,
+        name: &str,
+        total_size: i64,
+        info_hash: &str,
+        file_count: i64,
+        files: &[FileEntry],
+    ) -> Result<InsertTorrentResult, DbError> {
+        let tx = self.conn.transaction()?;
+
+        // Check for existing torrent with same info_hash and source_path
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM torrents WHERE info_hash = ? AND source_path = ?",
+                params![info_hash, source_path],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+
+        if let Some(id) = existing {
+            return Ok(InsertTorrentResult::Duplicate(id));
+        }
+
+        // Insert torrent record
+        tx.execute(
+            "INSERT INTO torrents (source_path, name, total_size, info_hash, file_count, status) VALUES (?, ?, ?, ?, ?, 'pending')",
+            params![source_path, name, total_size, info_hash, file_count],
+        )?;
+        let torrent_id = tx.last_insert_rowid();
+
+        // Insert files in the same transaction
+        let mut dir_cache: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+
+        for file_entry in files {
+            let path_parts: Vec<&str> = file_entry.path.split('/').collect();
+            if path_parts.is_empty() {
+                continue;
+            }
+
+            let mut current_parent_id: Option<i64> = None;
+
+            for (i, part) in path_parts.iter().enumerate() {
+                let is_file = i == path_parts.len() - 1;
+                let current_path = path_parts[..=i].join("/");
+
+                if is_file {
+                    tx.execute(
+                        "INSERT INTO torrent_files (torrent_id, directory_id, name, size) VALUES (?, ?, ?, ?)",
+                        params![torrent_id, current_parent_id, part, file_entry.size],
+                    )?;
+                } else {
+                    if let Some(&cached_id) = dir_cache.get(&current_path) {
+                        current_parent_id = Some(cached_id);
+                        continue;
+                    }
+
+                    let existing_id: Option<i64> = tx
+                        .query_row(
+                            "SELECT id FROM torrent_directories WHERE torrent_id = ? AND parent_id IS ? AND name = ?",
+                            params![torrent_id, current_parent_id, part],
+                            |row| row.get(0),
+                        )
+                        .optional()?
+                        .flatten();
+
+                    if let Some(id) = existing_id {
+                        dir_cache.insert(current_path.clone(), id);
+                        current_parent_id = Some(id);
+                        continue;
+                    }
+
+                    tx.execute(
+                        "INSERT INTO torrent_directories (torrent_id, parent_id, name) VALUES (?, ?, ?)",
+                        params![torrent_id, current_parent_id, part],
+                    )?;
+                    let dir_id = tx.last_insert_rowid();
+
+                    tx.execute(
+                        "INSERT INTO directory_closure (ancestor_id, descendant_id, depth) VALUES (?, ?, 0)",
+                        params![dir_id, dir_id],
+                    )?;
+
+                    if let Some(parent_id) = current_parent_id {
+                        tx.execute(
+                            "INSERT INTO directory_closure (ancestor_id, descendant_id, depth)
+                             SELECT ancestor_id, ?, depth + 1 FROM directory_closure WHERE descendant_id = ?",
+                            params![dir_id, parent_id],
+                        )?;
+                    }
+
+                    dir_cache.insert(current_path.clone(), dir_id);
+                    current_parent_id = Some(dir_id);
+                }
+            }
+        }
+
+        tx.commit()?;
+        Ok(InsertTorrentResult::Inserted(torrent_id))
+    }
+
     pub fn get_torrent_by_source_path(&self, source_path: &str) -> Result<Option<Torrent>, DbError> {
         let result = self
             .conn
@@ -827,6 +931,23 @@ impl Database {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(torrents)
+    }
+
+    /// Get all metadata directories with their id, parent_id, name, and path.
+    /// Used to restore inode cache on filesystem startup.
+    pub fn get_all_metadata_directories(&self) -> Result<Vec<(i64, Option<i64>, String, String)>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, parent_id, name, path FROM metadata_directories ORDER BY path",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+            ))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn get_source_path_prefixes(&self, prefix: &str) -> Result<Vec<String>, DbError> {
@@ -1446,5 +1567,75 @@ mod tests {
         let dir = db.get_torrent_directory(torrent_id, None, "dir1").unwrap();
         assert!(dir.is_some());
         assert_eq!(dir.unwrap().name, "dir1");
+    }
+
+    #[test]
+    fn test_insert_torrent_with_files_atomic() {
+        let mut db = Database::open_in_memory().unwrap();
+        
+        let files = vec![
+            FileEntry { path: "dir1/file1.txt".to_string(), size: 100 },
+            FileEntry { path: "dir1/file2.txt".to_string(), size: 200 },
+            FileEntry { path: "dir2/file3.txt".to_string(), size: 300 },
+        ];
+
+        // Insert torrent with files atomically
+        let result = db.insert_torrent_with_files(
+            "path1",
+            "Test Torrent",
+            600,
+            "hash1",
+            3,
+            &files,
+        ).unwrap();
+        
+        let torrent_id = match result {
+            InsertTorrentResult::Inserted(id) => id,
+            _ => panic!("Expected Inserted"),
+        };
+
+        // Verify torrent was inserted
+        let torrent = db.get_torrent_by_source_path("path1").unwrap().unwrap();
+        assert_eq!(torrent.name, "Test Torrent");
+        assert_eq!(torrent.total_size, 600);
+
+        // Verify files were inserted
+        let db_files = db.get_files_by_torrent_id(torrent_id).unwrap();
+        assert_eq!(db_files.len(), 3);
+
+        // Verify directories were created
+        let root_dirs = db.get_torrent_directories_by_parent(None, torrent_id).unwrap();
+        assert_eq!(root_dirs.len(), 2);
+    }
+
+    #[test]
+    fn test_insert_torrent_with_files_duplicate() {
+        let mut db = Database::open_in_memory().unwrap();
+        
+        let files = vec![
+            FileEntry { path: "file1.txt".to_string(), size: 100 },
+        ];
+
+        // First insert
+        let result = db.insert_torrent_with_files(
+            "path1",
+            "Test Torrent",
+            100,
+            "hash1",
+            1,
+            &files,
+        ).unwrap();
+        assert!(matches!(result, InsertTorrentResult::Inserted(_)));
+
+        // Second insert with same info_hash and source_path should return Duplicate
+        let result = db.insert_torrent_with_files(
+            "path1",
+            "Test Torrent 2",
+            200,
+            "hash1",
+            1,
+            &files,
+        ).unwrap();
+        assert!(matches!(result, InsertTorrentResult::Duplicate(_)));
     }
 }
