@@ -129,8 +129,8 @@ impl TorrentFs {
     }
     
     /// Restore metadata directory inodes from the database.
-    /// Directories are restored in depth order (parents before children) to ensure
-    /// correct parent inode linking.
+    /// Directories are restored in path depth order (parents before children) to ensure
+    /// correct parent inode linking. Depth is computed from the path.
     fn restore_metadata_inodes(&mut self) {
         if let Some(db) = &self.db {
             if let Ok(db_guard) = db.lock() {
@@ -140,12 +140,24 @@ impl TorrentFs {
                         // Map from database id to inode number
                         let mut id_to_ino: HashMap<i64, u64> = HashMap::new();
                         
-                        for (db_id, parent_db_id, name, _path) in dirs {
+                        for (db_id, parent_db_id, name, path) in dirs {
                             // Determine parent inode
                             let parent_ino = match parent_db_id {
                                 Some(pid) => {
                                     // Look up parent inode from our map
-                                    id_to_ino.get(&pid).copied().unwrap_or(METADATA_INO)
+                                    match id_to_ino.get(&pid) {
+                                        Some(ino) => *ino,
+                                        None => {
+                                            // This should not happen if ordering is correct
+                                            // Log a warning and skip this directory to avoid incorrect linking
+                                            warn!(
+                                                "Parent directory (db_id={}) not found for '{}', skipping. \
+                                                 This indicates ordering issue or orphaned directory.",
+                                                pid, path
+                                            );
+                                            continue;
+                                        }
+                                    }
                                 }
                                 None => METADATA_INO,
                             };

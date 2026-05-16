@@ -841,14 +841,14 @@ impl Database {
         Ok(names)
     }
 
-    /// Get all metadata directories ordered by depth (parent directories first).
+    /// Get all metadata directories ordered by path depth (parent directories first).
+    /// Depth is computed from the path by counting path separators.
     /// This ensures that when restoring inodes, parent directories are created before children.
     pub fn get_all_metadata_dirs_ordered(&self) -> Result<Vec<(i64, Option<i64>, String, String)>, DbError> {
         let mut stmt = self.conn.prepare(
             "SELECT md.id, md.parent_id, md.name, md.path
              FROM metadata_directories md
-             LEFT JOIN metadata_directory_closure c ON md.id = c.descendant_id AND c.ancestor_id = c.descendant_id
-             ORDER BY COALESCE(c.depth, 0), md.path",
+             ORDER BY (LENGTH(md.path) - LENGTH(REPLACE(md.path, '/', ''))), md.path",
         )?;
         
         let rows = stmt.query_map([], |row| {
