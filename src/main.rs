@@ -642,7 +642,6 @@ impl TorrentFs {
         let result = db_guard.insert_torrent_with_files(
             source_path,
             &metadata.name,
-            filename,
             metadata.total_size as i64,
             &info_hash_hex,
             metadata.num_files as i64,
