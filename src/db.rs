@@ -1267,7 +1267,7 @@ mod tests {
     fn test_file_path_field_populated() {
         let mut db = Database::open_in_memory().unwrap();
         
-        let torrent_id = match db.insert_torrent("path1", "Test", 1024, "hash1", 3).unwrap() {
+        let torrent_id = match db.insert_torrent("path1", "Test", "Test.torrent", 1024, "hash1", 3).unwrap() {
             InsertTorrentResult::Inserted(id) => id,
             _ => panic!("Expected Inserted"),
         };
