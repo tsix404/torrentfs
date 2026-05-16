@@ -867,8 +867,9 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT md.id, md.parent_id, md.name, md.path
              FROM metadata_directories md
-             LEFT JOIN metadata_directory_closure c ON md.id = c.descendant_id AND c.ancestor_id = c.descendant_id
-             ORDER BY COALESCE(c.depth, 0), md.path",
+             LEFT JOIN metadata_directory_closure c ON md.id = c.descendant_id
+             GROUP BY md.id
+             ORDER BY MAX(c.depth), md.path",
         )?;
         
         let rows = stmt.query_map([], |row| {
