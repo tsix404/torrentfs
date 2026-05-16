@@ -123,16 +123,8 @@ impl TorrentFs {
     
     fn new_with_db_and_cache(db: Database, cache_path: PathBuf) -> Self {
         let mut fs = Self::new_with_cache_path(cache_path);
-        
-        // First, collect all data we need from the database
-        let (dirs, torrents) = {
-            let dirs = db.get_all_metadata_directories().unwrap_or_default();
-            let torrents = db.get_all_torrents().unwrap_or_default();
-            (dirs, torrents)
-        };
-        
         fs.db = Some(Arc::new(Mutex::new(db)));
-        fs.restore_metadata_inodes(dirs, torrents);
+        fs.restore_metadata_inodes();
         fs
     }
     
@@ -140,76 +132,100 @@ impl TorrentFs {
     /// Directories are restored in depth order (parents before children) to ensure
     /// correct parent inode linking. Torrent files use the original filename
     /// from the database (torrent.filename) instead of the internal torrent name.
-    
-    /// Find an inode number by its full path (e.g., "metadata/os/linux")
-        None
+    fn restore_metadata_inodes(&mut self) {
+        if let Some(db) = &self.db {
+            if let Ok(db_guard) = db.lock() {
+                // First, restore metadata directories
+                match db_guard.get_all_metadata_dirs_ordered() {
+                    Ok(dirs) => {
+                        let dir_count = dirs.len();
+                        // Map from database id to inode number
+                        let mut id_to_ino: HashMap<i64, u64> = HashMap::new();
+                        
+                        for (db_id, parent_db_id, name, _path) in dirs {
+                            // Determine parent inode
+                            let parent_ino = match parent_db_id {
+                                Some(pid) => {
+                                    // Look up parent inode from our map
+                                    id_to_ino.get(&pid).copied().unwrap_or(METADATA_INO)
+                                }
+                                None => METADATA_INO,
+                            };
+                            
+                            // Allocate new inode
+                            let new_ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
+                            
+                            // Store in our inodes map
+                            self.inodes.insert(new_ino, InodeData::Directory {
+                                parent: parent_ino,
+                                name: name.clone(),
+                            });
+                            
+                            // Remember the mapping for children
+                            id_to_ino.insert(db_id, new_ino);
+                            
+                            info!("Restored metadata directory '{}' with inode {} (parent={})", name, new_ino, parent_ino);
+                        }
+                        
+                        info!("Restored {} metadata directories from database", dir_count);
+                    }
+                    Err(e) => {
+                        warn!("Failed to restore metadata directories: {:?}", e);
+                    }
+                }
+                
+                // Then, restore torrent file inodes using the original filename
+                match db_guard.get_all_torrents() {
+                    Ok(torrents) => {
+                        let mut torrent_count = 0;
+                        for torrent in torrents {
+                            // Find the parent directory inode for this torrent's source_path
+                            let parent_ino = if torrent.source_path.is_empty() {
+                                METADATA_INO
+                            } else {
+                                // Look up the source_path directory in our restored inodes
+                                let full_source = format!("metadata/{}", torrent.source_path);
+                                self.find_ino_by_full_path(&full_source).unwrap_or(METADATA_INO)
+                            };
+                            
+                            // Use the original filename from the database, not the torrent name
+                            let filename = torrent.filename.clone();
+                            
+                            // Get the torrent data from the database
+                            let data = torrent.torrent_data.clone().unwrap_or_default();
+                            
+                            let new_ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
+                            self.inodes.insert(new_ino, InodeData::File {
+                                parent: parent_ino,
+                                name: filename.clone(),
+                                data,
+                            });
+                            
+                            torrent_count += 1;
+                            info!("Restored torrent file '{}' with inode {} (parent={})", filename, new_ino, parent_ino);
+                        }
+                        info!("Restored {} torrent files from database", torrent_count);
+                    }
+                    Err(e) => {
+                        warn!("Failed to restore torrent files: {:?}", e);
+                    }
+                }
+            }
+        }
     }
 
-    /// Restore metadata/ subdirectory inodes from the database on startup.
-    /// This is critical for extract_source_path() to work correctly after remount.
-    fn restore_metadata_inodes(&mut self, dirs: Vec<(i64, Option<i64>, String, String)>, torrents: Vec<db::Torrent>) {
-        // Build a mapping from metadata_directories id to inode number
-        // We use NEXT_INO to create stable inodes for each directory
-        
-        // Sort directories by path depth to ensure parents are processed before children
-        let mut sorted_dirs = dirs;
-        sorted_dirs.sort_by(|a, b| {
-            let depth_a = a.3.matches('/').count();
-            let depth_b = b.3.matches('/').count();
-            depth_a.cmp(&depth_b)
-        });
-        
-        let mut dir_id_to_ino: HashMap<i64, u64> = HashMap::new();
-
-        for (db_id, parent_db_id, name, path) in &sorted_dirs {
-            let parent_ino = if let Some(pid) = parent_db_id {
-                // Parent is another metadata subdirectory
-                *dir_id_to_ino.get(pid).unwrap_or(&METADATA_INO)
-            } else {
-                // Parent is metadata/ root
-                METADATA_INO
-            };
-
-            let new_ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
-            dir_id_to_ino.insert(*db_id, new_ino);
-
-            self.inodes.insert(new_ino, InodeData::Directory {
-                parent: parent_ino,
-                name: name.clone(),
-            });
-
-            info!("Restored metadata inode {} for path '{}' (db_id={}, parent_ino={})", 
-                  new_ino, path, db_id, parent_ino);
-        }
-
-        // Also restore torrent file inodes from the database
-        for torrent in &torrents {
-            // Find the parent directory inode for this torrent's source_path
-            let parent_ino = if torrent.source_path.is_empty() {
-                METADATA_INO
-            } else {
-                // Look up the source_path directory in our restored inodes
-                // We need to find the inode whose full_path is "metadata/<source_path>"
-                let full_source = format!("metadata/{}", torrent.source_path);
-                self.find_ino_by_full_path(&full_source).unwrap_or(METADATA_INO)
-            };
-
-            let new_ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
-            // Avoid double extension if torrent.name already ends with .torrent
-            let filename = if torrent.name.ends_with(".torrent") {
-                torrent.name.clone()
-            } else {
-                format!("{}.torrent", torrent.name)
-            };
-            self.inodes.insert(new_ino, InodeData::File {
-                parent: parent_ino,
-                name: filename,
-                data: torrent.torrent_data.clone().unwrap_or_default(),
-            });
-        }
-    }
-
     /// Find an inode number by its full path (e.g., "metadata/os/linux")
+    fn find_ino_by_full_path(&self, target_path: &str) -> Option<u64> {
+        for (ino, data) in &self.inodes {
+            let full_path = match data {
+                InodeData::Directory { .. } | InodeData::File { .. } => {
+                    self.get_full_path(*ino)
+                }
+            };
+            if full_path == target_path {
+                return Some(*ino);
+            }
+        }
         None
     }
 
@@ -640,7 +656,6 @@ impl TorrentFs {
         let result = db_guard.insert_torrent_with_files(
             source_path,
             &metadata.name,
-            filename,
             metadata.total_size as i64,
             &info_hash_hex,
             metadata.num_files as i64,
