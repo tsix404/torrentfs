@@ -254,8 +254,8 @@ impl TorrentFs {
             DataInode::SourcePathDir { path } => {
                 self.resolve_source_path_dir_lookup(path, name)
             }
-            DataInode::TorrentRoot { torrent_id, name: torrent_name, .. } => {
-                self.resolve_torrent_root_lookup(*torrent_id, torrent_name, name)
+            DataInode::TorrentRoot { torrent_id, .. } => {
+                self.resolve_torrent_root_lookup(*torrent_id, name)
             }
             DataInode::TorrentDir { torrent_id, dir_id, .. } => {
                 self.resolve_torrent_dir_lookup(*torrent_id, Some(*dir_id), name)
@@ -323,23 +323,8 @@ impl TorrentFs {
         None
     }
 
-    fn resolve_torrent_root_lookup(&self, torrent_id: i64, torrent_name: &str, name: &str) -> Option<(u64, DataInode)> {
-        let db = self.get_db().ok()?;
-        let db_guard = db.lock().ok()?;
-
-        let root_dirs = db_guard.get_torrent_directories_by_parent(None, torrent_id).ok()?;
-        let root_files = db_guard.get_root_files(torrent_id).ok()?;
-
-        let should_flatten = root_dirs.len() == 1 
-            && root_files.is_empty() 
-            && root_dirs[0].name == torrent_name;
-
-        if should_flatten {
-            let single_dir_id = root_dirs[0].id;
-            self.resolve_torrent_dir_lookup(torrent_id, Some(single_dir_id), name)
-        } else {
-            self.resolve_torrent_dir_lookup(torrent_id, None, name)
-        }
+    fn resolve_torrent_root_lookup(&self, torrent_id: i64, name: &str) -> Option<(u64, DataInode)> {
+        self.resolve_torrent_dir_lookup(torrent_id, None, name)
     }
 
     fn resolve_torrent_dir_lookup(&self, torrent_id: i64, parent_dir_id: Option<i64>, name: &str) -> Option<(u64, DataInode)> {
@@ -492,7 +477,7 @@ impl TorrentFs {
                     self.data_inodes.insert(cache_ino, cache_inode);
                 }
             }
-            DataInode::TorrentRoot { torrent_id, source_path, name: torrent_name, .. } => {
+            DataInode::TorrentRoot { torrent_id, source_path, .. } => {
                 entries.push((ino, 1, fuser::FileType::Directory, ".".to_string()));
                 
                 let parent_ino = if source_path.is_empty() {
@@ -523,61 +508,28 @@ impl TorrentFs {
                     let mut offset_counter = 3i64;
                     
                     let root_dirs = db_guard.get_torrent_directories_by_parent(None, torrent_id).ok()?;
+                    for dir in root_dirs {
+                        let dir_ino = Self::make_torrent_dir_ino(dir.id);
+                        cache_entries.push((dir_ino, DataInode::TorrentDir {
+                            torrent_id,
+                            dir_id: dir.id,
+                            name: dir.name.clone(),
+                        }));
+                        entries.push((dir_ino, offset_counter, fuser::FileType::Directory, dir.name));
+                        offset_counter += 1;
+                    }
+                    
                     let root_files = db_guard.get_root_files(torrent_id).ok()?;
-                    
-                    let should_flatten = root_dirs.len() == 1 
-                        && root_files.is_empty() 
-                        && root_dirs[0].name == torrent_name;
-                    
-                    if should_flatten {
-                        let single_dir = &root_dirs[0];
-                        let sub_dirs = db_guard.get_torrent_directories_by_parent(Some(single_dir.id), torrent_id).ok()?;
-                        for dir in sub_dirs {
-                            let dir_ino = Self::make_torrent_dir_ino(dir.id);
-                            cache_entries.push((dir_ino, DataInode::TorrentDir {
-                                torrent_id,
-                                dir_id: dir.id,
-                                name: dir.name.clone(),
-                            }));
-                            entries.push((dir_ino, offset_counter, fuser::FileType::Directory, dir.name));
-                            offset_counter += 1;
-                        }
-                        
-                        let dir_files = db_guard.get_files_in_directory(single_dir.id).ok()?;
-                        for file in dir_files {
-                            let file_ino = Self::make_torrent_file_ino(file.id);
-                            cache_entries.push((file_ino, DataInode::TorrentFile {
-                                torrent_id,
-                                file_id: file.id,
-                                name: file.name.clone(),
-                                size: file.size,
-                            }));
-                            entries.push((file_ino, offset_counter, fuser::FileType::RegularFile, file.name));
-                            offset_counter += 1;
-                        }
-                    } else {
-                        for dir in root_dirs {
-                            let dir_ino = Self::make_torrent_dir_ino(dir.id);
-                            cache_entries.push((dir_ino, DataInode::TorrentDir {
-                                torrent_id,
-                                dir_id: dir.id,
-                                name: dir.name.clone(),
-                            }));
-                            entries.push((dir_ino, offset_counter, fuser::FileType::Directory, dir.name));
-                            offset_counter += 1;
-                        }
-                        
-                        for file in root_files {
-                            let file_ino = Self::make_torrent_file_ino(file.id);
-                            cache_entries.push((file_ino, DataInode::TorrentFile {
-                                torrent_id,
-                                file_id: file.id,
-                                name: file.name.clone(),
-                                size: file.size,
-                            }));
-                            entries.push((file_ino, offset_counter, fuser::FileType::RegularFile, file.name));
-                            offset_counter += 1;
-                        }
+                    for file in root_files {
+                        let file_ino = Self::make_torrent_file_ino(file.id);
+                        cache_entries.push((file_ino, DataInode::TorrentFile {
+                            torrent_id,
+                            file_id: file.id,
+                            name: file.name.clone(),
+                            size: file.size,
+                        }));
+                        entries.push((file_ino, offset_counter, fuser::FileType::RegularFile, file.name));
+                        offset_counter += 1;
                     }
                 }
                 
