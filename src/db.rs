@@ -602,6 +602,19 @@ impl Database {
         }
 
         tx.commit()?;
+
+        // Ensure metadata directories exist for the source_path
+        // This is needed for get_source_path_prefixes to work correctly after remount
+        if !source_path.is_empty() {
+            if let Err(e) = self.ensure_metadata_directories(source_path) {
+                tracing::warn!(
+                    "Failed to create metadata directories for {}: {}",
+                    source_path,
+                    e
+                );
+            }
+        }
+
         Ok(InsertTorrentResult::Inserted(torrent_id))
     }
 
