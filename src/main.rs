@@ -1845,7 +1845,10 @@ impl Filesystem for TorrentFs {
 
         // Update the database if available
         if let Some(db) = &self.db {
-            let source_path = self.extract_source_path(newparent);
+            // Use the source parent to extract the original source_path for finding the torrent
+            let old_source_path = self.extract_source_path(parent);
+            // Use the new parent to get the new source_path for the updated location
+            let new_source_path = self.extract_source_path(newparent);
 
             // Extract the new name without .torrent extension for the database
             let new_torrent_name = newname_str.strip_suffix(".torrent").unwrap_or(&newname_str);
@@ -1853,20 +1856,24 @@ impl Filesystem for TorrentFs {
             match db.lock() {
                 Ok(mut db_guard) => {
                     // Find the torrent by old filename and source_path
-                    match db_guard.get_torrent_by_filename_and_source_path(&old_name, &source_path)
+                    match db_guard
+                        .get_torrent_by_filename_and_source_path(&old_name, &old_source_path)
                     {
                         Ok(Some(torrent)) => {
-                            // Update the torrent name and filename in the database
-                            if let Err(e) =
-                                db_guard.rename_torrent(torrent.id, new_torrent_name, &newname_str)
-                            {
+                            // Update the torrent name, filename, and source_path in the database
+                            if let Err(e) = db_guard.rename_torrent(
+                                torrent.id,
+                                new_torrent_name,
+                                &newname_str,
+                                &new_source_path,
+                            ) {
                                 error!("Failed to rename torrent in database: {:?}", e);
                                 reply.error(EIO);
                                 return;
                             }
                             info!(
-                                "Renamed torrent '{}' to '{}' (id={}, source_path='{}')",
-                                old_name, newname_str, torrent.id, source_path
+                                "Renamed torrent '{}' to '{}' (id={}, source_path: '{}' -> '{}')",
+                                old_name, newname_str, torrent.id, old_source_path, new_source_path
                             );
                         }
                         Ok(None) => {
