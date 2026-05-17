@@ -1161,6 +1161,57 @@ impl Database {
 
         Ok(result)
     }
+
+    /// Rename a torrent by updating its name, filename, and source_path fields.
+    /// This is used when a torrent file is renamed in the metadata/ directory.
+    /// The source_path is updated to reflect the new location when moving across directories.
+    pub fn rename_torrent(
+        &mut self,
+        torrent_id: i64,
+        new_name: &str,
+        new_filename: &str,
+        new_source_path: &str,
+    ) -> Result<(), DbError> {
+        self.conn.execute(
+            "UPDATE torrents SET name = ?, filename = ?, source_path = ? WHERE id = ?",
+            params![new_name, new_filename, new_source_path, torrent_id],
+        )?;
+        Ok(())
+    }
+
+    /// Get a torrent by its filename and source_path.
+    /// Used to find a torrent when renaming its file.
+    pub fn get_torrent_by_filename_and_source_path(
+        &self,
+        filename: &str,
+        source_path: &str,
+    ) -> Result<Option<Torrent>, DbError> {
+        let result = self
+            .conn
+            .query_row(
+                "SELECT id, source_path, name, filename, total_size, info_hash, file_count, status, torrent_data, resume_data, created_at
+                 FROM torrents WHERE filename = ? AND source_path = ?",
+                params![filename, source_path],
+                |row| {
+                    Ok(Torrent {
+                        id: row.get(0)?,
+                        source_path: row.get(1)?,
+                        name: row.get(2)?,
+                        filename: row.get(3)?,
+                        total_size: row.get(4)?,
+                        info_hash: row.get(5)?,
+                        file_count: row.get(6)?,
+                        status: row.get::<_, String>(7)?.into(),
+                        torrent_data: row.get(8)?,
+                        resume_data: row.get(9)?,
+                        created_at: row.get(10)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
@@ -1845,5 +1896,91 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(result, InsertTorrentResult::Duplicate(_)));
+    }
+
+    #[test]
+    fn test_rename_torrent() {
+        let mut db = Database::open_in_memory().unwrap();
+
+        // Insert a torrent
+        let torrent_id = match db
+            .insert_torrent("path1", "Old Name", "Old Name.torrent", 1024, "hash1", 1)
+            .unwrap()
+        {
+            InsertTorrentResult::Inserted(id) => id,
+            _ => panic!("Expected Inserted"),
+        };
+
+        // Verify initial state
+        let torrent = db
+            .get_torrent_by_filename_and_source_path("Old Name.torrent", "path1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(torrent.name, "Old Name");
+        assert_eq!(torrent.filename, "Old Name.torrent");
+
+        // Rename the torrent
+        db.rename_torrent(torrent_id, "New Name", "New Name.torrent", "path1")
+            .unwrap();
+
+        // Verify the rename
+        let torrent = db.get_torrent_by_id(torrent_id).unwrap().unwrap();
+        assert_eq!(torrent.name, "New Name");
+        assert_eq!(torrent.filename, "New Name.torrent");
+
+        // Old filename lookup should return None
+        let old_lookup = db
+            .get_torrent_by_filename_and_source_path("Old Name.torrent", "path1")
+            .unwrap();
+        assert!(old_lookup.is_none());
+
+        // New filename lookup should work
+        let new_lookup = db
+            .get_torrent_by_filename_and_source_path("New Name.torrent", "path1")
+            .unwrap();
+        assert!(new_lookup.is_some());
+    }
+
+    #[test]
+    fn test_rename_torrent_cross_directory() {
+        let mut db = Database::open_in_memory().unwrap();
+
+        // Insert a torrent in "path1"
+        let torrent_id = match db
+            .insert_torrent("path1", "MyTorrent", "MyTorrent.torrent", 1024, "hash1", 1)
+            .unwrap()
+        {
+            InsertTorrentResult::Inserted(id) => id,
+            _ => panic!("Expected Inserted"),
+        };
+
+        // Verify initial state
+        let torrent = db
+            .get_torrent_by_filename_and_source_path("MyTorrent.torrent", "path1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(torrent.source_path, "path1");
+
+        // Rename and move to "path2" (cross-directory rename)
+        db.rename_torrent(torrent_id, "Renamed", "Renamed.torrent", "path2")
+            .unwrap();
+
+        // Verify the rename and source_path update
+        let torrent = db.get_torrent_by_id(torrent_id).unwrap().unwrap();
+        assert_eq!(torrent.name, "Renamed");
+        assert_eq!(torrent.filename, "Renamed.torrent");
+        assert_eq!(torrent.source_path, "path2");
+
+        // Old location lookup should return None
+        let old_lookup = db
+            .get_torrent_by_filename_and_source_path("MyTorrent.torrent", "path1")
+            .unwrap();
+        assert!(old_lookup.is_none());
+
+        // New location lookup should work
+        let new_lookup = db
+            .get_torrent_by_filename_and_source_path("Renamed.torrent", "path2")
+            .unwrap();
+        assert!(new_lookup.is_some());
     }
 }
