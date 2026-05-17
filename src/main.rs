@@ -1345,6 +1345,46 @@ impl Filesystem for TorrentFs {
         }
     }
 
+    fn flush(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        _lock_owner: u64,
+        reply: fuser::ReplyEmpty,
+    ) {
+        // Validate torrent data synchronously during flush.
+        // This is called during close() and its error propagates to userspace,
+        // unlike release() which is asynchronous.
+        if let Some(InodeData::File { data, name, .. }) = self.inodes.get(&ino) {
+            if name.ends_with(".torrent") && !data.is_empty() {
+                // Check size limit
+                if data.len() > MAX_TORRENT_SIZE {
+                    warn!(
+                        "Torrent file {} exceeds size limit ({} bytes)",
+                        name,
+                        data.len()
+                    );
+                    reply.error(EFBIG);
+                    return;
+                }
+
+                // Validate torrent by parsing it
+                match TorrentInfo::from_bytes(data.clone()) {
+                    Ok(_) => {
+                        info!("Torrent {} validated successfully", name);
+                    }
+                    Err(e) => {
+                        warn!("Invalid torrent file {}: {:?}", name, e);
+                        reply.error(EINVAL);
+                        return;
+                    }
+                }
+            }
+        }
+        reply.ok();
+    }
+
     fn release(
         &mut self,
         _req: &Request,
@@ -1358,14 +1398,19 @@ impl Filesystem for TorrentFs {
         if let Some(ino) = self.open_files.remove(&fh) {
             if let Some(InodeData::File { data, name, parent }) = self.inodes.get(&ino).cloned() {
                 if name.ends_with(".torrent") && !data.is_empty() {
+                    // Size check is already done in flush, but keep for safety
                     if data.len() > MAX_TORRENT_SIZE {
-                        warn!(
-                            "Torrent file {} exceeds size limit ({} bytes)",
-                            name,
-                            data.len()
-                        );
                         self.inodes.remove(&ino);
-                        reply.error(EFBIG);
+                        reply.ok();
+                        return;
+                    }
+
+                    // Validate torrent - if invalid, clean up and exit
+                    // (flush already returned EINVAL to userspace)
+                    if TorrentInfo::from_bytes(data.clone()).is_err() {
+                        warn!("Torrent {} invalid, removing inode", name);
+                        self.inodes.remove(&ino);
+                        reply.ok();
                         return;
                     }
 
@@ -1386,12 +1431,11 @@ impl Filesystem for TorrentFs {
                             info!("Successfully processed torrent: {}", name);
                         }
                         Err(e) => {
-                            // Don't remove the inode - keep the file visible for debugging
+                            // DB insert failed - keep inode for debugging
                             error!("Failed to process torrent {}: {}", name, e);
                             let mut processing = self.processing_torrents.lock().unwrap();
                             processing.remove(&source_path);
-                            reply.error(e);
-                            return;
+                            // Don't return error - flush already succeeded
                         }
                     }
 
