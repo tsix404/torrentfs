@@ -602,6 +602,18 @@ impl Database {
         }
 
         tx.commit()?;
+
+        // Ensure metadata directories are created for the source_path
+        if !source_path.is_empty() {
+            if let Err(e) = self.ensure_metadata_directories(source_path) {
+                tracing::warn!(
+                    "Failed to create metadata directories for {}: {}",
+                    source_path,
+                    e
+                );
+            }
+        }
+
         Ok(InsertTorrentResult::Inserted(torrent_id))
     }
 
@@ -1832,5 +1844,44 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(result, InsertTorrentResult::Duplicate(_)));
+    }
+
+    #[test]
+    fn test_insert_torrent_with_files_creates_metadata_directories() {
+        let mut db = Database::open_in_memory().unwrap();
+
+        let files = vec![FileEntry {
+            path: "file.txt".to_string(),
+            size: 100,
+        }];
+
+        let result = db
+            .insert_torrent_with_files(
+                "os/linux",
+                "Debian",
+                "debian.torrent",
+                1024,
+                "hash1",
+                1,
+                &files,
+            )
+            .unwrap();
+
+        assert!(matches!(result, InsertTorrentResult::Inserted(_)));
+
+        // Check that metadata directories were created
+        let root = db.get_source_path_prefixes("").unwrap();
+        assert!(
+            root.contains(&"os".to_string()),
+            "Expected 'os' in root prefixes, got: {:?}",
+            root
+        );
+
+        let os = db.get_source_path_prefixes("os").unwrap();
+        assert!(
+            os.contains(&"linux".to_string()),
+            "Expected 'linux' in os prefixes, got: {:?}",
+            os
+        );
     }
 }
