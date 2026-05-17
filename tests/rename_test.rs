@@ -34,7 +34,7 @@ fn test_rename_updates_database() {
     assert_eq!(torrent.filename, "ubuntu-25.10-desktop-amd64.iso.torrent");
 
     // Rename the torrent
-    db.rename_torrent(torrent_id, "ubuntu-25.10", "ubuntu-25.10.torrent")
+    db.rename_torrent(torrent_id, "ubuntu-25.10", "ubuntu-25.10.torrent", "")
         .expect("Failed to rename torrent");
 
     // Verify the rename
@@ -91,8 +91,13 @@ fn test_rename_with_source_path() {
     assert_eq!(torrent.filename, "ubuntu-25.10.torrent");
 
     // Rename the torrent
-    db.rename_torrent(torrent_id, "ubuntu-26.04", "ubuntu-26.04.torrent")
-        .expect("Failed to rename torrent");
+    db.rename_torrent(
+        torrent_id,
+        "ubuntu-26.04",
+        "ubuntu-26.04.torrent",
+        "os/linux",
+    )
+    .expect("Failed to rename torrent");
 
     // Verify the rename
     let torrent = db
@@ -133,7 +138,7 @@ fn test_rename_persists() {
             _ => panic!("Expected Inserted"),
         };
 
-        db.rename_torrent(torrent_id, "new-name", "new-name.torrent")
+        db.rename_torrent(torrent_id, "new-name", "new-name.torrent", "")
             .expect("Failed to rename torrent");
     }
 
