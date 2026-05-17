@@ -692,7 +692,7 @@ impl TorrentFs {
                         .ok()
                         .flatten()
                         .and_then(|d| d.parent_id)
-                        .map(|pid| Self::make_torrent_dir_ino(pid))
+                        .map(Self::make_torrent_dir_ino)
                         .unwrap_or_else(|| Self::make_torrent_root_ino(torrent_id));
                     entries.push((parent_ino, 2, fuser::FileType::Directory, "..".to_string()));
 
@@ -765,8 +765,8 @@ impl TorrentFs {
         }
 
         let full_path = self.get_full_path(parent);
-        if full_path.starts_with("metadata/") {
-            full_path["metadata/".len()..].to_string()
+        if let Some(stripped) = full_path.strip_prefix("metadata/") {
+            stripped.to_string()
         } else {
             full_path
         }
@@ -881,7 +881,7 @@ impl TorrentFs {
         FileAttr {
             ino,
             size,
-            blocks: (size + 511) / 512,
+            blocks: size.div_ceil(512),
             atime: UNIX_EPOCH + self.creation_time,
             mtime: UNIX_EPOCH + self.creation_time,
             ctime: UNIX_EPOCH + self.creation_time,
@@ -1200,7 +1200,7 @@ impl Filesystem for TorrentFs {
                     }
 
                     let torrent_id = (ino - DATA_TORRENT_INO_BASE) as i64;
-                    if ino >= DATA_TORRENT_INO_BASE && ino < DATA_DIR_INO_BASE {
+                    if (DATA_TORRENT_INO_BASE..DATA_DIR_INO_BASE).contains(&ino) {
                         if let Ok(db) = self.get_db() {
                             if let Ok(db_guard) = db.lock() {
                                 if db_guard
