@@ -1176,6 +1176,19 @@ impl Database {
             "UPDATE torrents SET name = ?, filename = ?, source_path = ? WHERE id = ?",
             params![new_name, new_filename, new_source_path, torrent_id],
         )?;
+
+        // Ensure metadata directories exist for the new source_path
+        // This is needed for get_source_path_prefixes to work correctly after remount
+        if !new_source_path.is_empty() {
+            if let Err(e) = self.ensure_metadata_directories(new_source_path) {
+                tracing::warn!(
+                    "Failed to create metadata directories for {}: {}",
+                    new_source_path,
+                    e
+                );
+            }
+        }
+
         Ok(())
     }
 
