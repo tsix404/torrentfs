@@ -1,13 +1,19 @@
-pub mod db;
-pub mod torrent_info;
-pub mod error;
-pub mod download;
 pub mod cache;
+pub mod db;
+pub mod download;
+pub mod error;
 pub mod seeding;
+pub mod torrent_info;
 
-pub use torrent_info::TorrentInfo;
-pub use error::{TorrentError, TorrentResult};
-pub use db::{Database, DbError, Torrent, TorrentFile, TorrentDirectory, TorrentStatus, FileEntry, InsertTorrentResult};
-pub use download::{Session, TorrentHandle, DownloadManager, TorrentStatus as DownloadTorrentStatus, TorrentState, FilePieceInfo};
 pub use cache::{CacheManager, PieceMetadata};
-pub use seeding::{SeedingManager, SeedingInfo, SeedingState};
+pub use db::{
+    Database, DbError, FileEntry, InsertTorrentResult, Torrent, TorrentDirectory, TorrentFile,
+    TorrentStatus,
+};
+pub use download::{
+    DownloadManager, FilePieceInfo, Session, TorrentHandle, TorrentState,
+    TorrentStatus as DownloadTorrentStatus,
+};
+pub use error::{TorrentError, TorrentResult};
+pub use seeding::{SeedingInfo, SeedingManager, SeedingState};
+pub use torrent_info::TorrentInfo;

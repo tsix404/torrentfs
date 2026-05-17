@@ -2,7 +2,7 @@ use std::ffi::{CStr, CString};
 use std::path::Path;
 use std::ptr;
 
-use crate::error::{TorrentError, TorrentResult, error_from_c};
+use crate::error::{error_from_c, TorrentError, TorrentResult};
 
 pub struct TorrentInfo {
     pub(crate) inner: libtorrent_sys::lt_torrent_info_t,
@@ -40,9 +40,7 @@ impl TorrentInfo {
             code: 0,
         };
 
-        let inner = unsafe {
-            libtorrent_sys::lt_torrent_info_create(c_path.as_ptr(), &mut error)
-        };
+        let inner = unsafe { libtorrent_sys::lt_torrent_info_create(c_path.as_ptr(), &mut error) };
 
         if inner.is_null() {
             Err(unsafe { error_from_c(&error) })
@@ -78,9 +76,7 @@ impl TorrentInfo {
             if name_ptr.is_null() {
                 String::new()
             } else {
-                CStr::from_ptr(name_ptr)
-                    .to_string_lossy()
-                    .into_owned()
+                CStr::from_ptr(name_ptr).to_string_lossy().into_owned()
             }
         }
     }
@@ -106,11 +102,7 @@ impl TorrentInfo {
         let mut count: u32 = 0;
 
         let result = unsafe {
-            libtorrent_sys::lt_torrent_info_get_files(
-                self.inner,
-                &mut files_ptr,
-                &mut count,
-            )
+            libtorrent_sys::lt_torrent_info_get_files(self.inner, &mut files_ptr, &mut count)
         };
 
         if result != 0 {
@@ -148,9 +140,8 @@ impl TorrentInfo {
 
     pub fn info_hash(&self) -> TorrentResult<[u8; 20]> {
         let mut hash = [0u8; 20];
-        let result = unsafe {
-            libtorrent_sys::lt_torrent_info_get_info_hash(self.inner, hash.as_mut_ptr())
-        };
+        let result =
+            unsafe { libtorrent_sys::lt_torrent_info_get_info_hash(self.inner, hash.as_mut_ptr()) };
 
         if result != 0 {
             Err(TorrentError::Unknown {

@@ -5,16 +5,16 @@ use thiserror::Error;
 pub enum TorrentError {
     #[error("Invalid torrent file: {0}")]
     InvalidFile(String),
-    
+
     #[error("Failed to parse torrent: {0}")]
     ParseError(String),
-    
+
     #[error("IO error: {0}")]
     IoError(String),
-    
+
     #[error("Null pointer encountered")]
     NullPointer,
-    
+
     #[error("Unknown error: code {code}, message: {message}")]
     Unknown { code: i32, message: String },
 }
@@ -46,7 +46,7 @@ pub(crate) unsafe fn error_from_c(error: *const libtorrent_sys::lt_error_t) -> T
             message: "Unknown error".to_string(),
         };
     }
-    
+
     let error_ref = &*error;
     let message = if error_ref.message.is_null() {
         "Unknown error".to_string()
@@ -55,10 +55,11 @@ pub(crate) unsafe fn error_from_c(error: *const libtorrent_sys::lt_error_t) -> T
             .to_string_lossy()
             .into_owned()
     };
-    
+
     if message.contains("bdecode") || message.contains("parse") || message.contains("invalid") {
         TorrentError::ParseError(message)
-    } else if message.contains("file") || message.contains("path") || message.contains("not found") {
+    } else if message.contains("file") || message.contains("path") || message.contains("not found")
+    {
         TorrentError::InvalidFile(message)
     } else {
         TorrentError::Unknown {

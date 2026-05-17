@@ -1,15 +1,15 @@
-use torrentfs::{TorrentInfo, TorrentError};
+use torrentfs::{TorrentError, TorrentInfo};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    
+
     if args.len() < 2 {
         eprintln!("Usage: {} <torrent-file>", args[0]);
         std::process::exit(1);
     }
 
     let torrent_path = &args[1];
-    
+
     match TorrentInfo::from_file(torrent_path) {
         Ok(info) => {
             println!("Torrent: {}", info.name());
@@ -17,7 +17,7 @@ fn main() {
             println!("Piece Length: {} bytes", info.piece_length());
             println!("Number of Pieces: {}", info.num_pieces());
             println!("Number of Files: {}", info.num_files());
-            
+
             match info.info_hash() {
                 Ok(hash) => {
                     print!("Info Hash: ");
@@ -28,7 +28,7 @@ fn main() {
                 }
                 Err(e) => eprintln!("Error getting info hash: {}", e),
             }
-            
+
             match info.files() {
                 Ok(files) => {
                     if files.len() > 0 {
