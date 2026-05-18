@@ -891,6 +891,16 @@ impl Database {
         Ok(())
     }
 
+    /// Delete a metadata directory by its path.
+    /// This will also delete all child directories due to ON DELETE CASCADE.
+    pub fn delete_metadata_directory(&mut self, path: &str) -> Result<(), DbError> {
+        self.conn.execute(
+            "DELETE FROM metadata_directories WHERE path = ?",
+            params![path],
+        )?;
+        Ok(())
+    }
+
     pub fn get_all_torrents(&self) -> Result<Vec<Torrent>, DbError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, source_path, name, filename, total_size, info_hash, file_count, status, torrent_data, resume_data, created_at
@@ -1760,6 +1770,50 @@ mod tests {
         let movies = db.get_source_path_prefixes("movies").unwrap();
         assert_eq!(movies.len(), 1);
         assert!(movies.contains(&"scifi".to_string()));
+    }
+
+    #[test]
+    fn test_delete_metadata_directory() {
+        let mut db = Database::open_in_memory().unwrap();
+
+        // Create a nested directory structure
+        db.insert_torrent(
+            "anime/naruto/season1",
+            "Naruto S1",
+            "Naruto S1",
+            1024,
+            "hash1",
+            1,
+        )
+        .unwrap();
+
+        // Verify the directory structure exists
+        let root = db.get_source_path_prefixes("").unwrap();
+        assert!(root.contains(&"anime".to_string()));
+
+        let anime = db.get_source_path_prefixes("anime").unwrap();
+        assert!(anime.contains(&"naruto".to_string()));
+
+        let naruto = db.get_source_path_prefixes("anime/naruto").unwrap();
+        assert!(naruto.contains(&"season1".to_string()));
+
+        // Delete a leaf directory
+        db.delete_metadata_directory("anime/naruto/season1")
+            .unwrap();
+
+        // Verify the leaf directory is gone
+        let naruto = db.get_source_path_prefixes("anime/naruto").unwrap();
+        assert!(!naruto.contains(&"season1".to_string()));
+
+        // Delete a parent directory - should cascade delete children
+        db.delete_metadata_directory("anime").unwrap();
+
+        // Verify parent and children are gone
+        let root = db.get_source_path_prefixes("").unwrap();
+        assert!(!root.contains(&"anime".to_string()));
+
+        let anime = db.get_source_path_prefixes("anime").unwrap();
+        assert!(anime.is_empty());
     }
 
     #[test]
