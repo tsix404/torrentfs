@@ -237,11 +237,22 @@ impl TorrentFs {
             };
 
             let new_ino = NEXT_INO.fetch_add(1, Ordering::SeqCst);
-            // Avoid double extension if torrent.name already ends with .torrent
-            let filename = if torrent.name.ends_with(".torrent") {
-                torrent.name.clone()
+            // Use torrent.filename (actual stored filename) instead of torrent.name (internal name)
+            // For backward compatibility, fall back to torrent.name if filename is empty (v4 migration)
+            let filename = if !torrent.filename.is_empty() {
+                // Ensure .torrent extension
+                if torrent.filename.ends_with(".torrent") {
+                    torrent.filename.clone()
+                } else {
+                    format!("{}.torrent", torrent.filename)
+                }
             } else {
-                format!("{}.torrent", torrent.name)
+                // Backward compatibility: filename field may be empty (pre-v4 migration)
+                if torrent.name.ends_with(".torrent") {
+                    torrent.name.clone()
+                } else {
+                    format!("{}.torrent", torrent.name)
+                }
             };
             self.inodes.insert(
                 new_ino,
@@ -1850,9 +1861,6 @@ impl Filesystem for TorrentFs {
             // Use the new parent to get the new source_path for the updated location
             let new_source_path = self.extract_source_path(newparent);
 
-            // Extract the new name without .torrent extension for the database
-            let new_torrent_name = newname_str.strip_suffix(".torrent").unwrap_or(&newname_str);
-
             match db.lock() {
                 Ok(mut db_guard) => {
                     // Find the torrent by old filename and source_path
@@ -1860,11 +1868,12 @@ impl Filesystem for TorrentFs {
                         .get_torrent_by_filename_and_source_path(&old_name, &old_source_path)
                     {
                         Ok(Some(torrent)) => {
-                            // Update the torrent name, filename, and source_path in the database
+                            // Keep the original internal name (torrent.name), only update filename and source_path
+                            // This ensures torrent's internal name stays consistent across restarts
                             if let Err(e) = db_guard.rename_torrent(
                                 torrent.id,
-                                new_torrent_name,
-                                &newname_str,
+                                &torrent.name, // Keep original internal name
+                                &newname_str,  // Update filename to new name
                                 &new_source_path,
                             ) {
                                 error!("Failed to rename torrent in database: {:?}", e);
@@ -1872,8 +1881,8 @@ impl Filesystem for TorrentFs {
                                 return;
                             }
                             info!(
-                                "Renamed torrent '{}' to '{}' (id={}, source_path: '{}' -> '{}')",
-                                old_name, newname_str, torrent.id, old_source_path, new_source_path
+                                "Renamed torrent '{}' to '{}' (id={}, source_path: '{}' -> '{}', name preserved: '{}')",
+                                old_name, newname_str, torrent.id, old_source_path, new_source_path, torrent.name
                             );
                         }
                         Ok(None) => {
