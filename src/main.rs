@@ -1732,6 +1732,26 @@ impl Filesystem for TorrentFs {
             },
         );
 
+        // Persist the directory to the database so it appears in data/
+        let source_path = if parent == METADATA_INO {
+            name_str.to_string()
+        } else {
+            let parent_source_path = self.extract_source_path(parent);
+            if parent_source_path.is_empty() {
+                name_str.to_string()
+            } else {
+                format!("{}/{}", parent_source_path, name_str)
+            }
+        };
+
+        if let Some(db) = &self.db {
+            if let Ok(mut db_guard) = db.lock() {
+                if let Err(e) = db_guard.ensure_metadata_directories(&source_path) {
+                    warn!("Failed to persist directory to database: {:?}", e);
+                }
+            }
+        }
+
         info!(
             "Created directory {} with inode {} in {}",
             name_str,

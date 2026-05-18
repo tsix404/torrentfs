@@ -341,7 +341,7 @@ impl Database {
         Ok(InsertTorrentResult::Inserted(id))
     }
 
-    fn ensure_metadata_directories(&mut self, source_path: &str) -> Result<(), DbError> {
+    pub fn ensure_metadata_directories(&mut self, source_path: &str) -> Result<(), DbError> {
         let parts: Vec<&str> = source_path.split('/').filter(|s| !s.is_empty()).collect();
         if parts.is_empty() {
             return Ok(());
