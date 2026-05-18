@@ -1972,13 +1972,8 @@ impl Filesystem for TorrentFs {
                 let filename = name.clone();
                 let source_path = self.extract_source_path(*file_parent);
 
-                // Remove the inode
-                self.inodes.remove(&ino);
-
-                // Close any open file handles for this inode
-                self.open_files.retain(|_, &mut open_ino| open_ino != ino);
-
-                // Delete from database if available
+                // Delete from database FIRST (before modifying in-memory state)
+                // This ensures atomicity: if DB delete fails, the inode remains
                 if let Some(db) = &self.db {
                     match db.lock() {
                         Ok(mut db_guard) => {
@@ -1988,6 +1983,21 @@ impl Filesystem for TorrentFs {
                             {
                                 Ok(Some(torrent)) => {
                                     let torrent_id = torrent.id;
+
+                                    // Delete from database (cascade will delete files and directories)
+                                    if let Err(e) = db_guard.delete_torrent(torrent_id) {
+                                        error!("Failed to delete torrent from database: {:?}", e);
+                                        reply.error(EIO);
+                                        return;
+                                    }
+
+                                    // DB delete succeeded - now safe to modify in-memory state
+
+                                    // Remove the inode
+                                    self.inodes.remove(&ino);
+
+                                    // Close any open file handles for this inode
+                                    self.open_files.retain(|_, &mut open_ino| open_ino != ino);
 
                                     // Clean up data_inodes cache for this torrent
                                     self.data_inodes.retain(|_, data_inode| match data_inode {
@@ -2002,13 +2012,6 @@ impl Filesystem for TorrentFs {
                                         } => *tid != torrent_id,
                                         _ => true,
                                     });
-
-                                    // Delete from database (cascade will delete files and directories)
-                                    if let Err(e) = db_guard.delete_torrent(torrent_id) {
-                                        error!("Failed to delete torrent from database: {:?}", e);
-                                        reply.error(EIO);
-                                        return;
-                                    }
 
                                     // Remove from processing_torrents if present
                                     let mut processing = self.processing_torrents.lock().unwrap();
@@ -2026,7 +2029,10 @@ impl Filesystem for TorrentFs {
                                     );
                                 }
                                 Ok(None) => {
-                                    // Torrent not in database yet (not processed), that's OK
+                                    // Torrent not in database yet (not processed)
+                                    // Safe to remove inode since there's no DB record
+                                    self.inodes.remove(&ino);
+                                    self.open_files.retain(|_, &mut open_ino| open_ino != ino);
                                     info!("Deleted file '{}' (not yet in database)", filename);
                                 }
                                 Err(e) => {
@@ -2043,6 +2049,9 @@ impl Filesystem for TorrentFs {
                         }
                     }
                 } else {
+                    // No database - safe to remove inode directly
+                    self.inodes.remove(&ino);
+                    self.open_files.retain(|_, &mut open_ino| open_ino != ino);
                     info!("Deleted file '{}' (no database)", filename);
                 }
 
