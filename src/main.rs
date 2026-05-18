@@ -3,7 +3,7 @@ use fuser::{
     FileAttr, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEntry, ReplyOpen, ReplyWrite, Request,
 };
-use libc::{EACCES, EEXIST, EFBIG, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR};
+use libc::{EACCES, EEXIST, EFBIG, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -1933,6 +1933,183 @@ impl Filesystem for TorrentFs {
         }
 
         reply.ok();
+    }
+
+    fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+        let name_str = name.to_string_lossy();
+
+        // Only allow deleting files in metadata/ directory
+        if !self.is_metadata_child(parent) {
+            error!("Unlink only allowed within metadata/ directory");
+            reply.error(EACCES);
+            return;
+        }
+
+        // Only allow deleting torrent files (.torrent extension)
+        if !name_str.ends_with(".torrent") {
+            error!("Unlink only allowed for .torrent files");
+            reply.error(EACCES);
+            return;
+        }
+
+        // Find the inode
+        let ino = match self.find_child_by_name(parent, &name_str) {
+            Some(ino) => ino,
+            None => {
+                error!("File not found: {}", name_str);
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Verify it's a file, not a directory
+        match self.inodes.get(&ino) {
+            Some(InodeData::File {
+                name,
+                parent: file_parent,
+                ..
+            }) => {
+                let filename = name.clone();
+                let source_path = self.extract_source_path(*file_parent);
+
+                // Remove the inode
+                self.inodes.remove(&ino);
+
+                // Close any open file handles for this inode
+                self.open_files.retain(|_, &mut open_ino| open_ino != ino);
+
+                // Delete from database if available
+                if let Some(db) = &self.db {
+                    match db.lock() {
+                        Ok(mut db_guard) => {
+                            // Find the torrent by filename and source_path
+                            match db_guard
+                                .get_torrent_by_filename_and_source_path(&filename, &source_path)
+                            {
+                                Ok(Some(torrent)) => {
+                                    let torrent_id = torrent.id;
+
+                                    // Clean up data_inodes cache for this torrent
+                                    self.data_inodes.retain(|_, data_inode| match data_inode {
+                                        DataInode::TorrentRoot {
+                                            torrent_id: tid, ..
+                                        } => *tid != torrent_id,
+                                        DataInode::TorrentDir {
+                                            torrent_id: tid, ..
+                                        } => *tid != torrent_id,
+                                        DataInode::TorrentFile {
+                                            torrent_id: tid, ..
+                                        } => *tid != torrent_id,
+                                        _ => true,
+                                    });
+
+                                    // Delete from database (cascade will delete files and directories)
+                                    if let Err(e) = db_guard.delete_torrent(torrent_id) {
+                                        error!("Failed to delete torrent from database: {:?}", e);
+                                        reply.error(EIO);
+                                        return;
+                                    }
+
+                                    // Remove from processing_torrents if present
+                                    let mut processing = self.processing_torrents.lock().unwrap();
+                                    processing.remove(&source_path);
+                                    drop(processing);
+
+                                    // Clear torrent data cache
+                                    let mut cache = self.torrent_data_cache.lock().unwrap();
+                                    cache.remove(&source_path);
+                                    drop(cache);
+
+                                    info!(
+                                        "Deleted torrent '{}' (id={}, source_path='{}')",
+                                        filename, torrent_id, source_path
+                                    );
+                                }
+                                Ok(None) => {
+                                    // Torrent not in database yet (not processed), that's OK
+                                    info!("Deleted file '{}' (not yet in database)", filename);
+                                }
+                                Err(e) => {
+                                    error!("Database error during unlink: {:?}", e);
+                                    reply.error(EIO);
+                                    return;
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            error!("Database lock poisoned during unlink");
+                            reply.error(EIO);
+                            return;
+                        }
+                    }
+                } else {
+                    info!("Deleted file '{}' (no database)", filename);
+                }
+
+                reply.ok();
+            }
+            Some(InodeData::Directory { .. }) => {
+                error!("Cannot unlink directory: {}", name_str);
+                reply.error(EISDIR);
+            }
+            None => {
+                error!("Inode not found: {}", ino);
+                reply.error(ENOENT);
+            }
+        }
+    }
+
+    fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+        let name_str = name.to_string_lossy();
+
+        // Only allow deleting directories in metadata/ directory
+        if !self.is_metadata_child(parent) {
+            error!("Rmdir only allowed within metadata/ directory");
+            reply.error(EACCES);
+            return;
+        }
+
+        // Find the inode
+        let ino = match self.find_child_by_name(parent, &name_str) {
+            Some(ino) => ino,
+            None => {
+                error!("Directory not found: {}", name_str);
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Verify it's a directory
+        match self.inodes.get(&ino) {
+            Some(InodeData::Directory { .. }) => {
+                // Check if directory is empty (no children)
+                let has_children = self.inodes.iter().any(|(_, data)| match data {
+                    InodeData::Directory { parent: p, .. } if *p == ino => true,
+                    InodeData::File { parent: p, .. } if *p == ino => true,
+                    _ => false,
+                });
+
+                if has_children {
+                    error!("Directory not empty: {}", name_str);
+                    reply.error(ENOTEMPTY);
+                    return;
+                }
+
+                // Remove the inode
+                self.inodes.remove(&ino);
+
+                info!("Deleted directory '{}'", name_str);
+                reply.ok();
+            }
+            Some(InodeData::File { .. }) => {
+                error!("Cannot rmdir file: {}", name_str);
+                reply.error(ENOTDIR);
+            }
+            None => {
+                error!("Inode not found: {}", ino);
+                reply.error(ENOENT);
+            }
+        }
     }
 }
 
