@@ -2104,10 +2104,72 @@ impl Filesystem for TorrentFs {
                     return;
                 }
 
+                // Get the source_path for this directory before removing the inode
+                let source_path = self.extract_source_path(ino);
+
                 // Remove the inode
                 self.inodes.remove(&ino);
 
-                info!("Deleted directory '{}'", name_str);
+                // Delete from database and clean up data_inodes cache
+                if let Some(db) = &self.db {
+                    match db.lock() {
+                        Ok(mut db_guard) => {
+                            // Delete the directory from metadata_directories table
+                            if let Err(e) = db_guard.delete_metadata_directory(&source_path) {
+                                warn!("Failed to delete metadata directory from database: {:?}", e);
+                            }
+
+                            // Clean up data_inodes cache for this directory and any child paths
+                            self.data_inodes.retain(|_, data_inode| {
+                                match data_inode {
+                                    // Remove SourcePathDir entries that match or are children of the deleted path
+                                    DataInode::SourcePathDir { path } => {
+                                        if path == &source_path {
+                                            false
+                                        } else if source_path.is_empty() {
+                                            // If source_path is empty, don't remove anything else
+                                            true
+                                        } else {
+                                            // Check if this path is a child of the deleted directory
+                                            !path.starts_with(&format!("{}/", source_path))
+                                        }
+                                    }
+                                    _ => true,
+                                }
+                            });
+
+                            info!(
+                                "Deleted directory '{}' (source_path='{}')",
+                                name_str, source_path
+                            );
+                        }
+                        Err(_) => {
+                            error!("Database lock poisoned during rmdir");
+                            reply.error(EIO);
+                            return;
+                        }
+                    }
+                } else {
+                    // No database - just clean up data_inodes cache
+                    self.data_inodes.retain(|_, data_inode| match data_inode {
+                        DataInode::SourcePathDir { path } => {
+                            if path == &source_path {
+                                false
+                            } else if source_path.is_empty() {
+                                true
+                            } else {
+                                !path.starts_with(&format!("{}/", source_path))
+                            }
+                        }
+                        _ => true,
+                    });
+
+                    info!(
+                        "Deleted directory '{}' (source_path='{}', no database)",
+                        name_str, source_path
+                    );
+                }
+
                 reply.ok();
             }
             Some(InodeData::File { .. }) => {
