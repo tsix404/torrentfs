@@ -335,10 +335,12 @@ impl CacheManager {
         self.metadata.contains_key(piece_key)
     }
 
+    #[allow(dead_code)]
     pub fn current_size(&self) -> u64 {
         self.current_size
     }
 
+    #[allow(dead_code)]
     pub fn piece_count(&self) -> usize {
         self.metadata.len()
     }

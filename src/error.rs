@@ -2,6 +2,7 @@ use std::ffi::CStr;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
+#[allow(dead_code)]
 pub enum TorrentError {
     #[error("Invalid torrent file: {0}")]
     InvalidFile(String),
@@ -28,6 +29,7 @@ impl From<std::io::Error> for TorrentError {
 pub type TorrentResult<T> = Result<T, TorrentError>;
 
 #[derive(Error, Debug)]
+#[allow(dead_code)]
 pub enum TorrentfsError {
     #[error("Initialization error: {0}")]
     Initialization(String),

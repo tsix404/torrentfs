@@ -1,4 +1,3 @@
-use std::io::Write;
 use torrentfs::TorrentInfo;
 
 fn create_test_torrent() -> (Vec<u8>, Vec<u8>) {

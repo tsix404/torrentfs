@@ -88,6 +88,7 @@ impl Session {
         }
     }
 
+    #[allow(dead_code)]
     pub fn remove_torrent(&mut self, handle: TorrentHandle, remove_files: bool) {
         unsafe {
             libtorrent_sys::lt_session_remove_torrent(
@@ -254,6 +255,7 @@ impl Drop for TorrentHandle {
 unsafe impl Send for TorrentHandle {}
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TorrentStatus {
     pub state: TorrentState,
     pub progress: f32,
@@ -291,6 +293,7 @@ impl From<i32> for TorrentState {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FilePieceInfo {
     pub first_piece: i64,
     pub num_pieces: i64,
@@ -312,6 +315,7 @@ impl DownloadManager {
         })
     }
 
+    #[allow(dead_code)]
     pub fn get_cache_manager(&self) -> Arc<Mutex<CacheManager>> {
         self.cache_manager.clone()
     }

@@ -2,6 +2,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum DbError {
     #[error("database error: {0}")]
     Sqlite(#[from] rusqlite::Error),
@@ -20,6 +21,7 @@ pub enum TorrentStatus {
 }
 
 impl TorrentStatus {
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             TorrentStatus::Pending => "pending",
@@ -48,6 +50,7 @@ impl From<String> for TorrentStatus {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Torrent {
     pub id: i64,
     pub source_path: String,
@@ -63,6 +66,7 @@ pub struct Torrent {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TorrentFile {
     pub id: i64,
     pub torrent_id: i64,
@@ -77,6 +81,7 @@ pub struct TorrentFile {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TorrentDirectory {
     pub id: i64,
     pub torrent_id: i64,
@@ -108,6 +113,7 @@ impl Database {
         Ok(db)
     }
 
+    #[allow(dead_code)]
     pub fn open_in_memory() -> Result<Self, DbError> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
@@ -282,6 +288,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn rebuild_metadata_directories(&mut self) -> Result<(), DbError> {
         let paths: Vec<String> = {
             let mut stmt = self
@@ -298,6 +305,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn insert_torrent(
         &mut self,
         source_path: &str,
@@ -405,6 +413,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn set_resume_data(&mut self, torrent_id: i64, data: &[u8]) -> Result<(), DbError> {
         self.conn.execute(
             "UPDATE torrents SET resume_data = ? WHERE id = ?",
@@ -413,6 +422,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn set_torrent_status(
         &mut self,
         torrent_id: i64,
@@ -425,6 +435,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn insert_files(&mut self, torrent_id: i64, files: &[FileEntry]) -> Result<(), DbError> {
         let tx = self.conn.transaction()?;
 
@@ -649,6 +660,7 @@ impl Database {
         Ok(result)
     }
 
+    #[allow(dead_code)]
     pub fn get_torrent_by_info_hash(&self, info_hash: &str) -> Result<Option<Torrent>, DbError> {
         let result = self
             .conn
@@ -703,6 +715,7 @@ impl Database {
         Ok(files)
     }
 
+    #[allow(dead_code)]
     pub fn get_subdirectory_ids(&self, parent_id: i64) -> Result<Vec<i64>, DbError> {
         let mut stmt = self
             .conn
@@ -854,6 +867,7 @@ impl Database {
         Ok(dirs)
     }
 
+    #[allow(dead_code)]
     pub fn get_all_files_under_directory(
         &self,
         directory_id: i64,
@@ -928,6 +942,7 @@ impl Database {
         Ok(torrents)
     }
 
+    #[allow(dead_code)]
     pub fn get_torrents_by_status(&self, status: &TorrentStatus) -> Result<Vec<Torrent>, DbError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, source_path, name, filename, total_size, info_hash, file_count, status, torrent_data, resume_data, created_at
@@ -1030,6 +1045,7 @@ impl Database {
         Ok(names)
     }
 
+    #[allow(dead_code)]
     pub fn get_file_by_path(
         &self,
         torrent_id: i64,
@@ -1100,6 +1116,7 @@ impl Database {
         }
     }
 
+    #[allow(dead_code)]
     fn resolve_directory_path(
         &self,
         torrent_id: i64,
@@ -1126,6 +1143,7 @@ impl Database {
         Ok(current_parent)
     }
 
+    #[allow(dead_code)]
     pub fn get_torrent_id_by_name_and_source_path(
         &self,
         name: &str,
@@ -1380,7 +1398,7 @@ mod tests {
             InsertTorrentResult::Inserted(id) => id,
             _ => panic!("Expected Inserted"),
         };
-        let id3 = match db
+        let _id3 = match db
             .insert_torrent("path3", "T3", "T3", 300, "hash3", 1)
             .unwrap()
         {

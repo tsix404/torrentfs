@@ -54,6 +54,7 @@ enum InodeData {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 enum DataInode {
     SourcePathDir {
         path: String,
@@ -98,10 +99,12 @@ struct TorrentFs {
     processing_torrents: Arc<Mutex<HashMap<String, ()>>>,
     download_manager: Option<Arc<Mutex<DownloadManager>>>,
     torrent_data_cache: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    #[allow(dead_code)]
     cache_manager: Option<Arc<Mutex<CacheManager>>>,
 }
 
 impl TorrentFs {
+    #[allow(dead_code)]
     fn new() -> Self {
         Self::new_with_cache_path(PathBuf::from("/tmp/torrentfs-cache"))
     }
@@ -158,7 +161,8 @@ impl TorrentFs {
         }
     }
 
-    fn new_with_db(db: Database) -> Self {
+    #[allow(dead_code)]
+    fn new_with_db(_db: Database) -> Self {
         Self::new()
     }
 
@@ -1007,7 +1011,7 @@ impl TorrentFs {
             EIO
         })?;
 
-        let file = files.iter().find(|f| f.id == file_id).ok_or_else(|| {
+        let _file = files.iter().find(|f| f.id == file_id).ok_or_else(|| {
             error!("File not found: {}", file_id);
             ENOENT
         })?;
@@ -1093,7 +1097,7 @@ impl TorrentFs {
         }
 
         let metadata_dir_ino = METADATA_INO;
-        for (ino, data) in &self.inodes {
+        for data in self.inodes.values() {
             if let InodeData::File {
                 name,
                 data: file_data,

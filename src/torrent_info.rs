@@ -15,6 +15,7 @@ pub struct FileInfo {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TorrentMetadata {
     pub name: String,
     pub total_size: u64,
@@ -26,6 +27,7 @@ pub struct TorrentMetadata {
 }
 
 impl TorrentInfo {
+    #[allow(dead_code)]
     pub fn from_file<P: AsRef<Path>>(path: P) -> TorrentResult<Self> {
         let path_str = path
             .as_ref()
