@@ -376,7 +376,16 @@ impl DownloadManager {
             status.progress * 100.0
         );
 
-        let max_wait_secs = 10;
+        // Use a longer wait for fully cached torrents (re-verification after restart)
+        // vs. torrents that are still incomplete.
+        let is_fully_cached = status.total_done >= status.total && status.total > 0;
+        let max_wait_secs: u64 = if is_fully_cached { 120 } else { 30 };
+        tracing::info!(
+            "read_file_range: fully_cached={}, max_wait_secs={}",
+            is_fully_cached,
+            max_wait_secs
+        );
+
         let start = std::time::Instant::now();
         while matches!(
             status.state,
@@ -387,8 +396,8 @@ impl DownloadManager {
         ) {
             if start.elapsed().as_secs() > max_wait_secs {
                 return Err(TorrentError::InvalidFile(format!(
-                    "Torrent stuck in state {:?} for {} seconds",
-                    status.state, max_wait_secs
+                    "Torrent stuck in state {:?} for {} seconds (fully_cached={})",
+                    status.state, max_wait_secs, is_fully_cached
                 )));
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
