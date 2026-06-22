@@ -902,7 +902,7 @@ impl TorrentFs {
             ctime: UNIX_EPOCH + self.creation_time,
             crtime: UNIX_EPOCH + self.creation_time,
             kind: fuser::FileType::RegularFile,
-            perm: 0o644,
+            perm: 0o444,
             nlink: 1,
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
