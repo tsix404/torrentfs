@@ -1829,13 +1829,6 @@ impl Filesystem for TorrentFs {
             return;
         }
 
-        // Only allow renaming torrent files (.torrent extension)
-        if !name_str.ends_with(".torrent") || !newname_str.ends_with(".torrent") {
-            error!("Rename only allowed for .torrent files");
-            reply.error(EACCES);
-            return;
-        }
-
         // Find the source inode
         let source_ino = match self.find_child_by_name(parent, &name_str) {
             Some(ino) => ino,
@@ -1853,90 +1846,188 @@ impl Filesystem for TorrentFs {
             return;
         }
 
-        // Get the source file data
-        let (file_data, old_name) = match self.inodes.get(&source_ino) {
-            Some(InodeData::File { data, name, .. }) => (data.clone(), name.clone()),
-            Some(InodeData::Directory { .. }) => {
-                error!("Cannot rename directory: {}", name_str);
-                reply.error(EISDIR);
-                return;
-            }
-            None => {
-                error!("Source inode not found: {}", source_ino);
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        // Update the inode with the new name
-        self.inodes.insert(
-            source_ino,
-            InodeData::File {
-                parent: newparent,
-                name: newname_str.to_string(),
-                data: file_data,
-            },
+        // Check if the source is a directory or file
+        let is_directory = matches!(
+            self.inodes.get(&source_ino),
+            Some(InodeData::Directory { .. })
         );
 
-        // Update the database if available
-        if let Some(db) = &self.db {
-            // Use the source parent to extract the original source_path for finding the torrent
-            let old_source_path = self.extract_source_path(parent);
-            // Use the new parent to get the new source_path for the updated location
-            let new_source_path = self.extract_source_path(newparent);
+        if is_directory {
+            // --- Directory rename ---
+            let old_source_path = self.extract_source_path(source_ino);
+            let new_source_path = if newparent == METADATA_INO {
+                newname_str.to_string()
+            } else {
+                let parent_path = self.extract_source_path(newparent);
+                if parent_path.is_empty() {
+                    newname_str.to_string()
+                } else {
+                    format!("{}/{}", parent_path, newname_str)
+                }
+            };
 
-            match db.lock() {
-                Ok(mut db_guard) => {
-                    // Find the torrent by old filename and source_path
-                    match db_guard
-                        .get_torrent_by_filename_and_source_path(&old_name, &old_source_path)
-                    {
-                        Ok(Some(torrent)) => {
-                            // Keep the original internal name (torrent.name), only update filename and source_path
-                            // This ensures torrent's internal name stays consistent across restarts
-                            if let Err(e) = db_guard.rename_torrent(
-                                torrent.id,
-                                &torrent.name, // Keep original internal name
-                                &newname_str,  // Update filename to new name
-                                &new_source_path,
-                            ) {
-                                error!("Failed to rename torrent in database: {:?}", e);
-                                reply.error(EIO);
-                                return;
-                            }
-                            info!(
-                                "Renamed torrent '{}' to '{}' (id={}, source_path: '{}' -> '{}', name preserved: '{}')",
-                                old_name, newname_str, torrent.id, old_source_path, new_source_path, torrent.name
-                            );
+            // Update the directory inode's name
+            self.inodes.insert(
+                source_ino,
+                InodeData::Directory {
+                    parent: newparent,
+                    name: newname_str.to_string(),
+                },
+            );
+
+            // Update all descendant inodes that reference the old path prefix
+            let old_prefix = format!("{}/", old_source_path);
+            for (_, data) in self.inodes.iter_mut() {
+                match data {
+                    InodeData::Directory { name, .. } => {
+                        // Directory names are just the leaf name, no path update needed
+                        let _ = name;
+                    }
+                    InodeData::File { name, .. } => {
+                        // File names are just the leaf name, no path update needed
+                        let _ = name;
+                    }
+                }
+            }
+
+            // Update data_inodes cache: rename SourcePathDir entries
+            let new_prefix = format!("{}/", new_source_path);
+            for (_, data_inode) in self.data_inodes.iter_mut() {
+                match data_inode {
+                    DataInode::SourcePathDir { path } => {
+                        if path == &old_source_path {
+                            *path = new_source_path.clone();
+                        } else if path.starts_with(&old_prefix) {
+                            *path = format!("{}{}", new_prefix, &path[old_prefix.len()..]);
                         }
-                        Ok(None) => {
-                            // Torrent not in database yet (not processed), that's OK
-                            info!(
-                                "Renamed file '{}' to '{}' (not yet in database)",
-                                old_name, newname_str
-                            );
+                    }
+                    DataInode::TorrentRoot { source_path, .. } => {
+                        if source_path == &old_source_path {
+                            *source_path = new_source_path.clone();
+                        } else if source_path.starts_with(&old_prefix) {
+                            *source_path =
+                                format!("{}{}", new_prefix, &source_path[old_prefix.len()..]);
                         }
-                        Err(e) => {
-                            error!("Database error during rename: {:?}", e);
+                    }
+                    _ => {}
+                }
+            }
+
+            // Persist the directory rename to the database
+            if let Some(db) = &self.db {
+                match db.lock() {
+                    Ok(mut db_guard) => {
+                        if let Err(e) = db_guard.rename_metadata_directory(
+                            &old_source_path,
+                            &newname_str,
+                            &new_source_path,
+                        ) {
+                            error!("Failed to rename metadata directory in database: {:?}", e);
                             reply.error(EIO);
                             return;
                         }
+                        info!(
+                            "Renamed metadata directory '{}' to '{}' (source_path: '{}' -> '{}')",
+                            name_str, newname_str, old_source_path, new_source_path
+                        );
+                    }
+                    Err(_) => {
+                        error!("Database lock poisoned during directory rename");
+                        reply.error(EIO);
+                        return;
                     }
                 }
-                Err(_) => {
-                    error!("Database lock poisoned during rename");
-                    reply.error(EIO);
+            } else {
+                info!(
+                    "Renamed directory '{}' to '{}' (no database)",
+                    name_str, newname_str
+                );
+            }
+
+            reply.ok();
+        } else {
+            // --- File rename (.torrent files only) ---
+            if !name_str.ends_with(".torrent") || !newname_str.ends_with(".torrent") {
+                error!("Rename only allowed for .torrent files or directories");
+                reply.error(EACCES);
+                return;
+            }
+
+            // Get the source file data
+            let (file_data, old_name) = match self.inodes.get(&source_ino) {
+                Some(InodeData::File { data, name, .. }) => (data.clone(), name.clone()),
+                None => {
+                    error!("Source inode not found: {}", source_ino);
+                    reply.error(ENOENT);
                     return;
                 }
-            }
-        } else {
-            info!(
-                "Renamed file '{}' to '{}' (no database)",
-                old_name, newname_str
-            );
-        }
+                _ => unreachable!(),
+            };
 
-        reply.ok();
+            // Update the inode with the new name
+            self.inodes.insert(
+                source_ino,
+                InodeData::File {
+                    parent: newparent,
+                    name: newname_str.to_string(),
+                    data: file_data,
+                },
+            );
+
+            // Update the database if available
+            if let Some(db) = &self.db {
+                let old_source_path = self.extract_source_path(parent);
+                let new_source_path = self.extract_source_path(newparent);
+
+                match db.lock() {
+                    Ok(mut db_guard) => {
+                        match db_guard
+                            .get_torrent_by_filename_and_source_path(&old_name, &old_source_path)
+                        {
+                            Ok(Some(torrent)) => {
+                                if let Err(e) = db_guard.rename_torrent(
+                                    torrent.id,
+                                    &torrent.name,
+                                    &newname_str,
+                                    &new_source_path,
+                                ) {
+                                    error!("Failed to rename torrent in database: {:?}", e);
+                                    reply.error(EIO);
+                                    return;
+                                }
+                                info!(
+                                    "Renamed torrent '{}' to '{}' (id={}, source_path: '{}' -> '{}', name preserved: '{}')",
+                                    old_name, newname_str, torrent.id, old_source_path, new_source_path, torrent.name
+                                );
+                            }
+                            Ok(None) => {
+                                info!(
+                                    "Renamed file '{}' to '{}' (not yet in database)",
+                                    old_name, newname_str
+                                );
+                            }
+                            Err(e) => {
+                                error!("Database error during rename: {:?}", e);
+                                reply.error(EIO);
+                                return;
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        error!("Database lock poisoned during rename");
+                        reply.error(EIO);
+                        return;
+                    }
+                }
+            } else {
+                info!(
+                    "Renamed file '{}' to '{}' (no database)",
+                    old_name, newname_str
+                );
+            }
+
+            reply.ok();
+        }
     }
 
     fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {

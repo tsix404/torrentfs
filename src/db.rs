@@ -915,6 +915,46 @@ impl Database {
         Ok(())
     }
 
+    /// Rename a metadata directory and update all descendant paths and torrent source_paths.
+    /// Uses a transaction for atomicity so renames persist across restarts.
+    pub fn rename_metadata_directory(
+        &mut self,
+        old_path: &str,
+        new_name: &str,
+        new_path: &str,
+    ) -> Result<(), DbError> {
+        let tx = self.conn.transaction()?;
+
+        // 1. Update the directory itself
+        tx.execute(
+            "UPDATE metadata_directories SET name = ?, path = ? WHERE path = ?",
+            params![new_name, new_path, old_path],
+        )?;
+
+        // 2. Update all child directories' paths (replace old_path prefix with new_path)
+        let old_prefix = format!("{}/", old_path);
+        let new_prefix = format!("{}/", new_path);
+        tx.execute(
+            "UPDATE metadata_directories SET path = ? || substr(path, ?) WHERE path LIKE ?",
+            params![new_prefix, old_prefix.len() + 1, format!("{}%", old_prefix)],
+        )?;
+
+        // 3. Update torrents whose source_path matches exactly
+        tx.execute(
+            "UPDATE torrents SET source_path = ? WHERE source_path = ?",
+            params![new_path, old_path],
+        )?;
+
+        // 4. Update torrents whose source_path starts with old_path/
+        tx.execute(
+            "UPDATE torrents SET source_path = ? || substr(source_path, ?) WHERE source_path LIKE ?",
+            params![new_prefix, old_prefix.len() + 1, format!("{}%", old_prefix)],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn get_all_torrents(&self) -> Result<Vec<Torrent>, DbError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, source_path, name, filename, total_size, info_hash, file_count, status, torrent_data, resume_data, created_at
@@ -1258,7 +1298,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
+    use tempfile::{NamedTempFile, TempDir};
 
     #[test]
     fn test_open_in_memory() {
@@ -2067,5 +2107,118 @@ mod tests {
             .get_torrent_by_filename_and_source_path("Renamed.torrent", "path2")
             .unwrap();
         assert!(new_lookup.is_some());
+    }
+
+    #[test]
+    fn test_rename_metadata_directory() {
+        let mut db = Database::open_in_memory().unwrap();
+
+        // Create metadata directories: "movies" and "movies/action"
+        db.ensure_metadata_directories("movies/action").unwrap();
+
+        // Insert a torrent in "movies/action"
+        db.insert_torrent(
+            "movies/action",
+            "DieHard",
+            "DieHard.torrent",
+            1024,
+            "hash1",
+            1,
+        )
+        .unwrap();
+
+        // Rename "movies" -> "films"
+        db.rename_metadata_directory("movies", "films", "films")
+            .unwrap();
+
+        // Verify directory was renamed
+        let dirs = db.get_all_metadata_directories().unwrap();
+        let dir_paths: Vec<&str> = dirs.iter().map(|(_, _, _, p)| p.as_str()).collect();
+        assert!(dir_paths.contains(&"films"));
+        assert!(dir_paths.contains(&"films/action"));
+        assert!(!dir_paths.contains(&"movies"));
+        assert!(!dir_paths.contains(&"movies/action"));
+
+        // Verify torrent source_path was updated
+        let torrent = db.get_torrent_by_id(1).unwrap().unwrap();
+        assert_eq!(torrent.source_path, "films/action");
+    }
+
+    #[test]
+    fn test_rename_metadata_directory_simple() {
+        let mut db = Database::open_in_memory().unwrap();
+
+        // Create metadata directory "old_dir"
+        db.ensure_metadata_directories("old_dir").unwrap();
+
+        // Insert a torrent in "old_dir"
+        db.insert_torrent("old_dir", "MyTorrent", "MyTorrent.torrent", 512, "hash2", 1)
+            .unwrap();
+
+        // Rename "old_dir" -> "new_dir"
+        db.rename_metadata_directory("old_dir", "new_dir", "new_dir")
+            .unwrap();
+
+        // Verify directory renamed
+        let dirs = db.get_all_metadata_directories().unwrap();
+        let dir_paths: Vec<&str> = dirs.iter().map(|(_, _, _, p)| p.as_str()).collect();
+        assert!(dir_paths.contains(&"new_dir"));
+        assert!(!dir_paths.contains(&"old_dir"));
+
+        // Verify torrent source_path updated
+        let torrent = db.get_torrent_by_id(1).unwrap().unwrap();
+        assert_eq!(torrent.source_path, "new_dir");
+    }
+
+    #[test]
+    fn test_rename_metadata_directory_persists() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let db_path = temp_dir.path().join("test.db");
+
+        // Create, insert, rename, and close
+        {
+            let mut db = Database::open(&db_path).unwrap();
+            db.ensure_metadata_directories("alpha").unwrap();
+            db.insert_torrent("alpha", "Test", "Test.torrent", 100, "h1", 1)
+                .unwrap();
+            db.rename_metadata_directory("alpha", "beta", "beta")
+                .unwrap();
+        }
+
+        // Reopen and verify persistence
+        {
+            let db = Database::open(&db_path).unwrap();
+            let dirs = db.get_all_metadata_directories().unwrap();
+            let dir_paths: Vec<&str> = dirs.iter().map(|(_, _, _, p)| p.as_str()).collect();
+            assert!(dir_paths.contains(&"beta"));
+            assert!(!dir_paths.contains(&"alpha"));
+
+            let torrent = db.get_torrent_by_id(1).unwrap().unwrap();
+            assert_eq!(torrent.source_path, "beta");
+        }
+    }
+
+    #[test]
+    fn test_rename_metadata_directory_nested_torrents() {
+        let mut db = Database::open_in_memory().unwrap();
+
+        // Create "a/b" and "a/c"
+        db.ensure_metadata_directories("a/b").unwrap();
+        db.ensure_metadata_directories("a/c").unwrap();
+
+        // Insert torrents in different subdirs
+        db.insert_torrent("a/b", "T1", "T1.torrent", 100, "h1", 1)
+            .unwrap();
+        db.insert_torrent("a/c", "T2", "T2.torrent", 200, "h2", 1)
+            .unwrap();
+
+        // Rename "a" -> "z"
+        db.rename_metadata_directory("a", "z", "z").unwrap();
+
+        // Both torrents should have updated source_paths
+        let t1 = db.get_torrent_by_id(1).unwrap().unwrap();
+        assert_eq!(t1.source_path, "z/b");
+        let t2 = db.get_torrent_by_id(2).unwrap().unwrap();
+        assert_eq!(t2.source_path, "z/c");
     }
 }
