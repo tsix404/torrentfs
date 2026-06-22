@@ -1372,7 +1372,14 @@ impl Filesystem for TorrentFs {
         // This is called during close() and its error propagates to userspace,
         // unlike release() which is asynchronous.
         if let Some(InodeData::File { data, name, .. }) = self.inodes.get(&ino) {
-            if name.ends_with(".torrent") && !data.is_empty() {
+            if name.ends_with(".torrent") {
+                // Reject zero-byte torrent files
+                if data.is_empty() {
+                    warn!("Zero-byte torrent file {} rejected", name);
+                    reply.error(EINVAL);
+                    return;
+                }
+
                 // Check size limit
                 if data.len() > MAX_TORRENT_SIZE {
                     warn!(
@@ -1412,7 +1419,15 @@ impl Filesystem for TorrentFs {
     ) {
         if let Some(ino) = self.open_files.remove(&fh) {
             if let Some(InodeData::File { data, name, parent }) = self.inodes.get(&ino).cloned() {
-                if name.ends_with(".torrent") && !data.is_empty() {
+                if name.ends_with(".torrent") {
+                    if data.is_empty() {
+                        // Zero-byte torrent: flush already returned EINVAL, clean up ghost inode
+                        warn!("Zero-byte torrent file {} removed", name);
+                        self.inodes.remove(&ino);
+                        reply.ok();
+                        return;
+                    }
+
                     // Size check is already done in flush, but keep for safety
                     if data.len() > MAX_TORRENT_SIZE {
                         self.inodes.remove(&ino);

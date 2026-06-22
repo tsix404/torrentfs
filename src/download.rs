@@ -376,7 +376,9 @@ impl DownloadManager {
             status.progress * 100.0
         );
 
-        let max_wait_secs = 10;
+        // Wait up to 30s for CheckingFiles/re-verification to complete.
+        // The previous 10s timeout was too short for cached torrents after restart.
+        let max_wait_secs = 30;
         let start = std::time::Instant::now();
         while matches!(
             status.state,
