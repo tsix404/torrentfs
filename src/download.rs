@@ -448,16 +448,34 @@ impl DownloadManager {
             file_index, offset, size, start_piece, end_piece, num_pieces, piece_length
         );
 
+        let piece_wait_timeout = std::time::Duration::from_secs(30);
         for piece_idx in start_piece..=end_piece {
             if !handle_guard.have_piece(piece_idx) {
                 tracing::debug!(
-                    "read_file_range: piece {} not available, torrent is still downloading",
+                    "read_file_range: piece {} not available, waiting for download...",
                     piece_idx
                 );
-                return Err(TorrentError::InvalidFile(format!(
-                    "Piece {} not yet downloaded. Torrent is still in downloading state with {:.2}% progress.",
-                    piece_idx, status.progress * 100.0
-                )));
+                let piece_wait_start = std::time::Instant::now();
+                loop {
+                    if piece_wait_start.elapsed() >= piece_wait_timeout {
+                        status = handle_guard.status()?;
+                        return Err(TorrentError::InvalidFile(format!(
+                            "Timed out waiting for piece {} after {:.0}s. Torrent progress: {:.2}%",
+                            piece_idx,
+                            piece_wait_timeout.as_secs(),
+                            status.progress * 100.0
+                        )));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    if handle_guard.have_piece(piece_idx) {
+                        tracing::debug!(
+                            "read_file_range: piece {} is now available after {:.1}s",
+                            piece_idx,
+                            piece_wait_start.elapsed().as_secs_f64()
+                        );
+                        break;
+                    }
+                }
             }
         }
 
