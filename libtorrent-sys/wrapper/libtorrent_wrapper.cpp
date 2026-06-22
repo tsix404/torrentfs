@@ -354,7 +354,7 @@ int lt_torrent_handle_read_piece(lt_session_t session, lt_torrent_handle_t handl
             
             for (auto* alert : alerts) {
                 if (auto* rp = lt::alert_cast<lt::read_piece_alert>(alert)) {
-                    if (static_cast<int>(rp->piece) == piece_index) {
+                    if (rp->handle == *h && static_cast<int>(rp->piece) == piece_index) {
                         if (rp->error) {
                             if (error) {
                                 error->code = rp->error.value();
