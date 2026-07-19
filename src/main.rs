@@ -1300,18 +1300,6 @@ impl TorrentFs {
         if let Ok(db) = self.get_db() {
             if let Ok(db_guard) = db.lock() {
                 if let Ok(torrents) = db_guard.get_all_torrents() {
-                    // Build a map of info_hash -> Vec<torrent> for assigning indices
-                    let mut _ihash_to_torrents: std::collections::HashMap<
-                        String,
-                        Vec<&db::Torrent>,
-                    > = std::collections::HashMap::new();
-                    for t in &torrents {
-                        _ihash_to_torrents
-                            .entry(t.info_hash.clone())
-                            .or_default()
-                            .push(t);
-                    }
-
                     let mut torrent_idx = 0usize;
                     for t in &torrents {
                         torrent_idx += 1;
@@ -1405,9 +1393,9 @@ impl TorrentFs {
                         ));
 
                         output.push_str(&format!(
-                            "      source_path: \"{}\"                       info_hash: {}\n",
+                            "      source_path: \"{}\"                       info_hash: {}...\n",
                             if t.source_path.is_empty() {
-                                "\"\""
+                                ""
                             } else {
                                 &t.source_path
                             },
@@ -1477,7 +1465,7 @@ impl TorrentFs {
                                         "#?".to_string()
                                     };
                                     let sp = if source_path.is_empty() {
-                                        "\"\""
+                                        ""
                                     } else {
                                         source_path
                                     };
