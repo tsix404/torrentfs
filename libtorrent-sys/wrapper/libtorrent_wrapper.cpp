@@ -15,7 +15,6 @@
 #include <libtorrent/disk_buffer_holder.hpp>
 #include <libtorrent/disk_observer.hpp>
 #include <libtorrent/hasher.hpp>
-#include <libtorrent/hex.hpp>
 #include <libtorrent/session_params.hpp>
 #include <libtorrent/peer_request.hpp>
 #include <libtorrent/storage_defs.hpp>
@@ -902,7 +901,9 @@ namespace {
 
 std::string sha1_to_hex(lt::sha1_hash const& h) {
     char hex[41];
-    lt::aux::to_hex({h.data(), 20}, hex);
+    for (int i = 0; i < 20; i++) {
+        snprintf(hex + i * 2, 3, "%02x", static_cast<unsigned char>(h.data()[i]));
+    }
     return std::string(hex, 40);
 }
 
