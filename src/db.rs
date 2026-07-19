@@ -1037,6 +1037,59 @@ impl Database {
         Ok(torrents)
     }
 
+    /// Get counts of torrents grouped by status.
+    /// Returns (pending, downloading, seeding, error, total).
+    pub fn get_torrent_counts_by_status(&self) -> Result<(i64, i64, i64, i64, i64), DbError> {
+        let mut pending: i64 = 0;
+        let mut downloading: i64 = 0;
+        let mut seeding: i64 = 0;
+        let mut error: i64 = 0;
+
+        let mut stmt = self
+            .conn
+            .prepare("SELECT status, COUNT(*) as cnt FROM torrents GROUP BY status")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (status, cnt) = row?;
+            match status.as_str() {
+                "pending" => pending = cnt,
+                "downloading" => downloading = cnt,
+                "seeding" => seeding = cnt,
+                "error" => error = cnt,
+                _ => {}
+            }
+        }
+        let total = pending + downloading + seeding + error;
+        Ok((pending, downloading, seeding, error, total))
+    }
+
+    /// Get all torrents that share a given info_hash.
+    /// Used to list associated torrents for cache stats.
+    pub fn get_torrents_by_infohash(
+        &self,
+        info_hash: &str,
+    ) -> Result<Vec<(i64, String, String, String)>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, filename, source_path FROM torrents WHERE info_hash = ? ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![info_hash], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            let (id, name, filename, source_path) = row?;
+            result.push((id, name, filename, source_path));
+        }
+        Ok(result)
+    }
+
     /// Get all metadata directories with their id, parent_id, name, and path.
     /// Used to restore inode cache on filesystem startup.
     #[allow(clippy::type_complexity)]
