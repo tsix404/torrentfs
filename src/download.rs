@@ -24,6 +24,7 @@ pub struct DownloadManager {
     handles: HashMap<String, Arc<Mutex<TorrentHandle>>>,
     cache_dir: String,
     cache_manager: Arc<Mutex<CacheManager>>,
+    custom_storage_active: bool,
 }
 
 impl Session {
@@ -415,6 +416,7 @@ impl DownloadManager {
             handles: HashMap::new(),
             cache_dir: cache_dir_str,
             cache_manager: Arc::new(Mutex::new(cache_manager)),
+            custom_storage_active: false,
         })
     }
 
@@ -450,17 +452,30 @@ impl DownloadManager {
             return Ok(handle.clone());
         }
 
-        let cache_path = Path::new(&self.cache_dir).join(&info_hash);
-        std::fs::create_dir_all(&cache_path).map_err(|e| TorrentError::IoError(e.to_string()))?;
+        // Use cache/pieces/ as the piece storage directory.
+        // Note: the C++ PieceStorageDiskIO creates a "pieces/" subdirectory
+        // under the given path, so we pass the base cache_dir (not cache/pieces/).
+        let cache_base = Path::new(&self.cache_dir);
+        let pieces_dir = cache_base.join("pieces");
+        std::fs::create_dir_all(&pieces_dir)
+            .map_err(|e| TorrentError::IoError(e.to_string()))?;
 
         let mut session = self.session.lock().map_err(|_| TorrentError::Unknown {
             code: -1,
             message: "Session lock poisoned".to_string(),
         })?;
 
-        let handle = session.add_torrent(info, &cache_path)?;
-        let handle = Arc::new(Mutex::new(handle));
+        let handle = if !self.custom_storage_active {
+            // First torrent: replace session with custom-storage session
+            let h = session.add_torrent_with_custom_storage(info, cache_base)?;
+            self.custom_storage_active = true;
+            h
+        } else {
+            // Custom storage already active: use regular add_torrent on the custom-storage session
+            session.add_torrent(info, &pieces_dir)?
+        };
 
+        let handle = Arc::new(Mutex::new(handle));
         self.handles.insert(info_hash.clone(), handle.clone());
 
         Ok(handle)
