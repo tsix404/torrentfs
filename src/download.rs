@@ -102,6 +102,40 @@ impl Session {
     fn inner(&self) -> libtorrent_sys::lt_session_t {
         self.inner
     }
+
+    /// Get session-level statistics (rates, connections, DHT nodes).
+    pub fn get_stats(&self) -> TorrentResult<SessionStats> {
+        let mut stats = libtorrent_sys::lt_session_stats_t {
+            download_rate: 0,
+            upload_rate: 0,
+            total_downloaded: 0,
+            total_uploaded: 0,
+            dht_nodes: 0,
+            peers_connected: 0,
+            half_open_connections: 0,
+        };
+        let mut status: i32 = -1;
+
+        let result =
+            unsafe { libtorrent_sys::lt_session_get_stats(self.inner, &mut stats, &mut status) };
+
+        if result != 0 {
+            Err(TorrentError::Unknown {
+                code: result,
+                message: "Failed to get session stats".to_string(),
+            })
+        } else {
+            Ok(SessionStats {
+                download_rate: stats.download_rate,
+                upload_rate: stats.upload_rate,
+                total_downloaded: stats.total_downloaded,
+                total_uploaded: stats.total_uploaded,
+                dht_nodes: stats.dht_nodes,
+                peers_connected: stats.peers_connected,
+                half_open_connections: stats.half_open_connections,
+            })
+        }
+    }
 }
 
 impl Drop for Session {
@@ -124,6 +158,12 @@ impl TorrentHandle {
         let mut progress: f32 = 0.0;
         let mut total_done: u64 = 0;
         let mut total: u64 = 0;
+        let mut download_rate: i64 = 0;
+        let mut upload_rate: i64 = 0;
+        let mut total_download: i64 = 0;
+        let mut total_upload: i64 = 0;
+        let mut num_peers: i32 = 0;
+        let mut num_seeds: i32 = 0;
 
         let result = unsafe {
             libtorrent_sys::lt_torrent_handle_status(
@@ -132,6 +172,12 @@ impl TorrentHandle {
                 &mut progress,
                 &mut total_done,
                 &mut total,
+                &mut download_rate,
+                &mut upload_rate,
+                &mut total_download,
+                &mut total_upload,
+                &mut num_peers,
+                &mut num_seeds,
             )
         };
 
@@ -146,6 +192,12 @@ impl TorrentHandle {
                 progress,
                 total_done,
                 total,
+                download_rate,
+                upload_rate,
+                total_download,
+                total_upload,
+                num_peers,
+                num_seeds,
             })
         }
     }
@@ -255,12 +307,29 @@ impl Drop for TorrentHandle {
 unsafe impl Send for TorrentHandle {}
 
 #[derive(Debug, Clone)]
+pub struct SessionStats {
+    pub download_rate: i64,
+    pub upload_rate: i64,
+    pub total_downloaded: i64,
+    pub total_uploaded: i64,
+    pub dht_nodes: i32,
+    pub peers_connected: i32,
+    pub half_open_connections: i32,
+}
+
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct TorrentStatus {
     pub state: TorrentState,
     pub progress: f32,
     pub total_done: u64,
     pub total: u64,
+    pub download_rate: i64,
+    pub upload_rate: i64,
+    pub total_download: i64,
+    pub total_upload: i64,
+    pub num_peers: i32,
+    pub num_seeds: i32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -318,6 +387,23 @@ impl DownloadManager {
     #[allow(dead_code)]
     pub fn get_cache_manager(&self) -> Arc<Mutex<CacheManager>> {
         self.cache_manager.clone()
+    }
+
+    /// Get session-level stats.
+    pub fn get_session_stats(&self) -> TorrentResult<SessionStats> {
+        let session = self.session.lock().map_err(|_| TorrentError::Unknown {
+            code: -1,
+            message: "Session lock poisoned".to_string(),
+        })?;
+        session.get_stats()
+    }
+
+    /// Get all torrent handles and their info hashes.
+    pub fn get_all_handles(&self) -> Vec<(String, Arc<Mutex<TorrentHandle>>)> {
+        self.handles
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
     }
 
     pub fn get_or_create_handle(

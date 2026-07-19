@@ -12,6 +12,7 @@ const CACHE_METADATA_FILE: &str = "cache_metadata.txt";
 pub struct PieceMetadata {
     pub last_accessed: u64,
     pub size: u64,
+    pub hit_count: u64,
 }
 
 #[derive(Debug)]
@@ -20,6 +21,8 @@ pub struct CacheManager {
     metadata: HashMap<String, PieceMetadata>,
     max_cache_size: u64,
     current_size: u64,
+    pub miss_count: u64,
+    pub hit_count: u64,
 }
 
 fn current_timestamp_ms() -> u64 {
@@ -43,6 +46,8 @@ impl CacheManager {
             metadata: HashMap::new(),
             max_cache_size,
             current_size: 0,
+            miss_count: 0,
+            hit_count: 0,
         };
 
         manager.rebuild_index()?;
@@ -79,11 +84,17 @@ impl CacheManager {
                 let piece_key = parts[0].to_string();
                 if let Ok(last_accessed) = parts[1].parse::<u64>() {
                     if let Ok(size) = parts[2].parse::<u64>() {
+                        let hit_count = if parts.len() >= 4 {
+                            parts[3].parse::<u64>().unwrap_or(0)
+                        } else {
+                            0
+                        };
                         self.metadata.insert(
                             piece_key,
                             PieceMetadata {
                                 last_accessed,
                                 size,
+                                hit_count,
                             },
                         );
                     }
@@ -195,11 +206,18 @@ impl CacheManager {
                     .map(|m| m.last_accessed)
                     .unwrap_or_else(current_timestamp_ms);
 
+                let hit_count = self
+                    .metadata
+                    .get(&piece_key)
+                    .map(|m| m.hit_count)
+                    .unwrap_or(0);
+
                 self.metadata.insert(
                     piece_key.clone(),
                     PieceMetadata {
                         last_accessed,
                         size,
+                        hit_count,
                     },
                 );
                 self.current_size += size;
@@ -218,8 +236,8 @@ impl CacheManager {
         for (piece_key, meta) in &self.metadata {
             writeln!(
                 writer,
-                "{}\t{}\t{}",
-                piece_key, meta.last_accessed, meta.size
+                "{}\t{}\t{}\t{}",
+                piece_key, meta.last_accessed, meta.size, meta.hit_count
             )
             .map_err(|e| TorrentError::IoError(format!("Failed to write metadata: {}", e)))?;
         }
@@ -236,7 +254,10 @@ impl CacheManager {
 
         if let Some(meta) = self.metadata.get_mut(piece_key) {
             meta.last_accessed = now;
+            meta.hit_count += 1;
+            self.hit_count += 1;
         } else {
+            self.miss_count += 1;
             return Err(TorrentError::IoError(format!(
                 "Piece not found in cache: {}",
                 piece_key
@@ -254,6 +275,7 @@ impl CacheManager {
             PieceMetadata {
                 last_accessed: now,
                 size,
+                hit_count: 0,
             },
         );
 
@@ -344,6 +366,60 @@ impl CacheManager {
     pub fn piece_count(&self) -> usize {
         self.metadata.len()
     }
+
+    #[allow(dead_code)]
+    pub fn max_cache_size(&self) -> u64 {
+        self.max_cache_size
+    }
+
+    /// Get all unique info_hashes from cache metadata.
+    pub fn get_all_infohashes(&self) -> Vec<String> {
+        let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for key in self.metadata.keys() {
+            if let Some(info_hash) = key.split(':').next() {
+                if !info_hash.is_empty() {
+                    set.insert(info_hash.to_string());
+                }
+            }
+        }
+        let mut result: Vec<String> = set.into_iter().collect();
+        result.sort();
+        result
+    }
+
+    /// Get aggregated cache stats for a specific info_hash.
+    pub fn get_cache_stats_by_infohash(&self, info_hash: &str) -> InfohashCacheStats {
+        let mut piece_count: u64 = 0;
+        let mut total_size: u64 = 0;
+        let mut total_hit_count: u64 = 0;
+
+        for (key, meta) in &self.metadata {
+            if let Some(hash) = key.split(':').next() {
+                if hash == info_hash {
+                    piece_count += 1;
+                    total_size += meta.size;
+                    total_hit_count += meta.hit_count;
+                }
+            }
+        }
+
+        InfohashCacheStats {
+            info_hash: info_hash.to_string(),
+            piece_count,
+            total_size,
+            hit_count: total_hit_count,
+        }
+    }
+}
+
+/// Per-info_hash aggregated cache statistics.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct InfohashCacheStats {
+    pub info_hash: String,
+    pub piece_count: u64,
+    pub total_size: u64,
+    pub hit_count: u64,
 }
 
 #[cfg(test)]

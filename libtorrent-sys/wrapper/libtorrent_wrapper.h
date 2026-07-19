@@ -29,6 +29,16 @@ typedef struct {
 } lt_torrent_metadata_t;
 
 typedef struct {
+    int64_t download_rate;
+    int64_t upload_rate;
+    int64_t total_downloaded;
+    int64_t total_uploaded;
+    int32_t dht_nodes;
+    int32_t peers_connected;
+    int32_t half_open_connections;
+} lt_session_stats_t;
+
+typedef struct {
     const char* message;
     int code;
 } lt_error_t;
@@ -58,7 +68,9 @@ void lt_session_remove_torrent(lt_session_t session, lt_torrent_handle_t handle,
 void lt_torrent_handle_destroy(lt_torrent_handle_t handle);
 
 int lt_torrent_handle_is_valid(lt_torrent_handle_t handle);
-int lt_torrent_handle_status(lt_torrent_handle_t handle, int* state, float* progress, uint64_t* total_done, uint64_t* total);
+int lt_torrent_handle_status(lt_torrent_handle_t handle, int* state, float* progress, uint64_t* total_done, uint64_t* total,
+    int64_t* download_rate, int64_t* upload_rate, int64_t* total_download, int64_t* total_upload,
+    int32_t* num_peers, int32_t* num_seeds);
 int lt_torrent_handle_read_piece(lt_session_t session, lt_torrent_handle_t handle, int piece_index, uint8_t** data_out, size_t* size_out, lt_error_t* error);
 void lt_piece_data_free(uint8_t* data);
 int lt_torrent_handle_get_piece_info(lt_torrent_handle_t handle, int file_index, int64_t* first_piece, int64_t* num_pieces, int64_t* file_offset);
@@ -66,6 +78,8 @@ int lt_torrent_handle_get_torrent_info(lt_torrent_handle_t handle, int64_t* piec
 int lt_torrent_handle_have_piece(lt_torrent_handle_t handle, int piece_index);
 
 void lt_session_apply_settings(lt_session_t session, const char* settings_json);
+
+int lt_session_get_stats(lt_session_t session, lt_session_stats_t* stats, int32_t* error);
 
 #ifdef __cplusplus
 }
