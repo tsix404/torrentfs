@@ -12,6 +12,7 @@ pub struct SeedingManager {
     handles: Arc<Mutex<HashMap<String, TorrentHandle>>>,
     seeding_info: Arc<Mutex<HashMap<String, SeedingInfo>>>,
     cache_dir: PathBuf,
+    custom_storage_active: Arc<Mutex<bool>>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +42,7 @@ impl SeedingManager {
             handles: Arc::new(Mutex::new(HashMap::new())),
             seeding_info: Arc::new(Mutex::new(HashMap::new())),
             cache_dir: cache_dir.to_path_buf(),
+            custom_storage_active: Arc::new(Mutex::new(false)),
         })
     }
 
@@ -58,9 +60,12 @@ impl SeedingManager {
             }
         }
 
-        let cache_path = self.cache_dir.join(&info_hash);
-        if !cache_path.exists() {
-            std::fs::create_dir_all(&cache_path)
+        // Use cache/pieces/ as the piece storage directory.
+        // Note: the C++ PieceStorageDiskIO creates a "pieces/" subdirectory
+        // under the given path, so we pass the base cache_dir (not cache/pieces/).
+        let pieces_dir = self.cache_dir.join("pieces");
+        if !pieces_dir.exists() {
+            std::fs::create_dir_all(&pieces_dir)
                 .map_err(|e| TorrentError::IoError(e.to_string()))?;
         }
 
@@ -70,7 +75,31 @@ impl SeedingManager {
                 message: "Session lock poisoned".to_string(),
             })?;
 
-            session.add_torrent(info, &cache_path)?
+            let custom_active = {
+                let flag = self.custom_storage_active.lock().map_err(|_| {
+                    TorrentError::Unknown {
+                        code: -1,
+                        message: "Custom storage flag lock poisoned".to_string(),
+                    }
+                })?;
+                *flag
+            };
+
+            if !custom_active {
+                // First seed: replace session with custom-storage session
+                let h = session.add_torrent_with_custom_storage(info, &self.cache_dir)?;
+                let mut flag = self.custom_storage_active.lock().map_err(|_| {
+                    TorrentError::Unknown {
+                        code: -1,
+                        message: "Custom storage flag lock poisoned".to_string(),
+                    }
+                })?;
+                *flag = true;
+                h
+            } else {
+                // Custom storage already active: use regular add_torrent
+                session.add_torrent(info, &pieces_dir)?
+            }
         };
 
         let name = info.name();
