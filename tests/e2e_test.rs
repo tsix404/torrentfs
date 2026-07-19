@@ -68,7 +68,8 @@ fn test_read_file_range_with_local_seed() {
     println!("  Piece length: {}", info.piece_length());
     println!("  Num pieces: {}", info.num_pieces());
 
-    let mut dm = DownloadManager::new(&cache_dir).expect("Failed to create download manager");
+    let mut dm = DownloadManager::new(&cache_dir, &torrentfs::TorrentfsConfig::default_config())
+        .expect("Failed to create download manager");
 
     let info_hash = hex::encode(info.info_hash().expect("Failed to get info hash"));
     let torrent_cache_dir = cache_dir.join(&info_hash);

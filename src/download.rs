@@ -5,6 +5,7 @@ use std::ptr;
 use std::sync::{Arc, Mutex};
 
 use crate::cache::CacheManager;
+use crate::config::TorrentfsConfig;
 use crate::error::{error_from_c, TorrentError, TorrentResult};
 
 pub struct Session {
@@ -26,32 +27,31 @@ pub struct DownloadManager {
 }
 
 impl Session {
-    pub fn new(listen_interface: Option<&str>) -> TorrentResult<Self> {
-        let listen = listen_interface
-            .map(|s| CString::new(s).unwrap())
-            .unwrap_or_default();
-
+    pub fn new(config: &TorrentfsConfig) -> TorrentResult<Self> {
         let mut error = libtorrent_sys::lt_error_t {
             message: ptr::null(),
             code: 0,
         };
 
-        let inner = unsafe {
-            libtorrent_sys::lt_session_create(
-                if listen_interface.is_some() {
-                    listen.as_ptr()
-                } else {
-                    ptr::null()
-                },
-                &mut error,
-            )
-        };
+        // Create session with default settings (alert_mask only, no listen_interface)
+        let inner = unsafe { libtorrent_sys::lt_session_create(ptr::null(), &mut error) };
 
         if inner.is_null() {
-            Err(unsafe { error_from_c(&error) })
-        } else {
-            Ok(Session { inner })
+            return Err(unsafe { error_from_c(&error) });
         }
+
+        let session = Session { inner };
+
+        // Apply user configuration via JSON
+        let settings_json = config.to_settings_json();
+        if settings_json != "{}" {
+            let json_c = CString::new(settings_json).unwrap_or_default();
+            unsafe {
+                libtorrent_sys::lt_session_apply_settings(session.inner, json_c.as_ptr());
+            }
+        }
+
+        Ok(session)
     }
 
     pub fn add_torrent(
@@ -301,8 +301,8 @@ pub struct FilePieceInfo {
 }
 
 impl DownloadManager {
-    pub fn new(cache_dir: &Path) -> TorrentResult<Self> {
-        let session = Session::new(None)?;
+    pub fn new(cache_dir: &Path, config: &TorrentfsConfig) -> TorrentResult<Self> {
+        let session = Session::new(config)?;
         let cache_dir_str = cache_dir.to_string_lossy().into_owned();
 
         let cache_manager = CacheManager::new(cache_dir, 1024 * 1024 * 1024)?;

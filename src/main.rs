@@ -18,12 +18,14 @@ use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 mod cache;
+mod config;
 mod db;
 mod download;
 mod error;
 mod torrent_info;
 
 use cache::CacheManager;
+use config::TorrentfsConfig;
 use db::{Database, FileEntry, InsertTorrentResult};
 use download::DownloadManager;
 use torrent_info::TorrentInfo;
@@ -88,6 +90,8 @@ struct Args {
     db: Option<PathBuf>,
     #[arg(long, help = "Cache directory for downloaded pieces")]
     cache: Option<PathBuf>,
+    #[arg(long, help = "Configuration file path (TOML)")]
+    config: Option<PathBuf>,
 }
 
 struct TorrentFs {
@@ -104,12 +108,7 @@ struct TorrentFs {
 }
 
 impl TorrentFs {
-    #[allow(dead_code)]
-    fn new() -> Self {
-        Self::new_with_cache_path(PathBuf::from("/tmp/torrentfs-cache"))
-    }
-
-    fn new_with_cache_path(cache_path: PathBuf) -> Self {
+    fn new_with_cache_path(cache_path: PathBuf, config: &TorrentfsConfig) -> Self {
         let mut inodes = HashMap::new();
         inodes.insert(
             ROOT_INO,
@@ -139,7 +138,7 @@ impl TorrentFs {
             }
         }
 
-        let download_manager = DownloadManager::new(cache_path.as_path()).ok();
+        let download_manager = DownloadManager::new(cache_path.as_path(), config).ok();
 
         let cache_manager = CacheManager::new(&cache_path, 1024 * 1024 * 1024).ok();
 
@@ -162,12 +161,20 @@ impl TorrentFs {
     }
 
     #[allow(dead_code)]
+    fn new() -> Self {
+        Self::new_with_cache_path(
+            PathBuf::from("/tmp/torrentfs-cache"),
+            &TorrentfsConfig::default_config(),
+        )
+    }
+
+    #[allow(dead_code)]
     fn new_with_db(_db: Database) -> Self {
         Self::new()
     }
 
-    fn new_with_db_and_cache(db: Database, cache_path: PathBuf) -> Self {
-        let mut fs = Self::new_with_cache_path(cache_path);
+    fn new_with_db_and_cache(db: Database, cache_path: PathBuf, config: &TorrentfsConfig) -> Self {
+        let mut fs = Self::new_with_cache_path(cache_path, config);
 
         // First, collect all data we need from the database
         let (dirs, torrents) = {
@@ -2352,6 +2359,21 @@ fn main() {
 
     let args = Args::parse();
 
+    // Load configuration from TOML file if provided
+    let config = match &args.config {
+        Some(config_path) => match TorrentfsConfig::from_file(config_path) {
+            Ok(cfg) => {
+                info!("Loaded configuration from {:?}", config_path);
+                cfg
+            }
+            Err(e) => {
+                error!("Failed to load config from {:?}: {}", config_path, e);
+                std::process::exit(1);
+            }
+        },
+        None => TorrentfsConfig::default_config(),
+    };
+
     if !args.mountpoint.exists() {
         std::fs::create_dir_all(&args.mountpoint).expect("Failed to create mountpoint");
     }
@@ -2412,8 +2434,8 @@ fn main() {
         };
 
         let fs = match db {
-            Some(d) => TorrentFs::new_with_db_and_cache(d, cache_path.clone()),
-            None => TorrentFs::new_with_cache_path(cache_path.clone()),
+            Some(d) => TorrentFs::new_with_db_and_cache(d, cache_path.clone(), &config),
+            None => TorrentFs::new_with_cache_path(cache_path.clone(), &config),
         };
 
         match fuser::mount2(fs, &args.mountpoint, &options) {
@@ -2457,8 +2479,8 @@ fn main() {
     };
 
     let fs = match db {
-        Some(d) => TorrentFs::new_with_db_and_cache(d, cache_path.clone()),
-        None => TorrentFs::new_with_cache_path(cache_path.clone()),
+        Some(d) => TorrentFs::new_with_db_and_cache(d, cache_path.clone(), &config),
+        None => TorrentFs::new_with_cache_path(cache_path.clone(), &config),
     };
 
     match fuser::mount2(fs, &args.mountpoint, &options) {

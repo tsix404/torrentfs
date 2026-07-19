@@ -10,6 +10,7 @@
 #include <libtorrent/torrent_status.hpp>
 #include <libtorrent/alert_types.hpp>
 #include <libtorrent/torrent_flags.hpp>
+#include <libtorrent/settings_pack.hpp>
 #include <cstring>
 #include <cstdlib>
 #include <string>
@@ -18,6 +19,8 @@
 #include <mutex>
 #include <condition_variable>
 #include <chrono>
+#include <cctype>
+#include <map>
 
 struct lt_error {
     std::string message;
@@ -455,5 +458,358 @@ int lt_torrent_handle_have_piece(lt_torrent_handle_t handle, int piece_index) {
     auto status = h->status();
     if (static_cast<int>(status.pieces.size()) <= piece_index) return 0;
     
-    return status.pieces[piece_index] ? 1 : 0;
+    return status.pieces[lt::piece_index_t(piece_index)] ? 1 : 0;
+}
+
+// Minimal JSON parser for flat settings objects
+// Handles: {"key1": "str", "key2": 123, "key3": true, "key4": false}
+static void skip_json_ws(const char*& p) {
+    while (*p && std::isspace(static_cast<unsigned char>(*p))) p++;
+}
+
+static std::string parse_json_string(const char*& p) {
+    // p points to opening '"'
+    p++;
+    std::string result;
+    while (*p && *p != '"') {
+        if (*p == '\\' && *(p + 1)) {
+            p++;
+            char c = *p;
+            switch (c) {
+                case 'n': result += '\n'; break;
+                case 't': result += '\t'; break;
+                case 'r': result += '\r'; break;
+                case '\\': result += '\\'; break;
+                case '"': result += '"'; break;
+                default: result += c; break;
+            }
+        } else {
+            result += *p;
+        }
+        p++;
+    }
+    if (*p == '"') p++;
+    return result;
+}
+
+static int64_t parse_json_int(const char*& p) {
+    bool negative = false;
+    if (*p == '-') { negative = true; p++; }
+    int64_t val = 0;
+    while (*p && std::isdigit(static_cast<unsigned char>(*p))) {
+        val = val * 10 + (*p - '0');
+        p++;
+    }
+    return negative ? -val : val;
+}
+
+static void apply_str_setting(lt::settings_pack& pack, const std::string& key, const std::string& val) {
+    // Phase 1: core string settings
+    if (key == "listen_interfaces") {
+        pack.set_str(lt::settings_pack::listen_interfaces, val);
+    } else if (key == "outgoing_interfaces") {
+        pack.set_str(lt::settings_pack::outgoing_interfaces, val);
+    } else if (key == "user_agent") {
+        pack.set_str(lt::settings_pack::user_agent, val);
+    } else if (key == "peer_fingerprint") {
+        pack.set_str(lt::settings_pack::peer_fingerprint, val);
+    }
+    // Unknown keys are silently ignored
+}
+
+static void apply_int_setting(lt::settings_pack& pack, const std::string& key, int val) {
+    // Phase 1: core integer settings
+    if (key == "max_connections") {
+        // libtorrent 2.0: max_connections is not directly settable via settings_pack
+        // silently ignored
+    } else if (key == "max_uploads") {
+        // libtorrent 2.0: max_uploads is not directly settable via settings_pack
+        // silently ignored
+    } else if (key == "connection_speed") {
+        pack.set_int(lt::settings_pack::connection_speed, val);
+    } else if (key == "peer_connect_timeout") {
+        pack.set_int(lt::settings_pack::peer_connect_timeout, val);
+    } else if (key == "listen_queue_size") {
+        pack.set_int(lt::settings_pack::listen_queue_size, val);
+    } else if (key == "min_reconnect_time") {
+        pack.set_int(lt::settings_pack::min_reconnect_time, val);
+    } else if (key == "max_peerlist_size") {
+        pack.set_int(lt::settings_pack::max_peerlist_size, val);
+    } else if (key == "max_paused_peerlist_size") {
+        pack.set_int(lt::settings_pack::max_paused_peerlist_size, val);
+    } else if (key == "dht_announce_interval") {
+        pack.set_int(lt::settings_pack::dht_announce_interval, val);
+    } else if (key == "max_dht_items") {
+        pack.set_int(lt::settings_pack::dht_max_dht_items, val);
+    } else if (key == "max_active_dht_limit") {
+        pack.set_int(lt::settings_pack::active_dht_limit, val);
+    } else if (key == "download_rate_limit") {
+        pack.set_int(lt::settings_pack::download_rate_limit, val);
+    } else if (key == "upload_rate_limit") {
+        pack.set_int(lt::settings_pack::upload_rate_limit, val);
+    } else if (key == "disk_io_write_mode") {
+        pack.set_int(lt::settings_pack::disk_io_write_mode, val);
+    } else if (key == "disk_io_read_mode") {
+        pack.set_int(lt::settings_pack::disk_io_read_mode, val);
+    } else if (key == "file_pool_size") {
+        pack.set_int(lt::settings_pack::file_pool_size, val);
+    } else if (key == "max_queued_disk_bytes") {
+        pack.set_int(lt::settings_pack::max_queued_disk_bytes, val);
+    } else if (key == "max_queued_disk_bytes_low_watermark") {
+        // libtorrent 2.0: not available, silently ignored
+    } else if (key == "cache_size") {
+        // libtorrent 2.0: cache_size removed, silently ignored
+    } else if (key == "cache_expiry") {
+        // libtorrent 2.0: cache_expiry removed, silently ignored
+    } else if (key == "default_cache_min_age") {
+        // libtorrent 2.0: default_cache_min_age removed, silently ignored
+    } else if (key == "whole_pieces_threshold") {
+        pack.set_int(lt::settings_pack::whole_pieces_threshold, val);
+    } else if (key == "piece_timeout") {
+        pack.set_int(lt::settings_pack::piece_timeout, val);
+    } else if (key == "request_timeout") {
+        pack.set_int(lt::settings_pack::request_timeout, val);
+    } else if (key == "max_out_request_queue") {
+        pack.set_int(lt::settings_pack::max_out_request_queue, val);
+    } else if (key == "max_allowed_in_request_queue") {
+        pack.set_int(lt::settings_pack::max_allowed_in_request_queue, val);
+    } else if (key == "max_suggest_pieces") {
+        pack.set_int(lt::settings_pack::max_suggest_pieces, val);
+    } else if (key == "seeding_piece_quota") {
+        pack.set_int(lt::settings_pack::seeding_piece_quota, val);
+    } else if (key == "max_sparse_regions") {
+        // libtorrent 2.0: not available, silently ignored
+    } else if (key == "peer_timeout") {
+        pack.set_int(lt::settings_pack::peer_timeout, val);
+    } else if (key == "urlseed_timeout") {
+        pack.set_int(lt::settings_pack::urlseed_timeout, val);
+    } else if (key == "urlseed_pipeline_size") {
+        pack.set_int(lt::settings_pack::urlseed_pipeline_size, val);
+    } else if (key == "stop_tracker_timeout") {
+        pack.set_int(lt::settings_pack::stop_tracker_timeout, val);
+    } else if (key == "tracker_completion_timeout") {
+        pack.set_int(lt::settings_pack::tracker_completion_timeout, val);
+    } else if (key == "tracker_receive_timeout") {
+        pack.set_int(lt::settings_pack::tracker_receive_timeout, val);
+    } else if (key == "inactivity_timeout") {
+        pack.set_int(lt::settings_pack::inactivity_timeout, val);
+    } else if (key == "tracker_backoff") {
+        pack.set_int(lt::settings_pack::tracker_backoff, val);
+    } else if (key == "tracker_maximum_response_length") {
+        pack.set_int(lt::settings_pack::tracker_maximum_response_length, val);
+    } else if (key == "min_announce_interval") {
+        pack.set_int(lt::settings_pack::min_announce_interval, val);
+    } else if (key == "udp_tracker_token_expiry") {
+        pack.set_int(lt::settings_pack::udp_tracker_token_expiry, val);
+    } else if (key == "choking_algorithm") {
+        pack.set_int(lt::settings_pack::choking_algorithm, val);
+    } else if (key == "seed_choking_algorithm") {
+        pack.set_int(lt::settings_pack::seed_choking_algorithm, val);
+    } else if (key == "mixed_mode_algorithm") {
+        pack.set_int(lt::settings_pack::mixed_mode_algorithm, val);
+    } else if (key == "suggest_mode") {
+        pack.set_int(lt::settings_pack::suggest_mode, val);
+    } else if (key == "active_downloads") {
+        pack.set_int(lt::settings_pack::active_downloads, val);
+    } else if (key == "active_seeds") {
+        pack.set_int(lt::settings_pack::active_seeds, val);
+    } else if (key == "active_checking") {
+        pack.set_int(lt::settings_pack::active_checking, val);
+    } else if (key == "active_limit") {
+        pack.set_int(lt::settings_pack::active_limit, val);
+    } else if (key == "active_tracker_limit") {
+        pack.set_int(lt::settings_pack::active_tracker_limit, val);
+    } else if (key == "active_lsd_limit") {
+        pack.set_int(lt::settings_pack::active_lsd_limit, val);
+    } else if (key == "active_dht_limit") {
+        pack.set_int(lt::settings_pack::active_dht_limit, val);
+    } else if (key == "auto_manage_interval") {
+        pack.set_int(lt::settings_pack::auto_manage_interval, val);
+    } else if (key == "auto_manage_startup") {
+        pack.set_int(lt::settings_pack::auto_manage_startup, val);
+    } else if (key == "share_ratio_limit") {
+        pack.set_int(lt::settings_pack::share_ratio_limit, val);
+    } else if (key == "seed_time_ratio_limit") {
+        pack.set_int(lt::settings_pack::seed_time_ratio_limit, val);
+    } else if (key == "seed_time_limit") {
+        pack.set_int(lt::settings_pack::seed_time_limit, val);
+    } else if (key == "encryption_policy") {
+        pack.set_int(lt::settings_pack::out_enc_policy, val);
+    } else if (key == "allowed_encryption_level") {
+        pack.set_int(lt::settings_pack::allowed_enc_level, val);
+    } else if (key == "ssl_listen") {
+        // libtorrent 2.0: ssl_listen removed, silently ignored
+    } else if (key == "proxy_port") {
+        pack.set_int(lt::settings_pack::proxy_port, val);
+    } else if (key == "alert_queue_size") {
+        pack.set_int(lt::settings_pack::alert_queue_size, val);
+    } else if (key == "aio_threads") {
+        pack.set_int(lt::settings_pack::aio_threads, val);
+    } else if (key == "network_threads") {
+        // libtorrent 2.0: network_threads removed, silently ignored
+    } else if (key == "checking_mem_usage") {
+        pack.set_int(lt::settings_pack::checking_mem_usage, val);
+    } else if (key == "tick_interval") {
+        pack.set_int(lt::settings_pack::tick_interval, val);
+    } else if (key == "send_buffer_watermark") {
+        pack.set_int(lt::settings_pack::send_buffer_watermark, val);
+    } else if (key == "send_buffer_watermark_factor") {
+        pack.set_int(lt::settings_pack::send_buffer_watermark_factor, val);
+    } else if (key == "send_buffer_low_watermark") {
+        pack.set_int(lt::settings_pack::send_buffer_low_watermark, val);
+    } else if (key == "recv_socket_buffer_size") {
+        pack.set_int(lt::settings_pack::recv_socket_buffer_size, val);
+    } else if (key == "send_socket_buffer_size") {
+        pack.set_int(lt::settings_pack::send_socket_buffer_size, val);
+    } else if (key == "optimistic_disk_retry") {
+        pack.set_int(lt::settings_pack::optimistic_disk_retry, val);
+    } else if (key == "num_optimistic_unchoke_slots") {
+        pack.set_int(lt::settings_pack::num_optimistic_unchoke_slots, val);
+    } else if (key == "max_failcount") {
+        pack.set_int(lt::settings_pack::max_failcount, val);
+    } else if (key == "max_rejects") {
+        pack.set_int(lt::settings_pack::max_rejects, val);
+    } else if (key == "share_mode_target") {
+        pack.set_int(lt::settings_pack::share_mode_target, val);
+    } else if (key == "local_service_announce_interval") {
+        pack.set_int(lt::settings_pack::local_service_announce_interval, val);
+    } else if (key == "read_job_every") {
+        // libtorrent 2.0: not available, silently ignored
+    }
+    // Unknown keys are silently ignored
+}
+
+static void apply_bool_setting(lt::settings_pack& pack, const std::string& key, bool val) {
+    // Phase 1: core boolean settings
+    if (key == "smooth_connects") {
+        pack.set_bool(lt::settings_pack::smooth_connects, val);
+    } else if (key == "allow_multiple_connections_per_ip") {
+        pack.set_bool(lt::settings_pack::allow_multiple_connections_per_ip, val);
+    } else if (key == "enable_dht") {
+        pack.set_bool(lt::settings_pack::enable_dht, val);
+    } else if (key == "enable_lsd") {
+        pack.set_bool(lt::settings_pack::enable_lsd, val);
+    } else if (key == "enable_upnp") {
+        pack.set_bool(lt::settings_pack::enable_upnp, val);
+    } else if (key == "enable_natpmp") {
+        pack.set_bool(lt::settings_pack::enable_natpmp, val);
+    } else if (key == "rate_limit_utp") {
+        // libtorrent 2.0: rate_limit_utp removed, silently ignored
+    } else if (key == "rate_limit_ip_overhead") {
+        pack.set_bool(lt::settings_pack::rate_limit_ip_overhead, val);
+    } else if (key == "use_disk_read_ahead") {
+        // libtorrent 2.0: use_disk_read_ahead removed, silently ignored
+    } else if (key == "lock_disk_cache") {
+        // libtorrent 2.0: lock_disk_cache removed, silently ignored
+    } else if (key == "no_atime_storage") {
+        pack.set_bool(lt::settings_pack::no_atime_storage, val);
+    } else if (key == "low_prio_disk") {
+        // libtorrent 2.0: low_prio_disk removed, silently ignored
+    } else if (key == "use_read_cache") {
+        // libtorrent 2.0: use_read_cache removed, silently ignored
+    } else if (key == "use_disk_cache_pool") {
+        // libtorrent 2.0: use_disk_cache_pool removed, silently ignored
+    } else if (key == "volatile_read_cache") {
+        // libtorrent 2.0: volatile_read_cache deprecated, silently ignored
+    } else if (key == "guided_read_cache") {
+        // libtorrent 2.0: guided_read_cache removed, silently ignored
+    } else if (key == "prioritize_partial_pieces") {
+        pack.set_bool(lt::settings_pack::prioritize_partial_pieces, val);
+    } else if (key == "drop_skipped_requests") {
+        // libtorrent 2.0: not available, silently ignored
+    } else if (key == "announce_to_all_trackers") {
+        pack.set_bool(lt::settings_pack::announce_to_all_trackers, val);
+    } else if (key == "announce_to_all_tiers") {
+        pack.set_bool(lt::settings_pack::announce_to_all_tiers, val);
+    } else if (key == "prefer_udp_trackers") {
+        pack.set_bool(lt::settings_pack::prefer_udp_trackers, val);
+    } else if (key == "auto_manage_prefer_seeds") {
+        pack.set_bool(lt::settings_pack::auto_manage_prefer_seeds, val);
+    } else if (key == "dont_count_slow_torrents") {
+        pack.set_bool(lt::settings_pack::dont_count_slow_torrents, val);
+    } else if (key == "proxy_hostnames") {
+        pack.set_bool(lt::settings_pack::proxy_hostnames, val);
+    } else if (key == "proxy_peer_connections") {
+        pack.set_bool(lt::settings_pack::proxy_peer_connections, val);
+    } else if (key == "proxy_tracker_connections") {
+        pack.set_bool(lt::settings_pack::proxy_tracker_connections, val);
+    } else if (key == "anonymous_mode") {
+        pack.set_bool(lt::settings_pack::anonymous_mode, val);
+    } else if (key == "force_proxy") {
+        // libtorrent 2.0: force_proxy removed, silently ignored
+    } else if (key == "always_send_user_agent") {
+        pack.set_bool(lt::settings_pack::always_send_user_agent, val);
+    } else if (key == "ignore_resume_timestamps") {
+        // libtorrent 2.0: ignore_resume_timestamps removed, silently ignored
+    } else if (key == "no_recheck_incomplete_resume") {
+        pack.set_bool(lt::settings_pack::no_recheck_incomplete_resume, val);
+    } else if (key == "disable_hash_checks") {
+        pack.set_bool(lt::settings_pack::disable_hash_checks, val);
+    } else if (key == "allow_i2p_mixed") {
+        pack.set_bool(lt::settings_pack::allow_i2p_mixed, val);
+    } else if (key == "incoming_starts_queued") {
+        // libtorrent 2.0: not available, silently ignored
+    } else if (key == "ban_web_seeds") {
+        pack.set_bool(lt::settings_pack::ban_web_seeds, val);
+    } else if (key == "report_web_seed_downloads") {
+        pack.set_bool(lt::settings_pack::report_web_seed_downloads, val);
+    } else if (key == "apply_ip_filter_to_trackers") {
+        pack.set_bool(lt::settings_pack::apply_ip_filter_to_trackers, val);
+    } else if (key == "announce_double_nat") {
+        // libtorrent 2.0: announce_double_nat removed, silently ignored
+    } else if (key == "lock_files") {
+        // libtorrent 2.0: lock_files removed, silently ignored
+    } else if (key == "strict_super_seeding") {
+        // libtorrent 2.0: strict_super_seeding removed, silently ignored
+    } else if (key == "enable_os_cache") {
+        pack.set_bool(lt::settings_pack::enable_os_cache, val);
+    }
+    // Unknown keys are silently ignored
+}
+
+void lt_session_apply_settings(lt_session_t session, const char* settings_json) {
+    if (!session || !settings_json || !*settings_json) return;
+
+    auto wrapper = static_cast<lt_session_wrapper*>(session);
+    lt::settings_pack pack;
+    const char* p = settings_json;
+
+    skip_json_ws(p);
+    if (*p != '{') return;
+    p++;
+
+    while (*p) {
+        skip_json_ws(p);
+        if (*p == '}') { p++; break; }
+        if (*p == ',') { p++; continue; }
+
+        // Parse key
+        if (*p != '"') break;
+        std::string key = parse_json_string(p);
+
+        skip_json_ws(p);
+        if (*p != ':') break;
+        p++;
+
+        skip_json_ws(p);
+
+        // Parse value
+        if (*p == '"') {
+            std::string val = parse_json_string(p);
+            apply_str_setting(pack, key, val);
+        } else if (*p == 't' || *p == 'f') {
+            bool val = (*p == 't');
+            while (*p && *p != ',' && *p != '}' && !std::isspace(static_cast<unsigned char>(*p))) p++;
+            apply_bool_setting(pack, key, val);
+        } else if (*p == '-' || std::isdigit(static_cast<unsigned char>(*p))) {
+            int64_t val = parse_json_int(p);
+            apply_int_setting(pack, key, static_cast<int>(val));
+        } else {
+            // Unknown value type, skip
+            while (*p && *p != ',' && *p != '}') p++;
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(wrapper->mutex);
+    wrapper->session->apply_settings(pack);
 }

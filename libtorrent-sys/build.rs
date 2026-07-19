@@ -21,7 +21,15 @@ fn main() {
         .file("wrapper/libtorrent_wrapper.cpp")
         .include("wrapper")
         .flag("-std=c++17")
-        .flag("-fexceptions");
+        .flag("-fexceptions")
+        .define("TORRENT_USE_OPENSSL", None)
+        .define("TORRENT_USE_LIBCRYPTO", None)
+        .define("TORRENT_SSL_PEERS", None)
+        .define("TORRENT_LINKING_SHARED", None)
+        .define("BOOST_ASIO_ENABLE_CANCELIO", None)
+        .define("BOOST_ASIO_NO_DEPRECATED", None)
+        .define("BOOST_SYSTEM_USE_UTF8", None)
+        .define("TORRENT_ABI_VERSION", "2");
 
     for include_path in libtorrent_cflags.include_paths.iter() {
         cpp_build.include(include_path);
