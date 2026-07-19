@@ -300,7 +300,9 @@ int lt_torrent_handle_is_valid(lt_torrent_handle_t handle) {
     return h->is_valid() ? 1 : 0;
 }
 
-int lt_torrent_handle_status(lt_torrent_handle_t handle, int* state, float* progress, uint64_t* total_done, uint64_t* total) {
+int lt_torrent_handle_status(lt_torrent_handle_t handle, int* state, float* progress, uint64_t* total_done, uint64_t* total,
+    int64_t* dl_rate, int64_t* ul_rate, int64_t* total_dl, int64_t* total_ul,
+    int32_t* peers, int32_t* seeds) {
     if (!handle || !state || !progress || !total_done || !total) return -1;
     
     auto h = static_cast<lt::torrent_handle*>(handle);
@@ -311,6 +313,12 @@ int lt_torrent_handle_status(lt_torrent_handle_t handle, int* state, float* prog
     *progress = status.progress;
     *total_done = static_cast<uint64_t>(status.total_done);
     *total = static_cast<uint64_t>(status.total);
+    if (dl_rate) *dl_rate = static_cast<int64_t>(status.download_rate);
+    if (ul_rate) *ul_rate = static_cast<int64_t>(status.upload_rate);
+    if (total_dl) *total_dl = static_cast<int64_t>(status.total_download);
+    if (total_ul) *total_ul = static_cast<int64_t>(status.total_upload);
+    if (peers) *peers = status.num_peers;
+    if (seeds) *seeds = status.num_seeds;
     return 0;
 }
 
@@ -812,4 +820,63 @@ void lt_session_apply_settings(lt_session_t session, const char* settings_json) 
 
     std::lock_guard<std::mutex> lock(wrapper->mutex);
     wrapper->session->apply_settings(pack);
+}
+
+// Include session_stats_alert header
+#include <libtorrent/session_stats.hpp>
+
+int lt_session_get_stats(lt_session_t session, lt_session_stats_t* stats, int32_t* status) {
+    if (!session || !stats) return -1;
+    
+    auto wrapper = static_cast<lt_session_wrapper*>(session);
+    
+    try {
+        // Post session stats request
+        wrapper->session->post_session_stats();
+        
+        // Wait for the session_stats_alert
+        auto start = std::chrono::steady_clock::now();
+        auto timeout = std::chrono::seconds(5);
+        
+        while (true) {
+            auto now = std::chrono::steady_clock::now();
+            if (now - start > timeout) {
+                return -1;
+            }
+            
+            std::vector<lt::alert*> alerts;
+            {
+                std::lock_guard<std::mutex> lock(wrapper->mutex);
+                wrapper->session->pop_alerts(&alerts);
+            }
+            
+            for (auto* alert : alerts) {
+                if (auto* sa = lt::alert_cast<lt::session_stats_alert>(alert)) {
+                    lt::span<std::int64_t const> counters = sa->counters();
+                    
+                    // Find metric indices by name
+                    lt::span<lt::stats_metric const> metrics = lt::session_stats_metrics();
+                    for (auto const& m : metrics) {
+                        int idx = m.value_index;
+                        if (idx < 0 || idx >= static_cast<int>(counters.size())) continue;
+                        
+                        std::string name(m.name);
+                        if (name == "net.recv_rate") stats->download_rate = counters[idx];
+                        else if (name == "net.sent_rate") stats->upload_rate = counters[idx];
+                        else if (name == "net.recv_bytes") stats->total_downloaded = counters[idx];
+                        else if (name == "net.sent_bytes") stats->total_uploaded = counters[idx];
+                        else if (name == "dht.dht_nodes") stats->dht_nodes = static_cast<int32_t>(counters[idx]);
+                        else if (name == "peer.num_peers_connected") stats->peers_connected = static_cast<int32_t>(counters[idx]);
+                        else if (name == "peer.num_peers_half_open") stats->half_open_connections = static_cast<int32_t>(counters[idx]);
+                    }
+                    if (status) *status = 0;
+                    return 0;
+                }
+            }
+            
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    } catch (const std::exception&) {
+        return -1;
+    }
 }
