@@ -88,6 +88,40 @@ impl Session {
         }
     }
 
+    pub fn add_torrent_with_custom_storage(
+        &mut self,
+        info: &crate::TorrentInfo,
+        piece_cache_dir: &Path,
+    ) -> TorrentResult<TorrentHandle> {
+        let piece_cache_dir_c = CString::new(piece_cache_dir.to_string_lossy().into_owned())
+            .map_err(|_| TorrentError::InvalidFile("Piece cache dir contains null byte".to_string()))?;
+
+        let mut error = libtorrent_sys::lt_error_t {
+            message: ptr::null(),
+            code: 0,
+        };
+
+        let handle = unsafe {
+            libtorrent_sys::lt_session_add_torrent_with_custom_storage(
+                self.inner,
+                info.inner,
+                piece_cache_dir_c.as_ptr(),
+                &mut error,
+            )
+        };
+
+        if handle.is_null() {
+            Err(unsafe { error_from_c(&error) })
+        } else {
+            let info_hash = hex::encode(info.info_hash()?);
+            Ok(TorrentHandle {
+                inner: handle,
+                info_hash,
+                session: self.inner,
+            })
+        }
+    }
+
     #[allow(dead_code)]
     pub fn remove_torrent(&mut self, handle: TorrentHandle, remove_files: bool) {
         unsafe {
