@@ -69,6 +69,11 @@ impl SeedingManager {
         }
 
         let handle = {
+            let mut session = self.session.lock().map_err(|_| TorrentError::Unknown {
+                code: -1,
+                message: "Session lock poisoned".to_string(),
+            })?;
+
             let custom_active = {
                 let flag = self.custom_storage_active.lock().map_err(|_| {
                     TorrentError::Unknown {
@@ -78,11 +83,6 @@ impl SeedingManager {
                 })?;
                 *flag
             };
-
-            let mut session = self.session.lock().map_err(|_| TorrentError::Unknown {
-                code: -1,
-                message: "Session lock poisoned".to_string(),
-            })?;
 
             if !custom_active {
                 // First seed: replace session with custom-storage session
