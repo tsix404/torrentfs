@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::cache::CacheManager;
 use crate::config::TorrentfsConfig;
 use crate::download::{Session, TorrentHandle, TorrentState};
 use crate::error::{TorrentError, TorrentResult};
@@ -137,6 +138,39 @@ impl SeedingManager {
         }
 
         Ok(())
+    }
+
+    /// Handle piece eviction notification from CacheManager.
+    /// Stops seeding for the affected torrent and logs the event.
+    pub fn handle_eviction(&self, info_hash: &str) {
+        tracing::info!(
+            "Eviction-triggered seeding removal: stopping seed for info_hash={}",
+            info_hash
+        );
+        match self.remove_seed(info_hash) {
+            Ok(()) => {
+                tracing::info!(
+                    "Successfully stopped seeding for info_hash={} after piece eviction",
+                    info_hash
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to stop seeding for info_hash={} after piece eviction: {:?}",
+                    info_hash,
+                    e
+                );
+            }
+        }
+    }
+
+    /// Register this SeedingManager as an eviction callback on the given CacheManager.
+    /// When CacheManager evicts pieces, handle_eviction will be called for affected infohashes.
+    pub fn register_eviction_callback(self: &Arc<Self>, cache: &mut CacheManager) {
+        let this = Arc::clone(self);
+        cache.on_evict(Box::new(move |info_hash: String| {
+            this.handle_eviction(&info_hash);
+        }));
     }
 
     pub fn update_seeding_status(&self) -> TorrentResult<Vec<SeedingInfo>> {

@@ -22,12 +22,14 @@ mod config;
 mod db;
 mod download;
 mod error;
+mod seeding;
 mod torrent_info;
 
 use cache::CacheManager;
 use config::TorrentfsConfig;
 use db::{Database, FileEntry, InsertTorrentResult};
 use download::DownloadManager;
+use seeding::SeedingManager;
 use torrent_info::TorrentInfo;
 
 const ROOT_INO: u64 = 1;
@@ -148,8 +150,16 @@ impl TorrentFs {
         }
 
         let download_manager = DownloadManager::new(cache_path.as_path(), config).ok();
-
         let cache_manager = CacheManager::new(&cache_path, 1024 * 1024 * 1024).ok();
+
+        // Register SeedingManager as eviction callback on the DownloadManager's CacheManager
+        if let Some(ref dm) = download_manager {
+            if let Ok(seeding) = SeedingManager::new(&cache_path, config) {
+                let seeding = std::sync::Arc::new(seeding);
+                dm.register_seeding_callback(seeding);
+                info!("SeedingManager registered as CacheManager eviction callback");
+            }
+        }
 
         Self {
             creation_time: Duration::from_secs(
