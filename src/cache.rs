@@ -15,7 +15,6 @@ pub struct PieceMetadata {
     pub hit_count: u64,
 }
 
-#[derive(Debug)]
 pub struct CacheManager {
     cache_dir: PathBuf,
     metadata: HashMap<String, PieceMetadata>,
@@ -23,6 +22,7 @@ pub struct CacheManager {
     current_size: u64,
     pub miss_count: u64,
     pub hit_count: u64,
+    evict_callbacks: Vec<Box<dyn Fn(String) + Send + Sync>>,
 }
 
 fn current_timestamp_ms() -> u64 {
@@ -48,6 +48,7 @@ impl CacheManager {
             current_size: 0,
             miss_count: 0,
             hit_count: 0,
+            evict_callbacks: Vec::new(),
         };
 
         manager.rebuild_index()?;
@@ -288,7 +289,16 @@ impl CacheManager {
         self.save_metadata_file()
     }
 
+    /// Register a callback that will be invoked when a piece is evicted.
+    /// The callback receives the info_hash of the affected torrent.
+    pub fn on_evict(&mut self, callback: Box<dyn Fn(String) + Send + Sync>) {
+        self.evict_callbacks.push(callback);
+    }
+
     pub fn evict_lru(&mut self) -> TorrentResult<()> {
+        let mut affected_infohashes: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
         while self.current_size > self.max_cache_size && !self.metadata.is_empty() {
             let oldest = self
                 .metadata
@@ -297,9 +307,20 @@ impl CacheManager {
                 .map(|(k, _)| k.clone());
 
             if let Some(piece_key) = oldest {
+                let info_hash = self.extract_info_hash(&piece_key).to_string();
                 self.remove_piece(&piece_key)?;
+                if info_hash != "unknown" {
+                    affected_infohashes.insert(info_hash);
+                }
             } else {
                 break;
+            }
+        }
+
+        // Notify registered callbacks about affected infohashes
+        for info_hash in &affected_infohashes {
+            for callback in &self.evict_callbacks {
+                callback(info_hash.clone());
             }
         }
 

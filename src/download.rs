@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use crate::cache::CacheManager;
 use crate::config::TorrentfsConfig;
 use crate::error::{error_from_c, TorrentError, TorrentResult};
+use crate::seeding::SeedingManager;
 
 pub struct Session {
     inner: libtorrent_sys::lt_session_t,
@@ -421,6 +422,17 @@ impl DownloadManager {
     #[allow(dead_code)]
     pub fn get_cache_manager(&self) -> Arc<Mutex<CacheManager>> {
         self.cache_manager.clone()
+    }
+
+    /// Register a SeedingManager to receive eviction callbacks from the CacheManager.
+    /// When CacheManager evicts cached pieces, the affected infohash will be sent to
+    /// the SeedingManager so it can stop seeding the corresponding torrent.
+    pub fn register_seeding_callback(&self, seeding: Arc<SeedingManager>) {
+        let mut cache = self
+            .cache_manager
+            .lock()
+            .expect("CacheManager lock poisoned");
+        seeding.register_eviction_callback(&mut cache);
     }
 
     /// Get session-level stats.
