@@ -138,6 +138,62 @@ cargo test
 cargo run --example torrent_info -- /path/to/file.torrent
 ```
 
+## Docker
+
+### Pull from GitHub Container Registry
+
+Pre-built images are available at [ghcr.io/tsix404/torrentfs](https://github.com/tsix404/torrentfs/pkgs/container/torrentfs).
+
+```bash
+# Pull the latest stable release
+docker pull ghcr.io/tsix404/torrentfs:latest
+
+# Pull the development build (latest main branch)
+docker pull ghcr.io/tsix404/torrentfs:dev
+
+# Pull a specific version
+docker pull ghcr.io/tsix404/torrentfs:v0.1.0
+```
+
+### Image Tags
+
+| Tag      | Description                                    |
+|----------|------------------------------------------------|
+| `dev`    | Latest push to `main` branch                   |
+| `latest` | Latest Git tag starting with `v*` (stable release) |
+| `vX.Y.Z` | Specific semver release                        |
+| `vX.Y`   | Minor version track (e.g., `v0.1`)            |
+
+### Build Locally
+
+```bash
+docker build -t torrentfs .
+```
+
+### Run with FUSE
+
+TorrentFS requires FUSE kernel access inside the container. Use the following flags when running:
+
+```bash
+# Create a mount point on the host
+mkdir -p /tmp/torrentfs
+
+# Run with FUSE support
+docker run --rm \
+  --cap-add SYS_ADMIN \
+  --device /dev/fuse \
+  -v /tmp/torrentfs:/mnt:shared \
+  ghcr.io/tsix404/torrentfs:latest
+```
+
+**Required flags:**
+
+- `--cap-add SYS_ADMIN` — grants the container capability to mount FUSE filesystems
+- `--device /dev/fuse` — passes the FUSE device into the container
+- `-v /host/path:/mnt:shared` — mounts a host directory for the virtual filesystem (use `:shared` for bidirectional access)
+
+> **Note:** On systems with AppArmor or SELinux, you may need additional security profiles. See your distribution's documentation for details.
+
 ## License
 
 MIT
