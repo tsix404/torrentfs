@@ -1515,9 +1515,10 @@ impl Filesystem for TorrentFs {
                     );
                 }
                 ".stats" => {
+                    let stats_size = self.generate_stats().len() as u64;
                     reply.entry(
                         &Duration::from_secs(1),
-                        &self.attr_for_file(STATS_INO, 0),
+                        &self.attr_for_file(STATS_INO, stats_size),
                         0,
                     );
                 }
@@ -1575,7 +1576,13 @@ impl Filesystem for TorrentFs {
             ROOT_INO => reply.attr(&Duration::from_secs(1), &self.attr_for_dir(ino, true)),
             METADATA_INO => reply.attr(&Duration::from_secs(1), &self.attr_for_dir(ino, true)),
             DATA_INO => reply.attr(&Duration::from_secs(1), &self.attr_for_dir(ino, false)),
-            STATS_INO => reply.attr(&Duration::from_secs(1), &self.attr_for_file(ino, 0)),
+            STATS_INO => {
+                let stats_size = self.generate_stats().len() as u64;
+                reply.attr(
+                    &Duration::from_secs(1),
+                    &self.attr_for_file(ino, stats_size),
+                );
+            }
             _ => {
                 if Self::is_data_ino(ino) {
                     if let Some(data_inode) = self.data_inodes.get(&ino) {
