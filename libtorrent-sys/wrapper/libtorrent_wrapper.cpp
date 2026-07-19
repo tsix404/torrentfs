@@ -11,6 +11,15 @@
 #include <libtorrent/alert_types.hpp>
 #include <libtorrent/torrent_flags.hpp>
 #include <libtorrent/settings_pack.hpp>
+#include <libtorrent/disk_interface.hpp>
+#include <libtorrent/disk_buffer_holder.hpp>
+#include <libtorrent/disk_observer.hpp>
+#include <libtorrent/hasher.hpp>
+#include <libtorrent/hex.hpp>
+#include <libtorrent/session_params.hpp>
+#include <libtorrent/peer_request.hpp>
+#include <libtorrent/storage_defs.hpp>
+#include <libtorrent/aux_/vector.hpp>
 #include <cstring>
 #include <cstdlib>
 #include <string>
@@ -21,6 +30,9 @@
 #include <chrono>
 #include <cctype>
 #include <map>
+#include <fstream>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 struct lt_error {
     std::string message;
@@ -878,5 +890,396 @@ int lt_session_get_stats(lt_session_t session, lt_session_stats_t* stats, int32_
         }
     } catch (const std::exception&) {
         return -1;
+    }
+}
+
+// ============================================================================
+// PieceStorage: per-torrent piece file storage backend
+// Stores piece data in cache/pieces/<info_hash>/piece:N format
+// ============================================================================
+
+namespace {
+
+std::string sha1_to_hex(lt::sha1_hash const& h) {
+    char hex[41];
+    lt::aux::to_hex({h.data(), 20}, hex);
+    return std::string(hex, 40);
+}
+
+void ensure_dir_recursive(const std::string& path) {
+    size_t pos = 0;
+    while (pos < path.size()) {
+        pos = path.find('/', pos + 1);
+        std::string sub = path.substr(0, pos);
+        if (!sub.empty()) {
+            mkdir(sub.c_str(), 0755);
+        }
+        if (pos == std::string::npos) break;
+    }
+}
+
+class PieceStorage {
+public:
+    PieceStorage(const std::string& base_path, const std::string& info_hash_hex)
+        : m_base_path(base_path), m_info_hash_hex(info_hash_hex)
+    {
+        ensure_dir_recursive(m_base_path + "/pieces/" + m_info_hash_hex);
+    }
+
+    std::string piece_path(int piece_index) const {
+        return m_base_path + "/pieces/" + m_info_hash_hex + "/piece:" + std::to_string(piece_index);
+    }
+
+    bool read_piece(int piece_index, int offset, char* buf, int size) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::string path = piece_path(piece_index);
+        std::ifstream file(path, std::ios::binary);
+        if (!file.is_open()) return false;
+        file.seekg(offset);
+        file.read(buf, size);
+        return file.good() || (file.eof() && file.gcount() > 0);
+    }
+
+    bool write_piece(int piece_index, int offset, const char* buf, int size) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        ensure_dir_recursive(m_base_path + "/pieces/" + m_info_hash_hex);
+        std::string path = piece_path(piece_index);
+        std::fstream file;
+        file.open(path, std::ios::binary | std::ios::in | std::ios::out);
+        if (!file.is_open()) {
+            file.open(path, std::ios::binary | std::ios::out);
+            if (!file.is_open()) return false;
+        }
+        file.seekp(offset);
+        file.write(buf, size);
+        if (!file.good()) return false;
+        file.close();
+        return true;
+    }
+
+    bool has_piece(int piece_index) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::string path = piece_path(piece_index);
+        std::ifstream file(path, std::ios::binary);
+        return file.is_open();
+    }
+
+    int64_t piece_size(int piece_index) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::string path = piece_path(piece_index);
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) return -1;
+        return static_cast<int64_t>(file.tellg());
+    }
+
+    lt::sha1_hash hash_piece(int piece_index, int piece_size) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::string path = piece_path(piece_index);
+        std::ifstream file(path, std::ios::binary);
+        if (!file.is_open()) return lt::sha1_hash();
+
+        lt::hasher h;
+        std::vector<char> buf(16 * 1024);
+        int remaining = piece_size;
+        while (remaining > 0) {
+            int to_read = std::min(remaining, static_cast<int>(buf.size()));
+            file.read(buf.data(), to_read);
+            int actual = static_cast<int>(file.gcount());
+            if (actual == 0) break;
+            h.update(buf.data(), actual);
+            remaining -= actual;
+        }
+        return h.final();
+    }
+
+    void delete_piece_files() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::string dir = m_base_path + "/pieces/" + m_info_hash_hex;
+        rmdir(dir.c_str());
+    }
+
+private:
+    std::string m_base_path;
+    std::string m_info_hash_hex;
+    mutable std::mutex m_mutex;
+};
+
+// ============================================================================
+// PieceStorageDiskIO: implements disk_interface for piece-level storage
+// ============================================================================
+
+class PieceStorageDiskIO : public lt::disk_interface, public lt::buffer_allocator_interface {
+public:
+    PieceStorageDiskIO(lt::io_context& ios, const std::string& piece_cache_dir)
+        : m_ios(ios), m_piece_cache_dir(piece_cache_dir)
+    {
+        ensure_dir_recursive(piece_cache_dir);
+    }
+
+    // buffer_allocator_interface
+    void free_disk_buffer(char* b) override {
+        std::free(b);
+    }
+    void free_multiple_buffers(lt::span<char*> bufs) override {
+        for (auto* b : bufs) std::free(b);
+    }
+
+    // disk_interface: new_torrent
+    lt::storage_holder new_torrent(lt::storage_params const& p,
+        std::shared_ptr<void> const& /*torrent*/) override
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::string info_hash_hex = sha1_to_hex(p.info_hash);
+        auto storage = std::make_unique<PieceStorage>(m_piece_cache_dir, info_hash_hex);
+        lt::storage_index_t idx = m_next_index;
+        ++m_next_index;
+        m_storages[idx] = std::move(storage);
+        return lt::storage_holder(idx, *this);
+    }
+
+    // disk_interface: remove_torrent
+    void remove_torrent(lt::storage_index_t idx) override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_storages.erase(idx);
+    }
+
+    // disk_interface: async_read
+    void async_read(lt::storage_index_t storage, lt::peer_request const& r,
+        std::function<void(lt::disk_buffer_holder, lt::storage_error const&)> handler,
+        lt::disk_job_flags_t /*flags*/) override
+    {
+        auto* ps = get_storage(storage);
+        if (!ps) {
+            handler(lt::disk_buffer_holder(),
+                lt::storage_error(lt::error_code(boost::system::errc::no_such_file_or_directory, boost::system::generic_category())));
+            return;
+        }
+
+        char* buf = static_cast<char*>(std::malloc(r.length));
+        if (!buf) {
+            handler(lt::disk_buffer_holder(),
+                lt::storage_error(lt::error_code(boost::system::errc::not_enough_memory, boost::system::generic_category())));
+            return;
+        }
+
+        if (ps->read_piece(static_cast<int>(r.piece), r.start, buf, r.length)) {
+            handler(lt::disk_buffer_holder(*this, buf), lt::storage_error());
+        } else {
+            std::memset(buf, 0, r.length);
+            handler(lt::disk_buffer_holder(*this, buf), lt::storage_error());
+        }
+    }
+
+    // disk_interface: async_write
+    bool async_write(lt::storage_index_t storage, lt::peer_request const& r,
+        char const* buf, std::shared_ptr<lt::disk_observer> /*o*/,
+        std::function<void(lt::storage_error const&)> handler,
+        lt::disk_job_flags_t /*flags*/) override
+    {
+        auto* ps = get_storage(storage);
+        if (!ps) {
+            handler(lt::storage_error(lt::error_code(boost::system::errc::no_such_file_or_directory, boost::system::generic_category())));
+            return false;
+        }
+
+        if (ps->write_piece(static_cast<int>(r.piece), r.start, buf, r.length)) {
+            handler(lt::storage_error());
+        } else {
+            handler(lt::storage_error(lt::error_code(boost::system::errc::io_error, boost::system::generic_category())));
+        }
+        return false;
+    }
+
+    // disk_interface: async_hash
+    void async_hash(lt::storage_index_t storage, lt::piece_index_t piece,
+        lt::span<lt::sha256_hash> /*v2*/,
+        lt::disk_job_flags_t /*flags*/,
+        std::function<void(lt::piece_index_t, lt::sha1_hash const&, lt::storage_error const&)> handler) override
+    {
+        auto* ps = get_storage(storage);
+        if (!ps) {
+            handler(piece, lt::sha1_hash(),
+                lt::storage_error(lt::error_code(boost::system::errc::no_such_file_or_directory, boost::system::generic_category())));
+            return;
+        }
+
+        int piece_idx = static_cast<int>(piece);
+        int64_t sz = ps->piece_size(piece_idx);
+        if (sz <= 0) {
+            handler(piece, lt::sha1_hash(),
+                lt::storage_error(lt::error_code(boost::system::errc::no_such_file_or_directory, boost::system::generic_category())));
+            return;
+        }
+
+        lt::sha1_hash hash = ps->hash_piece(piece_idx, static_cast<int>(sz));
+        handler(piece, hash, lt::storage_error());
+    }
+
+    // disk_interface: async_hash2
+    void async_hash2(lt::storage_index_t /*storage*/, lt::piece_index_t piece,
+        int /*offset*/, lt::disk_job_flags_t /*flags*/,
+        std::function<void(lt::piece_index_t, lt::sha256_hash const&, lt::storage_error const&)> handler) override
+    {
+        handler(piece, lt::sha256_hash(), lt::storage_error());
+    }
+
+    // disk_interface: async_move_storage
+    void async_move_storage(lt::storage_index_t /*storage*/, std::string /*p*/,
+        lt::move_flags_t /*flags*/,
+        std::function<void(lt::status_t, std::string const&, lt::storage_error const&)> handler) override
+    {
+        handler(lt::disk_status::fatal_disk_error, std::string(),
+            lt::storage_error(lt::error_code(boost::system::errc::not_supported, boost::system::generic_category())));
+    }
+
+    // disk_interface: async_release_files
+    void async_release_files(lt::storage_index_t /*storage*/,
+        std::function<void()> handler) override
+    {
+        if (handler) handler();
+    }
+
+    // disk_interface: async_check_files
+    void async_check_files(lt::storage_index_t /*storage*/,
+        lt::add_torrent_params const* /*resume_data*/,
+        lt::aux::vector<std::string, lt::file_index_t> /*links*/,
+        std::function<void(lt::status_t, lt::storage_error const&)> handler) override
+    {
+        handler(lt::status_t{}, lt::storage_error());
+    }
+
+    // disk_interface: async_stop_torrent
+    void async_stop_torrent(lt::storage_index_t /*storage*/,
+        std::function<void()> handler) override
+    {
+        if (handler) handler();
+    }
+
+    // disk_interface: async_rename_file
+    void async_rename_file(lt::storage_index_t /*storage*/,
+        lt::file_index_t /*index*/, std::string /*name*/,
+        std::function<void(std::string const&, lt::file_index_t, lt::storage_error const&)> handler) override
+    {
+        handler(std::string(), lt::file_index_t(0),
+            lt::storage_error(lt::error_code(boost::system::errc::not_supported, boost::system::generic_category())));
+    }
+
+    // disk_interface: async_delete_files
+    void async_delete_files(lt::storage_index_t storage,
+        lt::remove_flags_t /*options*/,
+        std::function<void(lt::storage_error const&)> handler) override
+    {
+        auto* ps = get_storage(storage);
+        if (ps) {
+            ps->delete_piece_files();
+        }
+        handler(lt::storage_error());
+    }
+
+    // disk_interface: async_set_file_priority
+    void async_set_file_priority(lt::storage_index_t /*storage*/,
+        lt::aux::vector<lt::download_priority_t, lt::file_index_t> prio,
+        std::function<void(lt::storage_error const&,
+            lt::aux::vector<lt::download_priority_t, lt::file_index_t>)> handler) override
+    {
+        handler(lt::storage_error(), std::move(prio));
+    }
+
+    // disk_interface: async_clear_piece
+    void async_clear_piece(lt::storage_index_t /*storage*/,
+        lt::piece_index_t /*index*/,
+        std::function<void(lt::piece_index_t)> handler) override
+    {
+        if (handler) handler(lt::piece_index_t(0));
+    }
+
+    // disk_interface: update_stats_counters
+    void update_stats_counters(lt::counters& /*c*/) const override {
+    }
+
+    // disk_interface: get_status
+    std::vector<lt::open_file_state> get_status(lt::storage_index_t) const override {
+        return {};
+    }
+
+    // disk_interface: abort
+    void abort(bool /*wait*/) override {
+    }
+
+    // disk_interface: submit_jobs
+    void submit_jobs() override {
+    }
+
+    // disk_interface: settings_updated
+    void settings_updated() override {
+    }
+
+private:
+    PieceStorage* get_storage(lt::storage_index_t idx) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_storages.find(idx);
+        if (it == m_storages.end()) return nullptr;
+        return it->second.get();
+    }
+
+    lt::io_context& m_ios;
+    std::string m_piece_cache_dir;
+    std::mutex m_mutex;
+    std::map<lt::storage_index_t, std::unique_ptr<PieceStorage>> m_storages;
+    lt::storage_index_t m_next_index{0};
+};
+
+} // anonymous namespace
+
+// ============================================================================
+// C API: lt_session_add_torrent_with_custom_storage
+// Creates a session with PieceStorageDiskIO and adds the torrent
+// ============================================================================
+
+lt_torrent_handle_t lt_session_add_torrent_with_custom_storage(
+    lt_session_t session, lt_torrent_info_t info,
+    const char* piece_cache_dir, lt_error_t* error)
+{
+    if (!session || !info) {
+        if (error) {
+            error->code = -1;
+            error->message = "Invalid session or torrent info";
+        }
+        return nullptr;
+    }
+
+    try {
+        auto wrapper = static_cast<lt_session_wrapper*>(session);
+        auto ti = static_cast<lt::torrent_info*>(info);
+
+        std::string cache_dir(piece_cache_dir ? piece_cache_dir : "/tmp/torrentfs-cache");
+
+        // Build session_params with custom disk_io_constructor
+        lt::session_params params;
+        params.disk_io_constructor = [cache_dir](lt::io_context& ios,
+            lt::settings_interface const&, lt::counters&) -> std::unique_ptr<lt::disk_interface> {
+            return std::make_unique<PieceStorageDiskIO>(ios, cache_dir);
+        };
+
+        // Replace the existing session with our custom-disk-io session
+        std::lock_guard<std::mutex> lock(wrapper->mutex);
+        delete wrapper->session;
+        wrapper->session = new lt::session(std::move(params));
+
+        // Add the torrent
+        lt::add_torrent_params atp;
+        atp.ti = std::make_shared<lt::torrent_info>(*ti);
+        atp.save_path = cache_dir;
+
+        auto handle = wrapper->session->add_torrent(atp);
+        return static_cast<lt_torrent_handle_t>(new lt::torrent_handle(handle));
+    } catch (const std::exception& e) {
+        if (error) {
+            error->code = -1;
+            static thread_local std::string err_msg;
+            err_msg = e.what();
+            error->message = err_msg.c_str();
+        }
+        return nullptr;
     }
 }
