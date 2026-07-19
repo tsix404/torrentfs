@@ -414,7 +414,6 @@ impl CacheManager {
 
 /// Per-info_hash aggregated cache statistics.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct InfohashCacheStats {
     pub info_hash: String,
     pub piece_count: u64,
