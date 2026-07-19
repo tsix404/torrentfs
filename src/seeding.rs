@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::config::TorrentfsConfig;
 use crate::download::{Session, TorrentHandle, TorrentState};
 use crate::error::{TorrentError, TorrentResult};
 
@@ -31,8 +32,8 @@ pub enum SeedingState {
 }
 
 impl SeedingManager {
-    pub fn new(cache_dir: &Path) -> TorrentResult<Self> {
-        let session = Session::new(None)?;
+    pub fn new(cache_dir: &Path, config: &TorrentfsConfig) -> TorrentResult<Self> {
+        let session = Session::new(config)?;
 
         Ok(Self {
             session: Arc::new(Mutex::new(session)),
@@ -235,17 +236,21 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn default_config() -> TorrentfsConfig {
+        TorrentfsConfig::default_config()
+    }
+
     #[test]
     fn test_seeding_manager_new() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = SeedingManager::new(temp_dir.path());
+        let manager = SeedingManager::new(temp_dir.path(), &default_config());
         assert!(manager.is_ok());
     }
 
     #[test]
     fn test_has_handle() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = SeedingManager::new(temp_dir.path()).unwrap();
+        let manager = SeedingManager::new(temp_dir.path(), &default_config()).unwrap();
 
         assert!(!manager.has_handle("nonexistent"));
     }
@@ -253,7 +258,7 @@ mod tests {
     #[test]
     fn test_is_seeding() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = SeedingManager::new(temp_dir.path()).unwrap();
+        let manager = SeedingManager::new(temp_dir.path(), &default_config()).unwrap();
 
         assert!(!manager.is_seeding("nonexistent"));
     }
@@ -261,7 +266,7 @@ mod tests {
     #[test]
     fn test_get_all_seeds() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = SeedingManager::new(temp_dir.path()).unwrap();
+        let manager = SeedingManager::new(temp_dir.path(), &default_config()).unwrap();
 
         let seeds = manager.get_all_seeds();
         assert!(seeds.is_empty());

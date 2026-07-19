@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::Path;
-use torrentfs::{download::DownloadManager, TorrentInfo};
+use torrentfs::{download::DownloadManager, TorrentInfo, TorrentfsConfig};
 
 fn main() {
     tracing_subscriber::fmt::init();
@@ -24,7 +24,8 @@ fn main() {
     let info_hash = hex::encode(info.info_hash().expect("Failed to get info hash"));
     println!("Info hash: {}", info_hash);
 
-    let mut dm = DownloadManager::new(&cache_dir).expect("Failed to create download manager");
+    let mut dm = DownloadManager::new(&cache_dir, &TorrentfsConfig::default_config())
+        .expect("Failed to create download manager");
 
     let torrent_cache_dir = cache_dir.join(&info_hash);
     fs::create_dir_all(&torrent_cache_dir).expect("Failed to create torrent cache dir");
