@@ -19,6 +19,7 @@
 #include <libtorrent/peer_request.hpp>
 #include <libtorrent/storage_defs.hpp>
 #include <libtorrent/aux_/vector.hpp>
+#include <libtorrent/version.hpp>
 #include <cstring>
 #include <cstdlib>
 #include <string>
@@ -1021,9 +1022,11 @@ public:
     void free_disk_buffer(char* b) override {
         std::free(b);
     }
+#if LIBTORRENT_VERSION_MINOR >= 1
     void free_multiple_buffers(lt::span<char*> bufs) override {
         for (auto* b : bufs) std::free(b);
     }
+#endif
 
     // disk_interface: new_torrent
     lt::storage_holder new_torrent(lt::storage_params const& p,
@@ -1064,11 +1067,19 @@ public:
         }
 
         if (ps->read_piece(static_cast<int>(r.piece), r.start, buf, r.length)) {
+#if LIBTORRENT_VERSION_MINOR >= 1
             handler(lt::disk_buffer_holder(*this, buf), lt::storage_error());
         } else {
             std::memset(buf, 0, r.length);
             handler(lt::disk_buffer_holder(*this, buf), lt::storage_error());
         }
+#else
+            handler(lt::disk_buffer_holder(*this, buf, static_cast<int>(r.length)), lt::storage_error());
+        } else {
+            std::memset(buf, 0, r.length);
+            handler(lt::disk_buffer_holder(*this, buf, static_cast<int>(r.length)), lt::storage_error());
+        }
+#endif
     }
 
     // disk_interface: async_write
@@ -1129,7 +1140,13 @@ public:
         lt::move_flags_t /*flags*/,
         std::function<void(lt::status_t, std::string const&, lt::storage_error const&)> handler) override
     {
-        handler(lt::disk_status::fatal_disk_error, std::string(),
+        handler(
+#if LIBTORRENT_VERSION_MINOR >= 1
+            lt::disk_status::fatal_disk_error,
+#else
+            lt::status_t(1),
+#endif
+            std::string(),
             lt::storage_error(lt::error_code(boost::system::errc::not_supported, boost::system::generic_category())));
     }
 
