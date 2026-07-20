@@ -326,6 +326,19 @@ impl TorrentHandle {
         unsafe { libtorrent_sys::lt_torrent_handle_have_piece(self.inner, piece_index) != 0 }
     }
 
+    /// Set a piece deadline to prioritize downloading this piece.
+    /// deadline_ms is the number of milliseconds until the piece is needed.
+    /// Higher priority pieces are requested before lower priority ones.
+    pub fn set_piece_deadline(&self, piece_index: i32, deadline_ms: i32) -> bool {
+        unsafe {
+            libtorrent_sys::lt_torrent_handle_set_piece_deadline(
+                self.inner,
+                piece_index,
+                deadline_ms,
+            ) == 0
+        }
+    }
+
     pub fn info_hash(&self) -> &str {
         &self.info_hash
     }
@@ -619,6 +632,19 @@ impl DownloadManager {
             "read_file_range: file_index={}, offset={}, size={}, start_piece={}, end_piece={}, num_pieces={}, piece_length={}",
             file_index, offset, size, start_piece, end_piece, num_pieces, piece_length
         );
+
+        // Read-triggered piece prioritization: set deadlines on the pieces
+        // needed for this read so they are prioritized over rarest-first selection.
+        // deadline_ms=0 means "as soon as possible" (highest priority).
+        for piece_idx in start_piece..=end_piece {
+            if !handle_guard.have_piece(piece_idx) {
+                tracing::debug!(
+                    "read_file_range: setting piece deadline for piece {} (read-triggered prioritization)",
+                    piece_idx
+                );
+                handle_guard.set_piece_deadline(piece_idx, 0);
+            }
+        }
 
         let piece_wait_timeout = std::time::Duration::from_secs(self.read_timeout_secs);
         for piece_idx in start_piece..=end_piece {

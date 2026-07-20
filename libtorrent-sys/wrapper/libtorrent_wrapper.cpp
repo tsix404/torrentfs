@@ -480,6 +480,20 @@ int lt_torrent_handle_have_piece(lt_torrent_handle_t handle, int piece_index) {
     return status.pieces[lt::piece_index_t(piece_index)] ? 1 : 0;
 }
 
+int lt_torrent_handle_set_piece_deadline(lt_torrent_handle_t handle, int piece_index, int deadline_ms) {
+    if (!handle) return -1;
+    
+    auto h = static_cast<lt::torrent_handle*>(handle);
+    if (!h->is_valid()) return -1;
+    
+    try {
+        h->set_piece_deadline(lt::piece_index_t(piece_index), deadline_ms);
+        return 0;
+    } catch (const std::exception&) {
+        return -1;
+    }
+}
+
 // Minimal JSON parser for flat settings objects
 // Handles: {"key1": "str", "key2": 123, "key3": true, "key4": false}
 static void skip_json_ws(const char*& p) {
