@@ -578,19 +578,6 @@ impl DownloadManager {
             status.num_seeds
         );
 
-        // Health check: if tracker returned 0 peers and 0 seeds,
-        // provide a clear error message instead of timing out silently.
-        if status.num_peers == 0 && status.num_seeds == 0 {
-            return Err(TorrentError::NoPeers(format!(
-                "Torrent has {} peers and {} seeds (progress: {:.2}%, state: {:?}). \
-                 The tracker may be unreachable or the torrent has no active peers.",
-                status.num_peers,
-                status.num_seeds,
-                status.progress * 100.0,
-                status.state
-            )));
-        }
-
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         let info_hash = handle_guard.info_hash().to_string();
@@ -632,6 +619,43 @@ impl DownloadManager {
             "read_file_range: file_index={}, offset={}, size={}, start_piece={}, end_piece={}, num_pieces={}, piece_length={}",
             file_index, offset, size, start_piece, end_piece, num_pieces, piece_length
         );
+
+        // Health check: if tracker returned 0 peers and 0 seeds, check whether
+        // all needed pieces are already cached on disk before giving up.
+        // If pieces are cached, we can serve the read without any peers.
+        if status.num_peers == 0 && status.num_seeds == 0 {
+            let all_cached = {
+                let cache = self
+                    .cache_manager
+                    .lock()
+                    .map_err(|_| TorrentError::Unknown {
+                        code: -1,
+                        message: "Cache lock poisoned".to_string(),
+                    })?;
+                let mut all_found = true;
+                for piece_idx in start_piece..=end_piece {
+                    let piece_key = Self::make_piece_key(&info_hash, piece_idx);
+                    if !cache.has_piece(&piece_key) && !cache.has_piece_on_disk(&piece_key) {
+                        all_found = false;
+                        break;
+                    }
+                }
+                all_found
+            };
+            if !all_cached {
+                return Err(TorrentError::NoPeers(format!(
+                    "Torrent has {} peers and {} seeds (progress: {:.2}%, state: {:?}). \
+                     The tracker may be unreachable or the torrent has no active peers.",
+                    status.num_peers,
+                    status.num_seeds,
+                    status.progress * 100.0,
+                    status.state
+                )));
+            }
+            tracing::debug!(
+                "read_file_range: no peers but all needed pieces are cached on disk, proceeding"
+            );
+        }
 
         // Read-triggered piece prioritization: set deadlines on the pieces
         // needed for this read so they are prioritized over rarest-first selection.
