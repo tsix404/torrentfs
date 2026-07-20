@@ -1,13 +1,16 @@
 # Stage 1: Build
-FROM rust:1-bookworm AS builder
+FROM archlinux:latest AS builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libfuse3-dev \
-    libtorrent-rasterbar-dev \
-    libssl-dev \
-    libclang-dev \
-    pkg-config \
-    && rm -rf /var/lib/apt/lists/*
+RUN pacman -Syu --noconfirm && pacman -S --noconfirm \
+    rust \
+    fuse3 \
+    libtorrent-rasterbar \
+    boost \
+    openssl \
+    clang \
+    pkgconf \
+    gcc \
+    && pacman -Scc --noconfirm
 
 WORKDIR /app
 
@@ -22,14 +25,14 @@ COPY libtorrent-sys/ libtorrent-sys/
 RUN cargo build --release
 
 # Stage 2: Runtime
-FROM debian:bookworm-slim
+FROM archlinux:latest
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libfuse3-3 \
-    libtorrent-rasterbar2.0 \
-    libssl3 \
+RUN pacman -Syu --noconfirm && pacman -S --noconfirm \
+    fuse3 \
+    libtorrent-rasterbar \
+    openssl \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && pacman -Scc --noconfirm
 
 # Create non-root user for running the FUSE mount
 RUN useradd -m -s /bin/bash torrentfs
