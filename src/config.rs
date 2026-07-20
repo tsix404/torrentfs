@@ -391,6 +391,10 @@ pub struct TimeoutsConfig {
     pub tracker_completion_timeout: Option<i64>,
     pub tracker_receive_timeout: Option<i64>,
     pub inactivity_timeout: Option<i64>,
+    /// Timeout in seconds for waiting on torrent state transitions and piece downloads
+    /// during FUSE read operations. Defaults to 30s if not set.
+    /// This is a torrentfs-level timeout, not passed to libtorrent.
+    pub read_timeout_secs: Option<i64>,
 }
 
 impl WriteJson for TimeoutsConfig {

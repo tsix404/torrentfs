@@ -26,6 +26,7 @@ pub struct DownloadManager {
     cache_dir: String,
     cache_manager: Arc<Mutex<CacheManager>>,
     custom_storage_active: bool,
+    read_timeout_secs: u64,
 }
 
 impl Session {
@@ -412,12 +413,19 @@ impl DownloadManager {
 
         let cache_manager = CacheManager::new(cache_dir, 1024 * 1024 * 1024)?;
 
+        let read_timeout_secs = config
+            .timeouts
+            .read_timeout_secs
+            .map(|v| if v > 0 { v as u64 } else { 30 })
+            .unwrap_or(30);
+
         Ok(DownloadManager {
             session: Arc::new(Mutex::new(session)),
             handles: HashMap::new(),
             cache_dir: cache_dir_str,
             cache_manager: Arc::new(Mutex::new(cache_manager)),
             custom_storage_active: false,
+            read_timeout_secs,
         })
     }
 
@@ -523,9 +531,9 @@ impl DownloadManager {
             status.progress * 100.0
         );
 
-        // Wait up to 30s for CheckingFiles/re-verification to complete.
-        // The previous 10s timeout was too short for cached torrents after restart.
-        let max_wait_secs = 30;
+        // Wait up to read_timeout_secs for CheckingFiles/re-verification to complete.
+        // Configurable via [timeouts] read_timeout_secs in config.toml.
+        let max_wait_secs = self.read_timeout_secs;
         let start = std::time::Instant::now();
         while matches!(
             status.state,
@@ -597,7 +605,7 @@ impl DownloadManager {
             file_index, offset, size, start_piece, end_piece, num_pieces, piece_length
         );
 
-        let piece_wait_timeout = std::time::Duration::from_secs(30);
+        let piece_wait_timeout = std::time::Duration::from_secs(self.read_timeout_secs);
         for piece_idx in start_piece..=end_piece {
             if !handle_guard.have_piece(piece_idx) {
                 tracing::debug!(
