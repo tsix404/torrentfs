@@ -649,6 +649,7 @@ impl DownloadManager {
         let piece_wait_timeout = std::time::Duration::from_secs(self.read_timeout_secs);
         for piece_idx in start_piece..=end_piece {
             if !handle_guard.have_piece(piece_idx) {
+                let piece_key = Self::make_piece_key(&info_hash, piece_idx);
                 tracing::debug!(
                     "read_file_range: piece {} not available, waiting for download...",
                     piece_idx
@@ -675,6 +676,25 @@ impl DownloadManager {
                             piece_wait_start.elapsed().as_secs_f64()
                         );
                         break;
+                    }
+                    // If the piece is already in the local disk cache (e.g. from a
+                    // previous run), skip the download wait and read from cache.
+                    {
+                        let cache = self
+                            .cache_manager
+                            .lock()
+                            .map_err(|_| TorrentError::Unknown {
+                                code: -1,
+                                message: "Cache lock poisoned".to_string(),
+                            })?;
+                        if cache.has_piece(&piece_key) {
+                            tracing::debug!(
+                                "read_file_range: piece {} found in cache, breaking wait after {:.1}s",
+                                piece_idx,
+                                piece_wait_start.elapsed().as_secs_f64()
+                            );
+                            break;
+                        }
                     }
                 }
             }
