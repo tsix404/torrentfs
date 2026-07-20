@@ -550,10 +550,25 @@ impl DownloadManager {
         }
 
         tracing::debug!(
-            "read_file_range: final torrent state = {:?}, progress = {:.2}%",
+            "read_file_range: final torrent state = {:?}, progress = {:.2}%, peers = {}, seeds = {}",
             status.state,
-            status.progress * 100.0
+            status.progress * 100.0,
+            status.num_peers,
+            status.num_seeds
         );
+
+        // Health check: if tracker returned 0 peers and 0 seeds,
+        // provide a clear error message instead of timing out silently.
+        if status.num_peers == 0 && status.num_seeds == 0 {
+            return Err(TorrentError::NoPeers(format!(
+                "Torrent has {} peers and {} seeds (progress: {:.2}%, state: {:?}). \
+                 The tracker may be unreachable or the torrent has no active peers.",
+                status.num_peers,
+                status.num_seeds,
+                status.progress * 100.0,
+                status.state
+            )));
+        }
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -609,10 +624,13 @@ impl DownloadManager {
                     if piece_wait_start.elapsed() >= piece_wait_timeout {
                         status = handle_guard.status()?;
                         return Err(TorrentError::InvalidFile(format!(
-                            "Timed out waiting for piece {} after {:.0}s. Torrent progress: {:.2}%",
+                            "Timed out waiting for piece {} after {:.0}s. \
+                             Torrent progress: {:.2}%, peers: {}, seeds: {}",
                             piece_idx,
                             piece_wait_timeout.as_secs(),
-                            status.progress * 100.0
+                            status.progress * 100.0,
+                            status.num_peers,
+                            status.num_seeds
                         )));
                     }
                     std::thread::sleep(std::time::Duration::from_millis(200));
