@@ -1088,7 +1088,12 @@ impl TorrentFs {
                     Ok(data)
                 }
                 Err(e) => {
-                    error!("Failed to read from BitTorrent network: {:?}", e);
+                    warn!(
+                        "Failed to read from BitTorrent network: {}. \
+                         The torrent may have no active peers/seeds. \
+                         Check tracker health with `cat .stats`.",
+                        e
+                    );
                     Err(EIO)
                 }
             }
@@ -1401,6 +1406,13 @@ impl TorrentFs {
                             num_peers,
                             num_seeds
                         ));
+
+                        // Health warning: 0 peers and 0 seeds
+                        if num_peers == 0 && num_seeds == 0 {
+                            output.push_str(
+                                "      ⚠ 健康警告: 0 peers / 0 seeds — tracker 可能无响应或种子无活跃节点\n",
+                            );
+                        }
 
                         output.push_str(&format!(
                             "      source_path: \"{}\"                       info_hash: {}...\n",
