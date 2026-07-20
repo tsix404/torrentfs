@@ -678,7 +678,10 @@ impl DownloadManager {
                         break;
                     }
                     // If the piece is already in the local disk cache (e.g. from a
-                    // previous run), skip the download wait and read from cache.
+                    // previous run, or from libtorrent custom storage), skip the
+                    // download wait and read from cache. Check both the in-memory
+                    // metadata AND the filesystem — cache_metadata.txt may be
+                    // empty (e.g. after a crash) even though the piece file exists.
                     {
                         let cache = self
                             .cache_manager
@@ -687,10 +690,12 @@ impl DownloadManager {
                                 code: -1,
                                 message: "Cache lock poisoned".to_string(),
                             })?;
-                        if cache.has_piece(&piece_key) {
+                        if cache.has_piece(&piece_key) || cache.has_piece_on_disk(&piece_key) {
                             tracing::debug!(
-                                "read_file_range: piece {} found in cache, breaking wait after {:.1}s",
+                                "read_file_range: piece {} found in cache (metadata={}, on_disk={}), breaking wait after {:.1}s",
                                 piece_idx,
+                                cache.has_piece(&piece_key),
+                                cache.has_piece_on_disk(&piece_key),
                                 piece_wait_start.elapsed().as_secs_f64()
                             );
                             break;
@@ -753,6 +758,32 @@ impl DownloadManager {
                         }
                         data
                     }
+                } else if cache.has_piece_on_disk(&piece_key) {
+                    // Piece exists on disk (e.g. from libtorrent custom storage
+                    // or from a previous run) but is not registered in the
+                    // in-memory metadata. Read it directly from the filesystem
+                    // and register it so future reads hit the fast path.
+                    let piece_path = cache.piece_path(&piece_key);
+                    let data = std::fs::read(&piece_path).map_err(|e| {
+                        TorrentError::IoError(format!(
+                            "Failed to read cached piece {} from disk: {}",
+                            piece_key, e
+                        ))
+                    })?;
+                    tracing::debug!(
+                        "read_file_range: piece {} read from disk (not in metadata), size={}",
+                        piece_idx,
+                        data.len()
+                    );
+                    // Register the piece in metadata so future reads hit the fast path
+                    if let Err(e) = cache.add_piece(&piece_key, data.len() as u64) {
+                        tracing::warn!(
+                            "Failed to register on-disk piece {} in cache metadata: {:?}",
+                            piece_key,
+                            e
+                        );
+                    }
+                    data
                 } else {
                     drop(cache);
                     let data = handle_guard.read_piece(&session, piece_idx)?;

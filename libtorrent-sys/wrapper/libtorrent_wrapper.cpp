@@ -942,7 +942,7 @@ public:
     }
 
     std::string piece_path(int piece_index) const {
-        return m_base_path + "/pieces/" + m_info_hash_hex + "/piece:" + std::to_string(piece_index);
+        return m_base_path + "/pieces/" + m_info_hash_hex + "/" + m_info_hash_hex + ":piece:" + std::to_string(piece_index);
     }
 
     bool read_piece(int piece_index, int offset, char* buf, int size) {
