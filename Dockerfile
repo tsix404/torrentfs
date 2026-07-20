@@ -69,6 +69,9 @@ RUN ldconfig
 # Create non-root user for running the FUSE mount
 RUN useradd -m -s /bin/bash torrentfs
 
+# Enable user_allow_other in FUSE config so allow_other mount option works
+RUN echo "user_allow_other" >> /etc/fuse.conf
+
 COPY --from=builder /app/target/release/torrentfs /usr/local/bin/torrentfs
 
 # Default mount point
