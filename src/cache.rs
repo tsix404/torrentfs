@@ -378,6 +378,15 @@ impl CacheManager {
         self.metadata.contains_key(piece_key)
     }
 
+    /// Check if a piece file exists on disk, regardless of whether it is
+    /// registered in the in-memory metadata. This is critical for the case
+    /// where libtorrent's custom storage has written a piece to disk but the
+    /// cache_metadata.txt has not been updated yet (e.g. during active download,
+    /// or after a crash that left cache_metadata.txt empty).
+    pub fn has_piece_on_disk(&self, piece_key: &str) -> bool {
+        self.piece_path(piece_key).exists()
+    }
+
     #[allow(dead_code)]
     pub fn current_size(&self) -> u64 {
         self.current_size
