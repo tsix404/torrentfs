@@ -57,9 +57,13 @@ FROM debian:bookworm-slim
 # Minimal runtime dependencies only (no libtorrent-rasterbar2.0 package)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libfuse3-3 \
+    fuse3 \
     libssl3 \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Enable user_allow_other for FUSE mounts
+RUN echo "user_allow_other" >> /etc/fuse.conf
 
 # Copy libtorrent 2.1.0 and Boost 1.86 shared libs from builder
 COPY --from=builder /usr/local/lib/libtorrent-rasterbar.so* /usr/local/lib/
