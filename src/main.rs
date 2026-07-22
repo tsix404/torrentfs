@@ -3,7 +3,7 @@ use fuser::{
     FileAttr, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
     ReplyEntry, ReplyOpen, ReplyWrite, Request,
 };
-use libc::{EACCES, EEXIST, EFBIG, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY};
+use libc::{EACCES, EEXIST, EFBIG, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY, EROFS};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -2118,6 +2118,11 @@ impl Filesystem for TorrentFs {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
+        if ino == STATS_INO {
+            reply.error(EROFS);
+            return;
+        }
+
         if let Some(inode_data) = self.inodes.get_mut(&ino) {
             if let InodeData::File {
                 data: ref mut file_data,
