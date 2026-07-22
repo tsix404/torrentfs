@@ -2285,8 +2285,21 @@ impl Filesystem for TorrentFs {
             }
         };
 
-        // Check if target already exists
-        if self.find_child_by_name(newparent, &newname_str).is_some() {
+        // Check if target already exists.
+        // If the target is the source itself (self-rename), treat as a no-op success.
+        // This is POSIX-compliant: rename(a, a) should succeed.
+        // mv(1) normally catches this pre-rename, but under FUSE inode caching
+        // or duplicate info_hash edge cases the kernel may issue a self-rename
+        // that triggers a confusing "are the same file" error if we reject it.
+        if let Some(target_ino) = self.find_child_by_name(newparent, &newname_str) {
+            if target_ino == source_ino {
+                info!(
+                    "Self-rename detected for '{}' (ino={}), treating as no-op",
+                    name_str, source_ino
+                );
+                reply.ok();
+                return;
+            }
             error!("Target file already exists: {}", newname_str);
             reply.error(EEXIST);
             return;
