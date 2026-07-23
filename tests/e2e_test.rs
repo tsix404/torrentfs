@@ -98,3 +98,79 @@ fn test_read_file_range_with_local_seed() {
         }
     }
 }
+
+/// Integration test: verify that read_file_range works end-to-end with
+/// a local tracker + seeder (TestHarness). This validates the full
+/// peer-discovery-and-download flow required by acceptance scenario 4.
+#[test]
+fn test_read_file_range_with_test_harness() {
+    // Use the test infrastructure module
+    #[path = "common/mod.rs"]
+    mod common;
+
+    let harness = common::TestHarness::new();
+
+    println!(
+        "Tracker: {}, announces: {}",
+        harness.tracker.announce_url(),
+        harness.tracker.announce_count()
+    );
+
+    let info_hash = hex::encode(
+        harness
+            .info
+            .info_hash()
+            .expect("Failed to get info hash"),
+    );
+    println!("Info hash: {}", info_hash);
+
+    // Create a downloader session using DownloadManager with local test config
+    let config = common::local_test_config();
+    let cache_dir =
+        tempfile::TempDir::new().expect("Failed to create cache dir");
+
+    let mut dm = torrentfs::download::DownloadManager::new(
+        cache_dir.path(),
+        &config,
+    )
+    .expect("Failed to create DownloadManager");
+
+    // Re-parse torrent data (raw pointer in TorrentInfo can't be shared)
+    let dl_info = torrentfs::TorrentInfo::from_bytes(harness.torrent_data.clone())
+        .expect("Failed to parse torrent for downloader");
+
+    println!("Downloader: attempting read_file_range...");
+
+    // read_file_range triggers the full flow: get_or_create_handle →
+    // wait for state → peer discovery → download → serve data
+    let read_start = std::time::Instant::now();
+    let result = dm.read_file_range(&dl_info, 0, 0, 162);
+
+    match result {
+        Ok(data) => {
+            let elapsed = read_start.elapsed();
+            println!(
+                "Successfully read {} bytes in {:.1}s",
+                data.len(),
+                elapsed.as_secs_f64()
+            );
+            assert!(!data.is_empty(), "Expected non-empty data");
+            assert_eq!(
+                data.as_slice(),
+                &harness.file_content[..],
+                "Downloaded data doesn't match seed content"
+            );
+        }
+        Err(e) => {
+            panic!(
+                "read_file_range failed: {:?}. \
+                 Tracker announces: {}. \
+                 This test requires a functioning local tracker + seeder.",
+                e,
+                harness.tracker.announce_count()
+            );
+        }
+    }
+
+    println!("=== read_file_range with TestHarness passed! ===");
+}
