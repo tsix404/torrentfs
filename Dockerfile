@@ -48,10 +48,15 @@ COPY libtorrent-sys/Cargo.toml libtorrent-sys/
 # Copy all source and build
 COPY src/ src/
 COPY libtorrent-sys/ libtorrent-sys/
+COPY tests/ tests/
 
 RUN cargo build --release
 
-# Stage 2: Runtime
+# Stage 2: Test — runs unit/integration tests (no FUSE required)
+FROM builder AS test
+RUN cargo test --no-fail-fast
+
+# Stage 3: Runtime
 FROM debian:bookworm-slim
 
 # Minimal runtime dependencies only (no libtorrent-rasterbar2.0 package)
@@ -71,7 +76,8 @@ COPY --from=builder /usr/local/lib/libboost_*.so* /usr/local/lib/
 RUN ldconfig
 
 # Create non-root user for running the FUSE mount
-RUN useradd -m -s /bin/bash torrentfs
+RUN useradd -m -s /bin/bash torrentfs && \
+    usermod -aG fuse torrentfs
 
 COPY --from=builder /app/target/release/torrentfs /usr/local/bin/torrentfs
 
