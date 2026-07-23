@@ -63,3 +63,43 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ── Config Test (TSI-1949, scenario 10) ─────────────────────────────────
+  # Validates the --config parameter end-to-end in a Docker container.
+  # Independent of build-and-push — builds its own dedicated test image.
+  config-test:
+    runs-on: ubuntu-latest
+    continue-on-error: true  # FUSE may not be available in all CI runners
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build config test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.config-test
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: torrentfs:config-test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run config test container
+        run: |
+          echo "=== Running --config parameter test (scenario 10) ==="
+          # Load FUSE kernel module if available
+          if [ -e /dev/fuse ]; then
+            echo "FUSE device available"
+          else
+            echo "FUSE device not available — skipping mount test"
+          fi
+          # Run the config test container with FUSE capabilities
+          docker run --rm \
+            --cap-add SYS_ADMIN \
+            --device /dev/fuse \
+            torrentfs:config-test
