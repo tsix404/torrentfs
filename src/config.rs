@@ -692,6 +692,7 @@ impl WriteJson for MiscConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile;
 
     #[test]
     fn test_default_config_is_empty_json() {
@@ -737,5 +738,87 @@ enabled = true
         assert!(json.contains("200"));
         assert!(json.contains("enable_dht"));
         assert!(json.contains("true"));
+    }
+
+    #[test]
+    fn test_config_from_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[connections]
+listen_interfaces = "0.0.0.0:6881"
+max_connections = 200
+
+[timeouts]
+read_timeout_secs = 60
+
+[local_discovery]
+lsd_enabled = false
+"#,
+        )
+        .unwrap();
+
+        let config = TorrentfsConfig::from_file(&config_path).unwrap();
+        assert_eq!(
+            config.connections.listen_interfaces,
+            Some("0.0.0.0:6881".to_string())
+        );
+        assert_eq!(config.connections.max_connections, Some(200));
+        assert_eq!(config.timeouts.read_timeout_secs, Some(60));
+        assert_eq!(config.local_discovery.lsd_enabled, Some(false));
+
+        // Verify JSON output includes the settings
+        let json = config.to_settings_json();
+        assert!(json.contains("listen_interfaces"));
+        assert!(json.contains("max_connections"));
+        assert!(json.contains("enable_lsd")); // false → still written as key
+    }
+
+    #[test]
+    fn test_config_from_file_nonexistent() {
+        let result = TorrentfsConfig::from_file(std::path::Path::new("/nonexistent/config.toml"));
+        assert!(result.is_err());
+        match result {
+            Err(TorrentError::ParseError(_)) => {} // ParseError wraps IO errors for config
+            Err(e) => panic!("Expected ParseError, got {:?}", e),
+            Ok(_) => panic!("Expected error"),
+        }
+    }
+
+    #[test]
+    fn test_config_from_file_invalid_toml() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config_path = dir.path().join("invalid.toml");
+        std::fs::write(&config_path, "this is not valid toml {{{").unwrap();
+
+        let result = TorrentfsConfig::from_file(&config_path);
+        assert!(result.is_err());
+        match result {
+            Err(TorrentError::ParseError(_)) => {}
+            Err(e) => panic!("Expected ParseError, got {:?}", e),
+            Ok(_) => panic!("Expected error"),
+        }
+    }
+
+    #[test]
+    fn test_read_timeout_config() {
+        // Default: read_timeout_secs not set → defaults to 30
+        let default_config = TorrentfsConfig::default_config();
+        let timeout = default_config
+            .timeouts
+            .read_timeout_secs
+            .map(|v| if v > 0 { v as u64 } else { 30 })
+            .unwrap_or(30);
+        assert_eq!(timeout, 30);
+
+        // Custom timeout
+        let toml_str = r#"
+[timeouts]
+read_timeout_secs = 10
+"#;
+        let config: TorrentfsConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.timeouts.read_timeout_secs, Some(10));
     }
 }
