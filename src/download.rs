@@ -620,7 +620,40 @@ impl DownloadManager {
             file_index, offset, size, start_piece, end_piece, num_pieces, piece_length
         );
 
-        // Health check: if tracker returned 0 peers and 0 seeds, check whether
+        // Peer discovery wait: when there are 0 peers and 0 seeds after the
+        // initial state check, the tracker may not have responded yet.
+        // Wait a short period for peers to be discovered before giving up.
+        // This is critical for acceptance testing with local trackers where
+        // the seeder may have announced just before the downloader connects.
+        if status.num_peers == 0 && status.num_seeds == 0 {
+            let peer_wait_start = std::time::Instant::now();
+            let peer_wait_timeout = std::time::Duration::from_secs(
+                std::cmp::min(self.read_timeout_secs, 10)
+            );
+            loop {
+                if peer_wait_start.elapsed() >= peer_wait_timeout {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                match handle_guard.status() {
+                    Ok(s) => {
+                        status = s;
+                        if status.num_peers > 0 || status.num_seeds > 0 {
+                            tracing::debug!(
+                                "read_file_range: peers discovered after {:.1}s (peers={}, seeds={})",
+                                peer_wait_start.elapsed().as_secs_f64(),
+                                status.num_peers,
+                                status.num_seeds
+                            );
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+
+        // Health check: if still 0 peers and 0 seeds, check whether
         // all needed pieces are already cached on disk before giving up.
         // If pieces are cached, we can serve the read without any peers.
         if status.num_peers == 0 && status.num_seeds == 0 {
