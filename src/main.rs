@@ -1595,7 +1595,7 @@ impl Filesystem for TorrentFs {
 
     fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         match ino {
-            ROOT_INO => reply.attr(&Duration::from_secs(1), &self.attr_for_dir(ino, true)),
+            ROOT_INO => reply.attr(&Duration::from_secs(1), &self.attr_for_dir(ino, false)),
             METADATA_INO => reply.attr(&Duration::from_secs(1), &self.attr_for_dir(ino, true)),
             DATA_INO => reply.attr(&Duration::from_secs(1), &self.attr_for_dir(ino, false)),
             STATS_INO => {
